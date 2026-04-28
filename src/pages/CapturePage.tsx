@@ -7,6 +7,7 @@ import {
   getDraftEntities,
   persistCaptureDraft,
 } from '@/lib/capture';
+import { extractCaptureDraft } from '@/lib/ai/captureClient';
 import type { EntityType, RelationshipType, Scene, TaskStatus } from '@/types';
 
 const entityTypes: EntityType[] = ['person', 'project', 'event', 'topic'];
@@ -55,19 +56,38 @@ export function CapturePage() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [lastSave, setLastSave] = useState<SaveResult | null>(null);
+  const [extractError, setExtractError] = useState<string | null>(null);
+  const [providerLabel, setProviderLabel] = useState<string | null>(null);
 
   const draftEntities = useMemo(() => (draft ? getDraftEntities(draft) : []), [draft]);
 
-  function handleOrganize() {
+  async function handleOrganize() {
     const trimmed = content.trim();
     if (!trimmed) return;
 
     setIsProcessing(true);
     setLastSave(null);
-    window.setTimeout(() => {
-      setDraft(createLocalCaptureDraft(trimmed));
+    setExtractError(null);
+    setProviderLabel(null);
+
+    try {
+      const result = await extractCaptureDraft(trimmed);
+      setDraft(result.draft);
+      setProviderLabel(`${result.provider} · ${result.model}`);
+    } catch (error) {
+      setDraft(null);
+      setExtractError(error instanceof Error ? error.message : 'AI 提取失败');
+    } finally {
       setIsProcessing(false);
-    }, 250);
+    }
+  }
+
+  function handleLocalFallback() {
+    const trimmed = content.trim();
+    if (!trimmed) return;
+    setDraft(createLocalCaptureDraft(trimmed));
+    setProviderLabel('local mock');
+    setExtractError(null);
   }
 
   async function handleSave() {
@@ -136,6 +156,14 @@ export function CapturePage() {
               已保存：{lastSave.entities} 个实体、{lastSave.relationships} 条关系、{lastSave.tasks} 个任务。
             </p>
           ) : null}
+          {extractError ? (
+            <div className="mt-4 rounded-[10px] border border-[#fecaca] bg-[#fff5f5] px-3 py-2 text-sm leading-6 text-[#b42318]">
+              <p>MiniMax 提取失败：{extractError}</p>
+              <button type="button" onClick={handleLocalFallback} className="mt-2 text-[#155eef]">
+                使用本地 mock 继续测试页面
+              </button>
+            </div>
+          ) : null}
         </section>
 
         <section className="rounded-[12px] border border-[#e5e5e4] bg-white p-5">
@@ -145,7 +173,7 @@ export function CapturePage() {
               <h2 className="mt-2 text-xl font-semibold text-[#1f2937]">结构化建议</h2>
             </div>
             <span className="rounded-full border border-[#d9d9d6] px-3 py-1 text-xs text-[#626965]">
-              保存前可编辑
+              {providerLabel ?? '保存前可编辑'}
             </span>
           </div>
 
