@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { Link, useParams } from 'react-router';
+import { RelationshipGraph } from '@/components/wiki/RelationshipGraph';
 import { updateEntity, db } from '@/lib/db';
 import type { Entity, EntityType } from '@/types';
 
@@ -69,6 +70,10 @@ export function EntityPage() {
         返回知识库
       </Link>
       <EntityEditor entity={entity} />
+
+      <div className="mt-5">
+        <RelationshipGraph centerEntity={entity} relationships={relationships} entities={allEntities} />
+      </div>
 
       <div className="mt-5 grid gap-5 md:grid-cols-2">
         <section className="rounded-[12px] border border-[#e5e5e4] bg-white">

@@ -15,3 +15,57 @@
 body {
   margin: 0;
 }
+
+.mywiki-graph-link {
+  stroke: #cfd5d1;
+  stroke-width: 0.45;
+  stroke-dasharray: 2.5 4.5;
+  animation: mywiki-graph-flow 4s linear infinite;
+}
+
+.mywiki-graph-edge-label {
+  fill: #8a908b;
+  font-size: 2.5px;
+  letter-spacing: 0;
+  paint-order: stroke;
+  stroke: #fbfbfa;
+  stroke-width: 0.8;
+}
+
+.mywiki-graph-node {
+  cursor: pointer;
+  transition: opacity 160ms ease, transform 160ms ease;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.mywiki-graph-node:hover {
+  transform: scale(1.08);
+}
+
+.mywiki-graph-node-center circle {
+  filter: drop-shadow(0 0 5px rgb(21 94 239 / 0.28));
+}
+
+.mywiki-graph-label {
+  fill: #6f766f;
+  font-size: 3px;
+  letter-spacing: 0;
+  paint-order: stroke;
+  pointer-events: none;
+  stroke: #fbfbfa;
+  stroke-width: 1.2;
+}
+
+.mywiki-graph-node-link {
+  text-decoration: none;
+}
+
+@keyframes mywiki-graph-flow {
+  from {
+    stroke-dashoffset: 18;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}

@@ -4,7 +4,7 @@ import { Link } from 'react-router';
 import { type StructuredQueryResult, runStructuredQuery } from '@/lib/graph';
 
 export function QueryPage() {
-  const [question, setQuestion] = useState('虾总有什么没完成的任务');
+  const [question, setQuestion] = useState('桌面生命体下一阶段有哪些需要优化的');
   const [result, setResult] = useState<StructuredQueryResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
@@ -36,7 +36,7 @@ export function QueryPage() {
             查询
           </button>
           <p className="mt-4 text-sm leading-6 text-[#626965]">
-            当前版本先用代码做精确过滤，优先支持“某人的未完成任务”。后续会把结果交给 LLM 做自然语言表达。
+            当前版本先用代码做精确过滤，支持人员待办、事项状态、优化项和关联实体召回。后续再把已过滤结果交给 LLM 表达。
           </p>
         </section>
 
@@ -66,14 +66,14 @@ export function QueryPage() {
                           to={source.href}
                           className="rounded-full border border-[#d9d9d6] px-3 py-1 text-xs text-[#155eef]"
                         >
-                          {source.title}
+                          {sourceTypeLabel[source.type]} · {source.title}
                         </Link>
                       ) : (
                         <span
                           key={`${source.type}:${source.id}`}
                           className="rounded-full border border-[#d9d9d6] px-3 py-1 text-xs text-[#626965]"
                         >
-                          {source.title}
+                          {sourceTypeLabel[source.type]} · {source.title}
                         </span>
                       ),
                     )}
@@ -103,3 +103,9 @@ export function QueryPage() {
     </section>
   );
 }
+
+const sourceTypeLabel: Record<StructuredQueryResult['sources'][number]['type'], string> = {
+  entity: '实体',
+  task: '任务',
+  entry: '原文',
+};
