@@ -99,4 +99,58 @@ describe('MiniMax capture normalization', () => {
       draft.relatedEntities.find((entity) => entity.title === '我')?.clientId,
     );
   });
+
+  it('prevents technical components from becoming owners', () => {
+    const draft = normalizeMiniMaxCaptureResponse(
+      JSON.stringify({
+        primaryEntity: {
+          type: 'project',
+          title: '桌面数字生命体',
+          summary: '桌面智能体项目。',
+          tags: ['项目'],
+          scenes: ['work'],
+        },
+        relatedEntities: [
+          {
+            type: 'topic',
+            title: 'OpenCLI',
+            summary: '网页任务执行工具。',
+            tags: ['工具'],
+            scenes: ['work'],
+          },
+          {
+            type: 'person',
+            title: '我',
+            summary: '项目负责人。',
+            tags: ['负责人'],
+            scenes: ['work'],
+          },
+        ],
+        relationships: [
+          { fromTitle: '桌面数字生命体', type: 'owner', toTitle: 'OpenCLI' },
+          { fromTitle: '桌面数字生命体', type: 'owner', toTitle: '我' },
+        ],
+        tasks: [],
+      }),
+    );
+
+    const project = draft.primaryEntity;
+    const openCli = draft.relatedEntities.find((entity) => entity.title === 'OpenCLI');
+    const me = draft.relatedEntities.find((entity) => entity.title === '我');
+
+    expect(draft.relationships).toContainEqual(
+      expect.objectContaining({
+        fromClientId: project.clientId,
+        toClientId: openCli?.clientId,
+        type: 'depends-on',
+      }),
+    );
+    expect(draft.relationships).toContainEqual(
+      expect.objectContaining({
+        fromClientId: me?.clientId,
+        toClientId: project.clientId,
+        type: 'owner',
+      }),
+    );
+  });
 });

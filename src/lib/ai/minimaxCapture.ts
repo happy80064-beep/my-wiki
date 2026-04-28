@@ -111,6 +111,8 @@ JSON schema:
 - “短期优先级 / 推荐后续路线 / 下一阶段核心 / 计划 / 待办 / 行动项”后面的编号列表或行动句，应优先提取为 tasks。
 - 包含“稳住、完善、强化、保留、评估、做稳、减少、支持、让…成为”等执行动词的计划项，应作为任务候选。
 - 关系方向要符合语义：人 attendee 互动；互动 about 事项；人 participant/owner 事项。
+- owner / participant / stakeholder / decision-maker 只能用于 person -> project；工具、模型、框架、技术组件不能作为“负责人”。
+- 项目与工具、模型、框架、技术组件的关系应优先使用 depends-on 或 related-to，不要使用 owner。
 - 输出中的人名、项目名、任务内容必须来自用户输入或由用户输入直接概括，不能照抄 schema 或示例词。
 `;
 }
@@ -126,13 +128,17 @@ export function normalizeMiniMaxCaptureResponse(rawText: string): CaptureDraft {
     .map((relationship) => {
       const from = relationship.fromTitle ? entityByTitle.get(relationship.fromTitle) : undefined;
       const to = relationship.toTitle ? entityByTitle.get(relationship.toTitle) : undefined;
-      const type = pickEnum(relationship.type, relationshipTypes, 'mentions');
       if (!from || !to) return undefined;
+      const normalized = normalizeRelationship(
+        from,
+        to,
+        pickEnum(relationship.type, relationshipTypes, 'mentions'),
+      );
       return {
         clientId: createDraftId('rel'),
-        fromClientId: from.clientId,
-        toClientId: to.clientId,
-        type,
+        fromClientId: normalized.from.clientId,
+        toClientId: normalized.to.clientId,
+        type: normalized.type,
       };
     })
     .filter((item): item is NonNullable<typeof item> => Boolean(item));
@@ -160,6 +166,41 @@ export function normalizeMiniMaxCaptureResponse(rawText: string): CaptureDraft {
     relationships,
     tasks,
   };
+}
+
+function normalizeRelationship(from: DraftEntity, to: DraftEntity, type: RelationshipType) {
+  const personToProjectTypes = ['owner', 'participant', 'stakeholder', 'decision-maker'] as const;
+  const personToEventTypes = ['attendee', 'organizer', 'mentioned-in'] as const;
+
+  if (personToProjectTypes.includes(type as (typeof personToProjectTypes)[number])) {
+    if (from.type === 'person' && to.type === 'project') {
+      return { from, to, type };
+    }
+
+    if (from.type === 'project' && to.type === 'person') {
+      return { from: to, to: from, type };
+    }
+
+    if (from.type === 'project' && to.type !== 'person') {
+      return { from, to, type: 'depends-on' as const };
+    }
+
+    return { from, to, type: 'related-to' as const };
+  }
+
+  if (personToEventTypes.includes(type as (typeof personToEventTypes)[number])) {
+    if (from.type === 'person' && to.type === 'event') {
+      return { from, to, type };
+    }
+
+    if (from.type === 'event' && to.type === 'person') {
+      return { from: to, to: from, type };
+    }
+
+    return { from, to, type: 'related-to' as const };
+  }
+
+  return { from, to, type };
 }
 
 function resolveTaskOwner(
