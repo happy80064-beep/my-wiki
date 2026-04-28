@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { db, resetDatabase } from '@/lib/db';
+import { createEntity, createRelationship, db, resetDatabase } from '@/lib/db';
 import { createLocalCaptureDraft, persistCaptureDraft } from '@/lib/capture';
 
 describe('capture flow', () => {
@@ -24,5 +24,72 @@ describe('capture flow', () => {
     const savedEntry = await db.entries.get(result.entry.id);
     expect(savedEntry?.derivedEntities).toHaveLength(result.entities.length);
     expect(savedEntry?.derivedTasks).toHaveLength(result.tasks.length);
+  });
+
+  it('reuses existing entities and compiles capture impact into them', async () => {
+    const person = await createEntity({ type: 'person', title: '虾总', tags: ['客户'], scenes: ['work'] });
+    const project = await createEntity({ type: 'project', title: '股票监控', tags: ['旧项目'], scenes: ['work'] });
+    const topic = await createEntity({ type: 'topic', title: '语音交互', tags: ['旧主题'], scenes: ['personal'] });
+    const previousEntry = await db.entries.add({
+      id: 'entry_previous',
+      content: '旧证据',
+      source: 'text',
+      capturedAt: 1,
+      processed: true,
+      derivedEntities: [person.id, project.id],
+      derivedTasks: [],
+      derivedRelationships: [],
+    });
+
+    await createRelationship({
+      from: person.id,
+      to: project.id,
+      type: 'participant',
+      evidence: [previousEntry],
+    });
+
+    const draft = createLocalCaptureDraft('今天和虾总同步股票监控项目，需要完善语音交互');
+    draft.relatedEntities.push({
+      clientId: 'topic_voice',
+      type: 'topic',
+      title: '语音交互',
+      summary: '语音交互相关主题。',
+      tags: ['新主题'],
+      scenes: ['work'],
+    });
+    draft.relationships.push({
+      clientId: 'rel_topic',
+      fromClientId: draft.primaryEntity.clientId,
+      toClientId: 'topic_voice',
+      type: 'relevant-to',
+    });
+
+    const result = await persistCaptureDraft('今天和虾总同步股票监控项目，需要完善语音交互', draft);
+
+    const allPeople = await db.entities.where('type').equals('person').toArray();
+    const allProjects = await db.entities.where('type').equals('project').toArray();
+    const updatedPerson = await db.entities.get(person.id);
+    const updatedProject = await db.entities.get(project.id);
+    const updatedTopic = await db.entities.get(topic.id);
+    const participantRelationships = await db.relationships
+      .where('from')
+      .equals(person.id)
+      .filter((relationship) => relationship.to === project.id && relationship.type === 'participant')
+      .toArray();
+
+    expect(allPeople).toHaveLength(1);
+    expect(allProjects.map((entity) => entity.title)).toContain('股票监控');
+    expect(updatedPerson?.sourceEntries).toContain(result.entry.id);
+    expect(updatedPerson?.properties && 'lastContactAt' in updatedPerson.properties).toBe(true);
+    expect(updatedProject?.sourceEntries).toContain(result.entry.id);
+    expect(updatedTopic?.sourceEntries).toContain(result.entry.id);
+    expect(updatedTopic?.properties && 'autoCollectedSnippets' in updatedTopic.properties).toBe(true);
+    expect(
+      updatedTopic?.properties && 'autoCollectedSnippets' in updatedTopic.properties
+        ? updatedTopic.properties.autoCollectedSnippets
+        : [],
+    ).toContain(result.entry.id);
+    expect(participantRelationships).toHaveLength(1);
+    expect(participantRelationships[0].evidence).toContain(result.entry.id);
   });
 });

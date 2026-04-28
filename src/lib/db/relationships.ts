@@ -38,6 +38,11 @@ export function listRelationshipsByType(type: Relationship['type']) {
   return db.relationships.where('type').equals(type).toArray();
 }
 
+export async function updateRelationship(id: string, patch: Partial<Omit<Relationship, 'id' | 'createdAt'>>) {
+  await db.relationships.update(id, patch);
+  return db.relationships.get(id);
+}
+
 export function deleteRelationship(id: string) {
   return db.relationships.delete(id);
 }
