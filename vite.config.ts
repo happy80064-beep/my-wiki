@@ -8,7 +8,7 @@ import { buildMiniMaxCapturePrompt, normalizeMiniMaxCaptureResponse } from './sr
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
   const minimaxApiKey = env.MINIMAX_API_KEY;
-  const minimaxModel = env.MINIMAX_MODEL || 'MiniMax-M2.7';
+  const minimaxModel = normalizeMiniMaxModel(env.MINIMAX_MODEL);
   const minimaxBaseUrl = (env.MINIMAX_BASE_URL || 'https://api.minimax.io/v1').replace(/\/$/, '');
 
   return {
@@ -128,4 +128,12 @@ function sendJson(res: import('node:http').ServerResponse, statusCode: number, p
   res.statusCode = statusCode;
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.end(JSON.stringify(payload));
+}
+
+function normalizeMiniMaxModel(model?: string) {
+  const configuredModel = model || 'MiniMax-M2.7';
+  if (configuredModel.toLowerCase().includes('highspeed')) {
+    return 'MiniMax-M2.7';
+  }
+  return configuredModel;
 }
