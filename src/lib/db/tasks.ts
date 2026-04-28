@@ -59,6 +59,11 @@ export function completeTask(id: string) {
   return updateTask(id, { status: 'done', completedAt: Date.now() });
 }
 
-export function deleteTask(id: string) {
-  return db.tasks.delete(id);
+export async function deleteTask(id: string) {
+  await db.transaction('rw', db.tasks, db.entries, async () => {
+    await db.tasks.delete(id);
+    await db.entries.toCollection().modify((entry) => {
+      entry.derivedTasks = entry.derivedTasks.filter((taskId) => taskId !== id);
+    });
+  });
 }

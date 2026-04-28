@@ -43,6 +43,11 @@ export async function updateRelationship(id: string, patch: Partial<Omit<Relatio
   return db.relationships.get(id);
 }
 
-export function deleteRelationship(id: string) {
-  return db.relationships.delete(id);
+export async function deleteRelationship(id: string) {
+  await db.transaction('rw', db.relationships, db.entries, async () => {
+    await db.relationships.delete(id);
+    await db.entries.toCollection().modify((entry) => {
+      entry.derivedRelationships = entry.derivedRelationships.filter((relationshipId) => relationshipId !== id);
+    });
+  });
 }

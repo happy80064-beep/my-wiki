@@ -6,6 +6,8 @@ import {
   createTask,
   db,
   deleteEntity,
+  deleteRelationship,
+  deleteTask,
   listPendingTasksByOwner,
   listRelationshipsForEntity,
   resetDatabase,
@@ -82,5 +84,35 @@ describe('MyWiki data layer', () => {
 
     expect(await db.entities.get(person.id)).toBeUndefined();
     expect(await listRelationshipsForEntity(project.id)).toEqual([]);
+  });
+
+  it('removes deleted relationship and task ids from source entries', async () => {
+    const entry = await createEntry({ content: '派生引用清理测试。', source: 'text' });
+    const person = await createEntity({ type: 'person', title: '虾总' });
+    const project = await createEntity({ type: 'project', title: '股票监控' });
+    const relationship = await createRelationship({
+      from: person.id,
+      to: project.id,
+      type: 'participant',
+      evidence: [entry.id],
+    });
+    const task = await createTask({
+      description: '清理派生任务',
+      owner: person.id,
+      linkedTo: [project.id],
+      source: entry.id,
+    });
+
+    await db.entries.update(entry.id, {
+      derivedRelationships: [relationship.id],
+      derivedTasks: [task.id],
+    });
+
+    await deleteRelationship(relationship.id);
+    await deleteTask(task.id);
+
+    const updatedEntry = await db.entries.get(entry.id);
+    expect(updatedEntry?.derivedRelationships).toEqual([]);
+    expect(updatedEntry?.derivedTasks).toEqual([]);
   });
 });

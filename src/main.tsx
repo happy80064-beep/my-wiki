@@ -5,6 +5,7 @@ import { App } from './App';
 import { CapturePage } from './pages/CapturePage';
 import { DashboardPage } from './pages/DashboardPage';
 import { EntityPage } from './pages/EntityPage';
+import { EntryPage } from './pages/EntryPage';
 import { QueryPage } from './pages/QueryPage';
 import { WikiPage } from './pages/WikiPage';
 import './styles.css';
@@ -16,6 +17,7 @@ const router = createBrowserRouter([
     children: [
       { index: true, element: <DashboardPage /> },
       { path: 'capture', element: <CapturePage /> },
+      { path: 'entries/:id', element: <EntryPage /> },
       { path: 'wiki', element: <WikiPage /> },
       { path: 'wiki/:type/:id', element: <EntityPage /> },
       { path: 'query', element: <QueryPage /> },

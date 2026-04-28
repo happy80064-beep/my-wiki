@@ -5,6 +5,8 @@ type RelationshipGraphProps = {
   centerEntity: Entity;
   relationships: Relationship[];
   entities: Entity[];
+  depth?: number;
+  onDepthChange?: (depth: number) => void;
 };
 
 type GraphNode = {
@@ -21,16 +23,14 @@ const typeColors: Record<Entity['type'], string> = {
   topic: '#d9a400',
 };
 
-export function RelationshipGraph({ centerEntity, relationships, entities }: RelationshipGraphProps) {
-  const entityById = new Map(entities.map((entity) => [entity.id, entity]));
-  const relatedEntities = Array.from(
-    new Map(
-      relationships
-        .map((relationship) => entityById.get(relationship.from === centerEntity.id ? relationship.to : relationship.from))
-        .filter((entity): entity is Entity => Boolean(entity))
-        .map((entity) => [entity.id, entity]),
-    ).values(),
-  );
+export function RelationshipGraph({
+  centerEntity,
+  relationships,
+  entities,
+  depth,
+  onDepthChange,
+}: RelationshipGraphProps) {
+  const relatedEntities = entities.filter((entity) => entity.id !== centerEntity.id);
 
   const nodes = layoutNodes(centerEntity, relatedEntities);
   const nodeById = new Map(nodes.map((node) => [node.entity.id, node]));
@@ -50,7 +50,26 @@ export function RelationshipGraph({ centerEntity, relationships, entities }: Rel
     <section className="rounded-[12px] border border-[#e5e5e4] bg-white p-5">
       <div className="flex items-center justify-between gap-3 border-b border-[#e5e5e4] pb-3">
         <h3 className="text-sm font-semibold text-[#1f2937]">关系网络</h3>
-        <span className="text-xs text-[#626965]">{relatedEntities.length} 个相邻实体</span>
+        <div className="flex items-center gap-2">
+          {onDepthChange && depth ? (
+            <div className="rounded-full border border-[#d9d9d6] bg-[#f7f7f5] p-1">
+              {[1, 2].map((value) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => onDepthChange(value)}
+                  className={[
+                    'rounded-full px-2.5 py-1 text-xs transition',
+                    depth === value ? 'bg-white text-[#155eef]' : 'text-[#626965]',
+                  ].join(' ')}
+                >
+                  {value} 跳
+                </button>
+              ))}
+            </div>
+          ) : null}
+          <span className="text-xs text-[#626965]">{relatedEntities.length} 个相邻实体</span>
+        </div>
       </div>
       <div className="mt-4 overflow-hidden rounded-[10px] border border-[#eeeeed] bg-[#fbfbfa]">
         <svg viewBox="0 0 100 62" role="img" aria-label={`${centerEntity.title} 的关系网络`} className="h-80 w-full">

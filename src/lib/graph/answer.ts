@@ -95,6 +95,7 @@ export function entrySource(entry: Entry): QuerySource {
     type: 'entry',
     id: entry.id,
     title: entry.content.length > 28 ? `${entry.content.slice(0, 28)}...` : entry.content,
+    href: `/entries/${entry.id}`,
   };
 }
 
