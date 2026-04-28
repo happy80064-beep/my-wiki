@@ -2,8 +2,9 @@ import type { CaptureDraft } from '../capture/draft';
 
 export type ExtractCaptureResult = {
   draft: CaptureDraft;
-  provider: 'minimax';
+  provider: 'minimax' | 'deepseek';
   model: string;
+  fallbackFrom?: string;
 };
 
 export async function extractCaptureDraft(content: string): Promise<ExtractCaptureResult> {

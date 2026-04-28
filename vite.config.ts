@@ -10,6 +10,9 @@ export default defineConfig(({ mode }) => {
   const minimaxApiKey = env.MINIMAX_API_KEY;
   const minimaxModel = normalizeMiniMaxModel(env.MINIMAX_MODEL);
   const minimaxBaseUrl = (env.MINIMAX_BASE_URL || 'https://api.minimax.io/v1').replace(/\/$/, '');
+  const deepseekApiKeys = [env.DEEPSEEK_API_KEY, env.DEEPSEEK_API_KEY_FALLBACK].filter(Boolean);
+  const deepseekModel = env.DEEPSEEK_MODEL || 'deepseek-v4-pro';
+  const deepseekBaseUrl = (env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com').replace(/\/$/, '');
 
   return {
     plugins: [
@@ -25,11 +28,6 @@ export default defineConfig(({ mode }) => {
             }
 
             try {
-              if (!minimaxApiKey) {
-                sendJson(res, 500, { error: 'MINIMAX_API_KEY is not configured.' });
-                return;
-              }
-
               const body = (await readJsonBody(req)) as { content?: string };
               const content = body.content?.trim();
               if (!content) {
@@ -37,53 +35,67 @@ export default defineConfig(({ mode }) => {
                 return;
               }
 
-              const response = await fetch(`${minimaxBaseUrl}/chat/completions`, {
-                method: 'POST',
-                headers: {
-                  Authorization: `Bearer ${minimaxApiKey}`,
-                  'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                  model: minimaxModel,
-                  messages: [
-                    {
-                      role: 'system',
-                      content: '你只输出符合要求的 JSON 对象。',
-                    },
-                    {
-                      role: 'user',
-                      content: buildMiniMaxCapturePrompt(content),
-                    },
-                  ],
-                  stream: false,
-                  temperature: 0.1,
-                  max_tokens: 2048,
-                  response_format: { type: 'json_object' },
-                }),
-              });
+              const minimaxResult = minimaxApiKey
+                ? await requestOpenAiCompatibleCapture({
+                    apiKey: minimaxApiKey,
+                    baseUrl: minimaxBaseUrl,
+                    model: minimaxModel,
+                    providerName: 'MiniMax',
+                    content,
+                    extraBody: { response_format: { type: 'json_object' } },
+                  })
+                : { ok: false as const, error: 'MINIMAX_API_KEY is not configured.' };
 
-              const data = (await response.json()) as {
-                choices?: Array<{ message?: { content?: string } }>;
-                error?: { message?: string };
-              };
+              let minimaxFailure = minimaxResult.ok ? '' : minimaxResult.error;
+              if (minimaxResult.ok) {
+                try {
+                  sendJson(res, 200, {
+                    draft: assertUsableDraft(normalizeMiniMaxCaptureResponse(minimaxResult.text), 'MiniMax'),
+                    provider: 'minimax',
+                    model: minimaxModel,
+                  });
+                  return;
+                } catch (error) {
+                  minimaxFailure = error instanceof Error ? error.message : 'MiniMax returned invalid JSON.';
+                }
+              }
 
-              if (!response.ok || data.error) {
-                sendJson(res, response.ok ? 502 : response.status, {
-                  error: data.error?.message || 'MiniMax request failed.',
+              let deepseekFailure = '';
+              for (const deepseekApiKey of deepseekApiKeys) {
+                const deepseekResult = await requestOpenAiCompatibleCapture({
+                  apiKey: deepseekApiKey,
+                  baseUrl: deepseekBaseUrl,
+                  model: deepseekModel,
+                  providerName: 'DeepSeek',
+                  content,
+                  extraBody: {
+                    thinking: { type: 'disabled' },
+                    response_format: { type: 'json_object' },
+                  },
                 });
-                return;
+
+                if (deepseekResult.ok) {
+                  try {
+                    sendJson(res, 200, {
+                      draft: assertUsableDraft(normalizeMiniMaxCaptureResponse(deepseekResult.text), 'DeepSeek'),
+                      provider: 'deepseek',
+                      model: deepseekModel,
+                      fallbackFrom: minimaxFailure,
+                    });
+                    return;
+                  } catch (error) {
+                    deepseekFailure = error instanceof Error ? error.message : 'DeepSeek returned invalid JSON.';
+                    continue;
+                  }
+                }
+
+                deepseekFailure = deepseekResult.error;
               }
 
-              const text = data.choices?.[0]?.message?.content;
-              if (!text) {
-                sendJson(res, 502, { error: 'MiniMax returned empty content.' });
-                return;
-              }
-
-              sendJson(res, 200, {
-                draft: normalizeMiniMaxCaptureResponse(text),
-                provider: 'minimax',
-                model: minimaxModel,
+              sendJson(res, 502, {
+                error: `MiniMax failed: ${minimaxFailure}. DeepSeek fallback failed: ${
+                  deepseekFailure || 'not configured'
+                }.`,
               });
             } catch (error) {
               sendJson(res, 500, {
@@ -106,6 +118,73 @@ export default defineConfig(({ mode }) => {
     },
   };
 });
+
+async function requestOpenAiCompatibleCapture({
+  apiKey,
+  baseUrl,
+  model,
+  providerName,
+  content,
+  extraBody,
+}: {
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  providerName: string;
+  content: string;
+  extraBody?: Record<string, unknown>;
+}): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
+  try {
+    const response = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          {
+            role: 'system',
+            content: '你只输出符合要求的 JSON 对象。',
+          },
+          {
+            role: 'user',
+            content: buildMiniMaxCapturePrompt(content),
+          },
+        ],
+        stream: false,
+        temperature: 0.1,
+        max_tokens: 2048,
+        ...extraBody,
+      }),
+    });
+
+    const data = (await response.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
+      error?: { message?: string; type?: string };
+    };
+
+    if (!response.ok || data.error) {
+      return {
+        ok: false,
+        error: data.error?.message || `${providerName} request failed with ${response.status}.`,
+      };
+    }
+
+    const text = data.choices?.[0]?.message?.content;
+    if (!text) {
+      return { ok: false, error: `${providerName} returned empty content.` };
+    }
+
+    return { ok: true, text };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : `${providerName} request failed.`,
+    };
+  }
+}
 
 function readJsonBody(req: import('node:http').IncomingMessage) {
   return new Promise<unknown>((resolve, reject) => {
@@ -136,4 +215,13 @@ function normalizeMiniMaxModel(model?: string) {
     return 'MiniMax-M2.7';
   }
   return configuredModel;
+}
+
+function assertUsableDraft(draft: ReturnType<typeof normalizeMiniMaxCaptureResponse>, providerName: string) {
+  const text = `${draft.primaryEntity.title} ${draft.primaryEntity.summary}`;
+  const lowQuality = /(无法识别|乱码|无效字符|无意义字符|未命名实体|^未知\s)/.test(text);
+  if (lowQuality) {
+    throw new Error(`${providerName} returned a low-quality extraction.`);
+  }
+  return draft;
 }

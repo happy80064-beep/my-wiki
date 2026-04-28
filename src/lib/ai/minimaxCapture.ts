@@ -57,7 +57,16 @@ type AiCaptureResponse = {
 };
 
 export function buildMiniMaxCapturePrompt(content: string) {
-  return `你是 MyWiki 个人知识库的结构化提取助手。请分析用户输入，严格输出一个 JSON 对象，不要输出 markdown 代码块，不要输出解释。
+  return `你是 MyWiki 个人知识库的结构化提取助手。请只根据下面的原文提取结构化信息。
+
+原文：
+<<<
+${content}
+>>>
+
+严格输出一个 JSON 对象，不要输出 markdown 代码块，不要输出解释。
+请根据“用户输入”的真实内容填充 JSON，禁止照抄 schema 占位文字，禁止输出空标题，禁止把正常中文判断为乱码、无效字符或无法识别。
+输出中的人名、项目名、任务内容必须来自原文或由原文直接概括；原文没有的名称一律不要输出。
 
 JSON schema:
 {
@@ -100,9 +109,8 @@ JSON schema:
 - 不要把“总结、总览、总之”识别成人名。
 - 任务 owner 必须谨慎，不能确定就填 uncertain。
 - 关系方向要符合语义：人 attendee 互动；互动 about 事项；人 participant/owner 事项。
-
-用户输入:
-${content}`;
+- 输出中的人名、项目名、任务内容必须来自用户输入或由用户输入直接概括，不能照抄 schema 或示例词。
+`;
 }
 
 export function normalizeMiniMaxCaptureResponse(rawText: string): CaptureDraft {
