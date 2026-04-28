@@ -1,5 +1,5 @@
 import { Loader2, Save, WandSparkles } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { type ReactNode, useMemo, useState } from 'react';
 import {
   type CaptureDraft,
   type DraftEntity,
@@ -21,6 +21,27 @@ const relationshipTypes: RelationshipType[] = [
   'related-to',
 ];
 const taskStatuses: TaskStatus[] = ['pending', 'done', 'overdue', 'cancelled'];
+const relationshipLabels: Record<RelationshipType, string> = {
+  owner: '负责人',
+  participant: '参与事项',
+  stakeholder: '干系人',
+  'decision-maker': '决策人',
+  attendee: '参加互动',
+  organizer: '组织互动',
+  'mentioned-in': '被提及于',
+  colleague: '同事',
+  friend: '朋友',
+  family: '家人',
+  mentor: '导师',
+  'reports-to': '汇报给',
+  'parent-of': '父事项',
+  'depends-on': '依赖',
+  'related-to': '相关',
+  about: '关于',
+  'kicked-off': '启动',
+  'relevant-to': '关联主题',
+  mentions: '提及',
+};
 
 type SaveResult = {
   entities: number;
@@ -185,56 +206,62 @@ function RelationshipSection({
               key={relationship.clientId}
               className="grid gap-2 rounded-[12px] border border-[#e5e5e4] p-3 md:grid-cols-3"
             >
-              <Select
-                value={relationship.fromClientId}
-                options={draftEntities.map((entity) => [entity.clientId, entity.title])}
-                onChange={(value) =>
-                  setDraft((current) =>
-                    current
-                      ? {
-                          ...current,
-                          relationships: current.relationships.map((item) =>
-                            item.clientId === relationship.clientId ? { ...item, fromClientId: value } : item,
-                          ),
-                        }
-                      : current,
-                  )
-                }
-              />
-              <Select
-                value={relationship.type}
-                options={relationshipTypes.map((type) => [type, type])}
-                onChange={(value) =>
-                  setDraft((current) =>
-                    current
-                      ? {
-                          ...current,
-                          relationships: current.relationships.map((item) =>
-                            item.clientId === relationship.clientId
-                              ? { ...item, type: value as RelationshipType }
-                              : item,
-                          ),
-                        }
-                      : current,
-                  )
-                }
-              />
-              <Select
-                value={relationship.toClientId}
-                options={draftEntities.map((entity) => [entity.clientId, entity.title])}
-                onChange={(value) =>
-                  setDraft((current) =>
-                    current
-                      ? {
-                          ...current,
-                          relationships: current.relationships.map((item) =>
-                            item.clientId === relationship.clientId ? { ...item, toClientId: value } : item,
-                          ),
-                        }
-                      : current,
-                  )
-                }
-              />
+              <Field label="起点实体">
+                <Select
+                  value={relationship.fromClientId}
+                  options={draftEntities.map((entity) => [entity.clientId, entity.title])}
+                  onChange={(value) =>
+                    setDraft((current) =>
+                      current
+                        ? {
+                            ...current,
+                            relationships: current.relationships.map((item) =>
+                              item.clientId === relationship.clientId ? { ...item, fromClientId: value } : item,
+                            ),
+                          }
+                        : current,
+                    )
+                  }
+                />
+              </Field>
+              <Field label="关系类型">
+                <Select
+                  value={relationship.type}
+                  options={relationshipTypes.map((type) => [type, type])}
+                  onChange={(value) =>
+                    setDraft((current) =>
+                      current
+                        ? {
+                            ...current,
+                            relationships: current.relationships.map((item) =>
+                              item.clientId === relationship.clientId
+                                ? { ...item, type: value as RelationshipType }
+                                : item,
+                            ),
+                          }
+                        : current,
+                    )
+                  }
+                />
+              </Field>
+              <Field label="终点实体">
+                <Select
+                  value={relationship.toClientId}
+                  options={draftEntities.map((entity) => [entity.clientId, entity.title])}
+                  onChange={(value) =>
+                    setDraft((current) =>
+                      current
+                        ? {
+                            ...current,
+                            relationships: current.relationships.map((item) =>
+                              item.clientId === relationship.clientId ? { ...item, toClientId: value } : item,
+                            ),
+                          }
+                        : current,
+                    )
+                  }
+                />
+              </Field>
             </div>
           ))
         )}
@@ -345,36 +372,45 @@ function EntityEditor({
   return (
     <div className="rounded-[12px] border border-[#e5e5e4] p-3">
       <div className="grid gap-2 md:grid-cols-[120px_minmax(0,1fr)]">
-        <Select
-          value={entity.type}
-          options={entityTypes.map((type) => [type, type])}
-          onChange={(value) => onChange(entity.clientId, { type: value as EntityType })}
-        />
-        <input
-          value={entity.title}
-          onChange={(event) => onChange(entity.clientId, { title: event.target.value })}
-          className="rounded-[10px] border border-[#d9d9d6] px-3 py-2 text-sm outline-none focus:border-[#155eef]"
-        />
+        <Field label="类型">
+          <Select
+            value={entity.type}
+            options={entityTypes.map((type) => [type, type])}
+            onChange={(value) => onChange(entity.clientId, { type: value as EntityType })}
+          />
+        </Field>
+        <Field label="标题">
+          <input
+            value={entity.title}
+            onChange={(event) => onChange(entity.clientId, { title: event.target.value })}
+            className="w-full rounded-[10px] border border-[#d9d9d6] px-3 py-2 text-sm outline-none focus:border-[#155eef]"
+          />
+        </Field>
       </div>
-      <textarea
-        value={entity.summary}
-        onChange={(event) => onChange(entity.clientId, { summary: event.target.value })}
-        className="mt-2 min-h-20 w-full resize-y rounded-[10px] border border-[#d9d9d6] px-3 py-2 text-sm leading-6 outline-none focus:border-[#155eef]"
-      />
-      <input
-        value={entity.tags.join(', ')}
-        onChange={(event) =>
-          onChange(entity.clientId, {
-            tags: event.target.value
-              .split(',')
-              .map((tag) => tag.trim())
-              .filter(Boolean),
-          })
-        }
-        className="mt-2 w-full rounded-[10px] border border-[#d9d9d6] px-3 py-2 text-sm outline-none focus:border-[#155eef]"
-        placeholder="标签，用英文逗号分隔"
-      />
+      <Field label="摘要">
+        <textarea
+          value={entity.summary}
+          onChange={(event) => onChange(entity.clientId, { summary: event.target.value })}
+          className="min-h-20 w-full resize-y rounded-[10px] border border-[#d9d9d6] px-3 py-2 text-sm leading-6 outline-none focus:border-[#155eef]"
+        />
+      </Field>
+      <Field label="标签">
+        <input
+          value={entity.tags.join(', ')}
+          onChange={(event) =>
+            onChange(entity.clientId, {
+              tags: event.target.value
+                .split(',')
+                .map((tag) => tag.trim())
+                .filter(Boolean),
+            })
+          }
+          className="w-full rounded-[10px] border border-[#d9d9d6] px-3 py-2 text-sm outline-none focus:border-[#155eef]"
+          placeholder="标签，用英文逗号分隔"
+        />
+      </Field>
       <div className="mt-3 flex flex-wrap gap-2">
+        <span className="text-xs font-medium text-[#626965]">场景</span>
         {scenes.map((scene) => (
           <label
             key={scene}
@@ -416,9 +452,18 @@ function Select({
     >
       {options.map(([optionValue, label]) => (
         <option key={optionValue} value={optionValue}>
-          {label}
+          {relationshipLabels[label as RelationshipType] ?? label}
         </option>
       ))}
     </select>
+  );
+}
+
+function Field({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <label className="mt-2 block">
+      <span className="mb-1 block text-xs font-medium text-[#626965]">{label}</span>
+      {children}
+    </label>
   );
 }

@@ -119,7 +119,7 @@ function inferPrimaryTitle(content: string, type: EntityType, projectTitle?: str
 }
 
 function extractPersonTitle(content: string) {
-  const titleMatch = content.match(/[\u4e00-\u9fa5A-Za-z]{1,8}总/);
+  const titleMatch = content.match(/[\u4e00-\u9fa5A-Za-z]{1,8}总(?!结)/);
   if (titleMatch) {
     return titleMatch[0];
   }
