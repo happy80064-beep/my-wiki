@@ -13,18 +13,43 @@ import { defaultEntityProperties } from '@/lib/db/entities';
 import type { CaptureDraft, DraftEntity } from './draft';
 import { getDraftEntities } from './draft';
 
+export type CaptureCompilationSummary = {
+  createdEntities: number;
+  reusedEntities: number;
+  updatedPeople: number;
+  updatedTopics: number;
+  createdRelationships: number;
+  updatedRelationships: number;
+  createdTasks: number;
+};
+
 export async function persistCaptureDraft(content: string, draft: CaptureDraft, source: EntrySource = 'text') {
   const entry = await createEntry({ content, source, processed: true });
   const entityIdByClientId = new Map<string, string>();
+  const compilation: CaptureCompilationSummary = {
+    createdEntities: 0,
+    reusedEntities: 0,
+    updatedPeople: 0,
+    updatedTopics: 0,
+    createdRelationships: 0,
+    updatedRelationships: 0,
+    createdTasks: 0,
+  };
 
   const entities: Entity[] = [];
   const relationships = [];
   const tasks = [];
 
   for (const draftEntity of getDraftEntities(draft)) {
-    const entity = await resolveCaptureEntity(draftEntity, entry.id, entry.capturedAt);
+    const result = await resolveCaptureEntity(draftEntity, entry.id, entry.capturedAt);
+    const entity = result.entity;
     entityIdByClientId.set(draftEntity.clientId, entity.id);
     entities.push(entity);
+
+    if (result.action === 'created') compilation.createdEntities += 1;
+    if (result.action === 'reused') compilation.reusedEntities += 1;
+    if (result.compiledPerson) compilation.updatedPeople += 1;
+    if (result.compiledTopic) compilation.updatedTopics += 1;
   }
 
   for (const draftRelationship of draft.relationships) {
@@ -32,14 +57,16 @@ export async function persistCaptureDraft(content: string, draft: CaptureDraft, 
     const to = entityIdByClientId.get(draftRelationship.toClientId);
     if (!from || !to) continue;
 
-    relationships.push(
-      await createOrUpdateRelationship({
-        from,
-        to,
-        type: draftRelationship.type,
-        evidence: [entry.id],
-      }),
-    );
+    const result = await createOrUpdateRelationship({
+      from,
+      to,
+      type: draftRelationship.type,
+      evidence: [entry.id],
+    });
+    relationships.push(result.relationship);
+
+    if (result.action === 'created') compilation.createdRelationships += 1;
+    if (result.action === 'updated') compilation.updatedRelationships += 1;
   }
 
   for (const draftTask of draft.tasks) {
@@ -58,6 +85,7 @@ export async function persistCaptureDraft(content: string, draft: CaptureDraft, 
         source: entry.id,
       }),
     );
+    compilation.createdTasks += 1;
   }
 
   await updateEntry(entry.id, {
@@ -71,14 +99,17 @@ export async function persistCaptureDraft(content: string, draft: CaptureDraft, 
     entities,
     relationships,
     tasks,
+    compilation,
   };
 }
 
 async function resolveCaptureEntity(draftEntity: DraftEntity, entryId: string, capturedAt: number) {
   const reusableEntity = await findReusableEntity(draftEntity);
+  const compiledPerson = draftEntity.type === 'person';
+  const compiledTopic = draftEntity.type === 'topic';
 
   if (!reusableEntity) {
-    return createEntity({
+    const entity = await createEntity({
       type: draftEntity.type,
       title: draftEntity.title,
       summary: draftEntity.summary,
@@ -87,6 +118,7 @@ async function resolveCaptureEntity(draftEntity: DraftEntity, entryId: string, c
       properties: compileEntityProperties(defaultEntityProperties(draftEntity.type), draftEntity.type, entryId, capturedAt),
       sourceEntries: [entryId],
     });
+    return { entity, action: 'created' as const, compiledPerson, compiledTopic };
   }
 
   const updated = await updateEntity(reusableEntity.id, {
@@ -97,7 +129,7 @@ async function resolveCaptureEntity(draftEntity: DraftEntity, entryId: string, c
     sourceEntries: mergeUnique(reusableEntity.sourceEntries, [entryId]),
   });
 
-  return updated ?? reusableEntity;
+  return { entity: updated ?? reusableEntity, action: 'reused' as const, compiledPerson, compiledTopic };
 }
 
 async function findReusableEntity(draftEntity: DraftEntity) {
@@ -132,14 +164,14 @@ async function createOrUpdateRelationship(input: {
     .first();
 
   if (!existingRelationship) {
-    return createRelationship(input);
+    return { relationship: await createRelationship(input), action: 'created' as const };
   }
 
   const updated = await updateRelationship(existingRelationship.id, {
     evidence: mergeUnique(existingRelationship.evidence, input.evidence),
   });
 
-  return updated ?? existingRelationship;
+  return { relationship: updated ?? existingRelationship, action: 'updated' as const };
 }
 
 function compileEntityProperties(

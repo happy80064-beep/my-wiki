@@ -1,9 +1,12 @@
-import { Loader2, Save, WandSparkles } from 'lucide-react';
+import { Loader2, Plus, Save, Trash2, WandSparkles } from 'lucide-react';
 import { type ReactNode, useMemo, useState } from 'react';
 import {
   type CaptureDraft,
   type DraftEntity,
+  type DraftRelationship,
+  type DraftTask,
   createLocalCaptureDraft,
+  createDraftId,
   getDraftEntities,
   persistCaptureDraft,
 } from '@/lib/capture';
@@ -49,6 +52,12 @@ type SaveResult = {
   entities: number;
   relationships: number;
   tasks: number;
+  createdEntities: number;
+  reusedEntities: number;
+  updatedPeople: number;
+  updatedTopics: number;
+  createdRelationships: number;
+  updatedRelationships: number;
 };
 
 export function CapturePage() {
@@ -100,6 +109,12 @@ export function CapturePage() {
       entities: result.entities.length,
       relationships: result.relationships.length,
       tasks: result.tasks.length,
+      createdEntities: result.compilation.createdEntities,
+      reusedEntities: result.compilation.reusedEntities,
+      updatedPeople: result.compilation.updatedPeople,
+      updatedTopics: result.compilation.updatedTopics,
+      createdRelationships: result.compilation.createdRelationships,
+      updatedRelationships: result.compilation.updatedRelationships,
     });
     setIsSaving(false);
   }
@@ -115,6 +130,40 @@ export function CapturePage() {
         relatedEntities: current.relatedEntities.map((entity) =>
           entity.clientId === clientId ? { ...entity, ...patch } : entity,
         ),
+      };
+    });
+  }
+
+  function addDraftEntity() {
+    setDraft((current) => {
+      if (!current) return current;
+      const entity: DraftEntity = {
+        clientId: createDraftId('entity'),
+        type: 'topic',
+        title: '新实体',
+        summary: '',
+        tags: [],
+        scenes: ['work'],
+      };
+      return { ...current, relatedEntities: [...current.relatedEntities, entity] };
+    });
+  }
+
+  function removeDraftEntity(clientId: string) {
+    setDraft((current) => {
+      if (!current || current.primaryEntity.clientId === clientId) return current;
+      const fallbackId = current.primaryEntity.clientId;
+      return {
+        ...current,
+        relatedEntities: current.relatedEntities.filter((entity) => entity.clientId !== clientId),
+        relationships: current.relationships.filter(
+          (relationship) => relationship.fromClientId !== clientId && relationship.toClientId !== clientId,
+        ),
+        tasks: current.tasks.map((task) => ({
+          ...task,
+          ownerClientId: task.ownerClientId === clientId ? fallbackId : task.ownerClientId,
+          linkedToClientIds: task.linkedToClientIds.filter((linkedId) => linkedId !== clientId),
+        })),
       };
     });
   }
@@ -153,9 +202,16 @@ export function CapturePage() {
             </button>
           </div>
           {lastSave ? (
-            <p className="mt-4 rounded-[10px] border border-[#b7e4c7] bg-[#f0fff4] px-3 py-2 text-sm text-[#276749]">
-              已保存：{lastSave.entities} 个实体、{lastSave.relationships} 条关系、{lastSave.tasks} 个任务。
-            </p>
+            <div className="mt-4 rounded-[10px] border border-[#b7e4c7] bg-[#f0fff4] px-3 py-2 text-sm leading-6 text-[#276749]">
+              <p>
+                已保存：{lastSave.entities} 个实体、{lastSave.relationships} 条关系、{lastSave.tasks} 个任务。
+              </p>
+              <p className="text-xs">
+                编译影响：新建 {lastSave.createdEntities} 个实体，复用 {lastSave.reusedEntities} 个实体，更新{' '}
+                {lastSave.updatedPeople} 个人员、{lastSave.updatedTopics} 个主题；关系新建{' '}
+                {lastSave.createdRelationships} 条，合并证据 {lastSave.updatedRelationships} 条。
+              </p>
+            </div>
           ) : null}
           {extractError ? (
             <div className="mt-4 rounded-[10px] border border-[#fecaca] bg-[#fff5f5] px-3 py-2 text-sm leading-6 text-[#b42318]">
@@ -184,7 +240,13 @@ export function CapturePage() {
             </div>
           ) : (
             <div className="mt-5 space-y-5">
-              <EntitySection entities={draftEntities} onChange={updateDraftEntity} />
+              <EntitySection
+                draft={draft}
+                entities={draftEntities}
+                onAdd={addDraftEntity}
+                onChange={updateDraftEntity}
+                onRemove={removeDraftEntity}
+              />
               <RelationshipSection draft={draft} draftEntities={draftEntities} setDraft={setDraft} />
               <TaskSection draft={draft} draftEntities={draftEntities} setDraft={setDraft} />
             </div>
@@ -196,18 +258,35 @@ export function CapturePage() {
 }
 
 function EntitySection({
+  draft,
   entities,
+  onAdd,
   onChange,
+  onRemove,
 }: {
+  draft: CaptureDraft;
   entities: DraftEntity[];
+  onAdd: () => void;
   onChange: (clientId: string, patch: Partial<DraftEntity>) => void;
+  onRemove: (clientId: string) => void;
 }) {
   return (
     <div>
-      <h3 className="text-sm font-semibold text-[#1f2937]">实体</h3>
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold text-[#1f2937]">实体</h3>
+        <IconButton label="新增实体" onClick={onAdd}>
+          <Plus size={15} />
+        </IconButton>
+      </div>
       <div className="mt-3 space-y-3">
         {entities.map((entity) => (
-          <EntityEditor key={entity.clientId} entity={entity} onChange={onChange} />
+          <EntityEditor
+            key={entity.clientId}
+            entity={entity}
+            canRemove={entity.clientId !== draft.primaryEntity.clientId}
+            onChange={onChange}
+            onRemove={onRemove}
+          />
         ))}
       </div>
     </div>
@@ -223,9 +302,36 @@ function RelationshipSection({
   draftEntities: DraftEntity[];
   setDraft: React.Dispatch<React.SetStateAction<CaptureDraft | null>>;
 }) {
+  function addRelationship() {
+    if (draftEntities.length < 2) return;
+    const relationship: DraftRelationship = {
+      clientId: createDraftId('rel'),
+      fromClientId: draftEntities[0].clientId,
+      toClientId: draftEntities[1].clientId,
+      type: 'mentions',
+    };
+    setDraft((current) => (current ? { ...current, relationships: [...current.relationships, relationship] } : current));
+  }
+
+  function removeRelationship(clientId: string) {
+    setDraft((current) =>
+      current
+        ? {
+            ...current,
+            relationships: current.relationships.filter((relationship) => relationship.clientId !== clientId),
+          }
+        : current,
+    );
+  }
+
   return (
     <div>
-      <h3 className="text-sm font-semibold text-[#1f2937]">关系</h3>
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold text-[#1f2937]">关系</h3>
+        <IconButton label="新增关系" onClick={addRelationship} disabled={draftEntities.length < 2}>
+          <Plus size={15} />
+        </IconButton>
+      </div>
       <div className="mt-3 space-y-3">
         {draft.relationships.length === 0 ? (
           <p className="text-sm text-[#626965]">暂无关系建议。</p>
@@ -233,7 +339,7 @@ function RelationshipSection({
           draft.relationships.map((relationship) => (
             <div
               key={relationship.clientId}
-              className="grid gap-2 rounded-[12px] border border-[#e5e5e4] p-3 md:grid-cols-3"
+              className="grid gap-2 rounded-[12px] border border-[#e5e5e4] p-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto]"
             >
               <Field label="起点实体">
                 <Select
@@ -291,6 +397,11 @@ function RelationshipSection({
                   }
                 />
               </Field>
+              <div className="flex items-end justify-end">
+                <IconButton label="删除关系" onClick={() => removeRelationship(relationship.clientId)}>
+                  <Trash2 size={15} />
+                </IconButton>
+              </div>
             </div>
           ))
         )}
@@ -308,80 +419,140 @@ function TaskSection({
   draftEntities: DraftEntity[];
   setDraft: React.Dispatch<React.SetStateAction<CaptureDraft | null>>;
 }) {
+  function addTask() {
+    if (draftEntities.length === 0) return;
+    const defaultEntityId = draftEntities[0].clientId;
+    const task: DraftTask = {
+      clientId: createDraftId('task'),
+      description: '新任务',
+      ownerClientId: defaultEntityId,
+      linkedToClientIds: [defaultEntityId],
+      status: 'pending',
+    };
+    setDraft((current) => (current ? { ...current, tasks: [...current.tasks, task] } : current));
+  }
+
+  function removeTask(clientId: string) {
+    setDraft((current) =>
+      current
+        ? {
+            ...current,
+            tasks: current.tasks.filter((task) => task.clientId !== clientId),
+          }
+        : current,
+    );
+  }
+
   return (
     <div>
-      <h3 className="text-sm font-semibold text-[#1f2937]">任务</h3>
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold text-[#1f2937]">任务</h3>
+        <IconButton label="新增任务" onClick={addTask} disabled={draftEntities.length === 0}>
+          <Plus size={15} />
+        </IconButton>
+      </div>
       <div className="mt-3 space-y-3">
         {draft.tasks.length === 0 ? (
           <p className="text-sm text-[#626965]">暂无任务建议。</p>
         ) : (
           draft.tasks.map((task) => (
             <div key={task.clientId} className="rounded-[12px] border border-[#e5e5e4] p-3">
-              <input
-                value={task.description}
-                onChange={(event) =>
-                  setDraft((current) =>
-                    current
-                      ? {
-                          ...current,
-                          tasks: current.tasks.map((item) =>
-                            item.clientId === task.clientId ? { ...item, description: event.target.value } : item,
-                          ),
-                        }
-                      : current,
-                  )
-                }
-                className="w-full rounded-[10px] border border-[#d9d9d6] px-3 py-2 text-sm outline-none focus:border-[#155eef]"
-              />
-              <div className="mt-2 grid gap-2 md:grid-cols-3">
-                <Select
-                  value={task.ownerClientId}
-                  options={draftEntities.map((entity) => [entity.clientId, entity.title])}
-                  onChange={(value) =>
+              <div className="flex items-start gap-2">
+                <input
+                  value={task.description}
+                  onChange={(event) =>
                     setDraft((current) =>
                       current
                         ? {
                             ...current,
                             tasks: current.tasks.map((item) =>
-                              item.clientId === task.clientId ? { ...item, ownerClientId: value } : item,
+                              item.clientId === task.clientId ? { ...item, description: event.target.value } : item,
                             ),
                           }
                         : current,
                     )
                   }
+                  className="w-full rounded-[10px] border border-[#d9d9d6] px-3 py-2 text-sm outline-none focus:border-[#155eef]"
                 />
-                <Select
-                  value={task.linkedToClientIds[0] ?? ''}
-                  options={draftEntities.map((entity) => [entity.clientId, entity.title])}
-                  onChange={(value) =>
-                    setDraft((current) =>
-                      current
-                        ? {
-                            ...current,
-                            tasks: current.tasks.map((item) =>
-                              item.clientId === task.clientId ? { ...item, linkedToClientIds: [value] } : item,
-                            ),
-                          }
-                        : current,
-                    )
-                  }
-                />
-                <Select
-                  value={task.status}
-                  options={taskStatuses.map((status) => [status, status])}
-                  onChange={(value) =>
-                    setDraft((current) =>
-                      current
-                        ? {
-                            ...current,
-                            tasks: current.tasks.map((item) =>
-                              item.clientId === task.clientId ? { ...item, status: value as TaskStatus } : item,
-                            ),
-                          }
-                        : current,
-                    )
-                  }
-                />
+                <IconButton label="删除任务" onClick={() => removeTask(task.clientId)}>
+                  <Trash2 size={15} />
+                </IconButton>
+              </div>
+              <div className="mt-2 grid gap-2 md:grid-cols-4">
+                <Field label="负责人">
+                  <Select
+                    value={task.ownerClientId}
+                    options={draftEntities.map((entity) => [entity.clientId, entity.title])}
+                    onChange={(value) =>
+                      setDraft((current) =>
+                        current
+                          ? {
+                              ...current,
+                              tasks: current.tasks.map((item) =>
+                                item.clientId === task.clientId ? { ...item, ownerClientId: value } : item,
+                              ),
+                            }
+                          : current,
+                      )
+                    }
+                  />
+                </Field>
+                <Field label="关联实体">
+                  <Select
+                    value={task.linkedToClientIds[0] ?? ''}
+                    options={draftEntities.map((entity) => [entity.clientId, entity.title])}
+                    onChange={(value) =>
+                      setDraft((current) =>
+                        current
+                          ? {
+                              ...current,
+                              tasks: current.tasks.map((item) =>
+                                item.clientId === task.clientId ? { ...item, linkedToClientIds: [value] } : item,
+                              ),
+                            }
+                          : current,
+                      )
+                    }
+                  />
+                </Field>
+                <Field label="状态">
+                  <Select
+                    value={task.status}
+                    options={taskStatuses.map((status) => [status, status])}
+                    onChange={(value) =>
+                      setDraft((current) =>
+                        current
+                          ? {
+                              ...current,
+                              tasks: current.tasks.map((item) =>
+                                item.clientId === task.clientId ? { ...item, status: value as TaskStatus } : item,
+                              ),
+                            }
+                          : current,
+                      )
+                    }
+                  />
+                </Field>
+                <Field label="截止">
+                  <input
+                    value={task.dueDate ?? ''}
+                    onChange={(event) =>
+                      setDraft((current) =>
+                        current
+                          ? {
+                              ...current,
+                              tasks: current.tasks.map((item) =>
+                                item.clientId === task.clientId
+                                  ? { ...item, dueDate: event.target.value || undefined }
+                                  : item,
+                              ),
+                            }
+                          : current,
+                      )
+                    }
+                    className="w-full rounded-[10px] border border-[#d9d9d6] px-3 py-2 text-sm outline-none focus:border-[#155eef]"
+                  />
+                </Field>
               </div>
             </div>
           ))
@@ -393,14 +564,18 @@ function TaskSection({
 
 function EntityEditor({
   entity,
+  canRemove,
   onChange,
+  onRemove,
 }: {
   entity: DraftEntity;
+  canRemove: boolean;
   onChange: (clientId: string, patch: Partial<DraftEntity>) => void;
+  onRemove: (clientId: string) => void;
 }) {
   return (
     <div className="rounded-[12px] border border-[#e5e5e4] p-3">
-      <div className="grid gap-2 md:grid-cols-[120px_minmax(0,1fr)]">
+      <div className="grid gap-2 md:grid-cols-[120px_minmax(0,1fr)_auto]">
         <Field label="类型">
           <Select
             value={entity.type}
@@ -415,6 +590,11 @@ function EntityEditor({
             className="w-full rounded-[10px] border border-[#d9d9d6] px-3 py-2 text-sm outline-none focus:border-[#155eef]"
           />
         </Field>
+        <div className="flex items-end justify-end">
+          <IconButton label="删除实体" onClick={() => onRemove(entity.clientId)} disabled={!canRemove}>
+            <Trash2 size={15} />
+          </IconButton>
+        </div>
       </div>
       <Field label="摘要">
         <textarea
@@ -461,6 +641,31 @@ function EntityEditor({
         ))}
       </div>
     </div>
+  );
+}
+
+function IconButton({
+  label,
+  children,
+  disabled = false,
+  onClick,
+}: {
+  label: string;
+  children: ReactNode;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      onClick={onClick}
+      disabled={disabled}
+      className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[#d9d9d6] bg-white text-[#4b5563] transition hover:border-[#155eef] hover:text-[#155eef] disabled:cursor-not-allowed disabled:opacity-40"
+    >
+      {children}
+    </button>
   );
 }
 

@@ -20,6 +20,8 @@ describe('capture flow', () => {
     expect(result.relationships.length).toBeGreaterThan(0);
     expect(result.tasks).toHaveLength(1);
     expect(result.tasks[0]?.owner).toBeTruthy();
+    expect(result.compilation.createdEntities).toBe(result.entities.length);
+    expect(result.compilation.createdTasks).toBe(1);
 
     const savedEntry = await db.entries.get(result.entry.id);
     expect(savedEntry?.derivedEntities).toHaveLength(result.entities.length);
@@ -91,5 +93,9 @@ describe('capture flow', () => {
     ).toContain(result.entry.id);
     expect(participantRelationships).toHaveLength(1);
     expect(participantRelationships[0].evidence).toContain(result.entry.id);
+    expect(result.compilation.reusedEntities).toBeGreaterThanOrEqual(3);
+    expect(result.compilation.updatedPeople).toBeGreaterThanOrEqual(1);
+    expect(result.compilation.updatedTopics).toBeGreaterThanOrEqual(1);
+    expect(result.compilation.updatedRelationships).toBeGreaterThanOrEqual(1);
   });
 });
