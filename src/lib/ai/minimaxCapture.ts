@@ -112,6 +112,7 @@ JSON schema:
 - 包含“稳住、完善、强化、保留、评估、做稳、减少、支持、让…成为”等执行动词的计划项，应作为任务候选。
 - 关系方向要符合语义：人 attendee 互动；互动 about 事项；人 participant/owner 事项。
 - owner / participant / stakeholder / decision-maker 只能用于 person -> project；工具、模型、框架、技术组件不能作为“负责人”。
+- Gemini、SenseVoice-Small、OpenCLI、OpenClaw、Fish Audio S2、Live2D/Pixi、Electron、Whisper.cpp 等技术实体的 type 应为 topic，不应为 person。
 - 项目与工具、模型、框架、技术组件的关系应优先使用 depends-on 或 related-to，不要使用 owner。
 - 输出中的人名、项目名、任务内容必须来自用户输入或由用户输入直接概括，不能照抄 schema 或示例词。
 `;
@@ -173,6 +174,14 @@ function normalizeRelationship(from: DraftEntity, to: DraftEntity, type: Relatio
   const personToEventTypes = ['attendee', 'organizer', 'mentioned-in'] as const;
 
   if (personToProjectTypes.includes(type as (typeof personToProjectTypes)[number])) {
+    if (isLikelyTechnicalEntity(from) && to.type === 'project') {
+      return { from: to, to: from, type: 'depends-on' as const };
+    }
+
+    if (from.type === 'project' && isLikelyTechnicalEntity(to)) {
+      return { from, to, type: 'depends-on' as const };
+    }
+
     if (from.type === 'person' && to.type === 'project') {
       return { from, to, type };
     }
@@ -237,9 +246,12 @@ function createImplicitOwner(): DraftEntity {
 
 function normalizeEntity(entity: AiEntity | undefined, fallbackType: EntityType): DraftEntity {
   const title = entity?.title?.trim() || '未命名实体';
+  const requestedType = pickEnum(entity?.type, entityTypes, fallbackType);
   return {
     clientId: createDraftId('entity'),
-    type: pickEnum(entity?.type, entityTypes, fallbackType),
+    type: requestedType === 'person' && isLikelyTechnicalEntity({ title, summary: entity?.summary, tags: entity?.tags })
+      ? 'topic'
+      : requestedType,
     title,
     summary: entity?.summary?.trim() || `${title} 相关记录。`,
     tags: toArray<string>(entity?.tags)
@@ -309,6 +321,15 @@ function extractJsonObjects(text: string) {
     throw new Error('MiniMax did not return a JSON object.');
   }
   return objects;
+}
+
+function isLikelyTechnicalEntity(entity: { title: string; summary?: unknown; tags?: unknown }) {
+  const tags = Array.isArray(entity.tags) ? entity.tags.join(' ') : '';
+  const text = [entity.title, entity.summary, tags].filter(Boolean).join(' ');
+
+  return /(?:Gemini|SenseVoice|OpenCLI|OpenClaw|Fish Audio|Live2D|Pixi|Electron|Whisper|MiniMax|豆包|GLM|TTS|ASR|LLM|RTC|VoiceChat|KWS|VAD|Router|PowerShell|System\.Speech|Gmail|Google Search|grounding|provider|fallback|API|SDK|CLI|\.cpp)/i.test(
+    text,
+  );
 }
 
 function toArray<T>(value: unknown): T[] {

@@ -15,6 +15,7 @@ const scenes: Scene[] = ['work', 'life', 'social', 'personal'];
 const relationshipTypes: RelationshipType[] = [
   'owner',
   'participant',
+  'depends-on',
   'attendee',
   'about',
   'mentions',

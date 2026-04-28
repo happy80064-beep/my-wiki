@@ -120,6 +120,13 @@ describe('MiniMax capture normalization', () => {
           },
           {
             type: 'person',
+            title: 'SenseVoice-Small',
+            summary: '本地 ASR 后端。',
+            tags: ['模型'],
+            scenes: ['work'],
+          },
+          {
+            type: 'person',
             title: '我',
             summary: '项目负责人。',
             tags: ['负责人'],
@@ -128,6 +135,7 @@ describe('MiniMax capture normalization', () => {
         ],
         relationships: [
           { fromTitle: '桌面数字生命体', type: 'owner', toTitle: 'OpenCLI' },
+          { fromTitle: 'SenseVoice-Small', type: 'owner', toTitle: '桌面数字生命体' },
           { fromTitle: '桌面数字生命体', type: 'owner', toTitle: '我' },
         ],
         tasks: [],
@@ -136,12 +144,22 @@ describe('MiniMax capture normalization', () => {
 
     const project = draft.primaryEntity;
     const openCli = draft.relatedEntities.find((entity) => entity.title === 'OpenCLI');
+    const senseVoice = draft.relatedEntities.find((entity) => entity.title === 'SenseVoice-Small');
     const me = draft.relatedEntities.find((entity) => entity.title === '我');
+
+    expect(openCli?.type).toBe('topic');
 
     expect(draft.relationships).toContainEqual(
       expect.objectContaining({
         fromClientId: project.clientId,
         toClientId: openCli?.clientId,
+        type: 'depends-on',
+      }),
+    );
+    expect(draft.relationships).toContainEqual(
+      expect.objectContaining({
+        fromClientId: project.clientId,
+        toClientId: senseVoice?.clientId,
         type: 'depends-on',
       }),
     );
