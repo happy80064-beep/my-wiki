@@ -69,4 +69,34 @@ describe('MiniMax capture normalization', () => {
     expect(draft.primaryEntity.title).toBe('一句话总结');
     expect(draft.primaryEntity.type).toBe('topic');
   });
+
+  it('keeps tasks with uncertain owner by assigning editable implicit owner', () => {
+    const draft = normalizeMiniMaxCaptureResponse(
+      JSON.stringify({
+        primaryEntity: {
+          type: 'project',
+          title: '桌面数字生命体',
+          summary: '下一阶段要做稳语音链路和执行链路。',
+          tags: ['路线规划'],
+          scenes: ['work'],
+        },
+        relatedEntities: [],
+        relationships: [],
+        tasks: [
+          {
+            description: '做稳语音链路和执行链路',
+            ownerTitle: 'uncertain',
+            linkedToTitles: ['桌面数字生命体'],
+            status: 'pending',
+          },
+        ],
+      }),
+    );
+
+    expect(draft.tasks).toHaveLength(1);
+    expect(draft.relatedEntities.some((entity) => entity.title === '我')).toBe(true);
+    expect(draft.tasks[0]?.ownerClientId).toBe(
+      draft.relatedEntities.find((entity) => entity.title === '我')?.clientId,
+    );
+  });
 });

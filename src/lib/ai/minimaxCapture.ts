@@ -96,7 +96,7 @@ JSON schema:
   "tasks": [
     {
       "description": "任务内容",
-      "ownerTitle": "负责人标题，必须是已输出实体之一；无法确定时填 uncertain",
+      "ownerTitle": "负责人标题，必须是已输出实体之一；原文没有明确负责人时填 我，并在 relatedEntities 中补充 person 实体 我",
       "linkedToTitles": ["关联事项或互动标题"],
       "dueDate": "ISO date 或自然语言日期，可省略",
       "status": "pending"
@@ -107,7 +107,9 @@ JSON schema:
 判断规则:
 - 不要凭空创造没有被明确提到的人、项目、任务。
 - 不要把“总结、总览、总之”识别成人名。
-- 任务 owner 必须谨慎，不能确定就填 uncertain。
+- 任务 owner 必须谨慎；没有明确负责人时，默认 ownerTitle 填“我”，因为这是个人知识库里的待确认任务草稿。
+- “短期优先级 / 推荐后续路线 / 下一阶段核心 / 计划 / 待办 / 行动项”后面的编号列表或行动句，应优先提取为 tasks。
+- 包含“稳住、完善、强化、保留、评估、做稳、减少、支持、让…成为”等执行动词的计划项，应作为任务候选。
 - 关系方向要符合语义：人 attendee 互动；互动 about 事项；人 participant/owner 事项。
 - 输出中的人名、项目名、任务内容必须来自用户输入或由用户输入直接概括，不能照抄 schema 或示例词。
 `;
@@ -137,8 +139,8 @@ export function normalizeMiniMaxCaptureResponse(rawText: string): CaptureDraft {
 
   const tasks = toArray<AiTask>(parsed.tasks)
     .map((task) => {
-      const owner = task.ownerTitle ? entityByTitle.get(task.ownerTitle) : undefined;
-      if (!owner || task.ownerTitle === 'uncertain' || !task.description?.trim()) return undefined;
+      if (!task.description?.trim()) return undefined;
+      const owner = resolveTaskOwner(task.ownerTitle, entityByTitle, related, createImplicitOwner);
       return {
         clientId: createDraftId('task'),
         description: task.description.trim(),
@@ -157,6 +159,38 @@ export function normalizeMiniMaxCaptureResponse(rawText: string): CaptureDraft {
     relatedEntities: related,
     relationships,
     tasks,
+  };
+}
+
+function resolveTaskOwner(
+  ownerTitle: string | undefined,
+  entityByTitle: Map<string, DraftEntity>,
+  relatedEntities: DraftEntity[],
+  createOwner: () => DraftEntity,
+) {
+  const normalizedOwnerTitle = ownerTitle?.trim();
+  if (normalizedOwnerTitle && normalizedOwnerTitle !== 'uncertain') {
+    const owner = entityByTitle.get(normalizedOwnerTitle);
+    if (owner) return owner;
+  }
+
+  const existingUser = entityByTitle.get('我');
+  if (existingUser) return existingUser;
+
+  const owner = createOwner();
+  relatedEntities.push(owner);
+  entityByTitle.set(owner.title, owner);
+  return owner;
+}
+
+function createImplicitOwner(): DraftEntity {
+  return {
+    clientId: createDraftId('entity'),
+    type: 'person',
+    title: '我',
+    summary: '未明确负责人时默认归属到我，保存前可修改。',
+    tags: ['待确认负责人'],
+    scenes: ['personal'],
   };
 }
 
