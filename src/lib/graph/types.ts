@@ -8,9 +8,20 @@ export type QuerySource = {
 };
 
 export type QueryTraceStep = {
-  layer: 'intent' | 'directory' | 'entity' | 'graph' | 'evidence' | 'answer';
+  layer: 'intent' | 'agent' | 'directory' | 'entity' | 'graph' | 'evidence' | 'answer';
   label: string;
   detail: string;
+};
+
+export type WikiCompileSuggestion = {
+  id: string;
+  entityId: string;
+  entityTitle: string;
+  propertyKey: string;
+  propertyValue: string;
+  evidenceEntryId: string;
+  evidenceSnippet: string;
+  confidence: number;
 };
 
 export type StructuredQueryResult = {
@@ -19,6 +30,7 @@ export type StructuredQueryResult = {
   suggestions: string[];
   candidates?: Entity[];
   trace?: QueryTraceStep[];
+  compileSuggestions?: WikiCompileSuggestion[];
   llm?: {
     provider: 'minimax' | 'deepseek';
     model: string;

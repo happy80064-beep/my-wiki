@@ -20,16 +20,19 @@ import {
 } from './filter';
 import { parseQueryIntent } from './queryIntent';
 import { getSubgraph } from './traverse';
-import type { QuerySource, QueryTraceStep, StructuredQueryResult } from './types';
+import type { QuerySource, QueryTraceStep, StructuredQueryResult, WikiCompileSuggestion } from './types';
 import type { Entity, Entry, Relationship, Task } from '@/types';
 import { composeQueryAnswer } from '@/lib/ai/queryComposerClient';
 import type { QueryComposePayload } from '@/lib/ai/queryComposer';
+import { planQueryWithAgent } from '@/lib/ai/queryPlannerClient';
+import type { QueryIndexEntity, QueryPlan } from '@/lib/ai/queryPlanner';
 import { db } from '@/lib/db';
 
 export type { QuerySource, StructuredQueryResult } from './types';
 
 export type RunStructuredQueryOptions = {
   composeWithLlm?: boolean;
+  planWithAgent?: boolean;
 };
 
 export async function runStructuredQuery(
@@ -155,16 +158,18 @@ async function answerWikiRead(
   entityName: string | undefined,
   options: RunStructuredQueryOptions,
 ): Promise<StructuredQueryResult> {
-  const terms = buildSearchTerms(question, entityName);
+  const index = await buildEntityIndex();
+  const { plan, trace: planTrace } = await resolveQueryPlan(question, entityName, index, options);
+  const terms = buildSearchTerms(question, entityName, plan);
   const trace: QueryTraceStep[] = [
     {
-      layer: 'intent',
-      label: '问题解析',
-      detail: `抽取关键词：${terms.join('、') || '未抽取到明确关键词'}`,
+      layer: options.planWithAgent ? 'agent' : 'intent',
+      label: options.planWithAgent ? 'Query Agent' : '问题解析',
+      detail: planTrace,
     },
   ];
 
-  const candidates = await findWikiEntityCandidates(terms);
+  const candidates = await findWikiEntityCandidates(terms, plan.selectedEntityIds);
   trace.push({
     layer: 'directory',
     label: '知识目录',
@@ -187,7 +192,7 @@ async function answerWikiRead(
   }
 
   const entity = candidates[0].entity;
-  const document = await readEntityDocument(entity, question);
+  const document = await readEntityDocument(entity, question, plan);
   trace.push(
     {
       layer: 'entity',
@@ -225,6 +230,7 @@ async function answerWikiRead(
     sources: buildWikiReadSources(document),
     suggestions: buildEntitySuggestions(entity),
     trace,
+    compileSuggestions: buildCompileSuggestions(document, plan),
   };
 
   return composeResultIfRequested(result, buildQueryComposePayload(question, draftAnswer, document), options);
@@ -252,9 +258,7 @@ type EvidenceHit = {
   score: number;
 };
 
-async function findWikiEntityCandidates(terms: string[]): Promise<WikiEntityCandidate[]> {
-  if (terms.length === 0) return [];
-
+async function buildEntityIndex(): Promise<QueryIndexEntity[]> {
   const [entities, relationships] = await Promise.all([db.entities.toArray(), db.relationships.toArray()]);
   const relationshipCountByEntity = new Map<string, number>();
   for (const relationship of relationships) {
@@ -263,18 +267,108 @@ async function findWikiEntityCandidates(terms: string[]): Promise<WikiEntityCand
   }
 
   return entities
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .slice(0, 120)
+    .map((entity) => ({
+      id: entity.id,
+      type: entity.type,
+      title: entity.title,
+      aliases: buildEntityAliases(entity),
+      summary: entity.summary,
+      tags: entity.tags,
+      scenes: entity.scenes,
+      sourceCount: entity.sourceEntries.length,
+      relationshipCount: relationshipCountByEntity.get(entity.id) ?? 0,
+      updatedAt: entity.updatedAt,
+    }));
+}
+
+async function resolveQueryPlan(
+  question: string,
+  entityName: string | undefined,
+  index: QueryIndexEntity[],
+  options: RunStructuredQueryOptions,
+): Promise<{ plan: QueryPlan; trace: string }> {
+  const fallback = buildFallbackQueryPlan(question, entityName);
+  if (!options.planWithAgent) {
+    return {
+      plan: fallback,
+      trace: `规则解析关键词：${[...fallback.entityCandidates, ...fallback.evidenceTerms].join('、') || '无'}`,
+    };
+  }
+
+  try {
+    const plan = await planQueryWithAgent(question, index);
+    return {
+      plan: mergeQueryPlans(plan, fallback),
+      trace: `读取 ${index.length} 个目录项，选择实体：${
+        plan.selectedEntityIds.length > 0 ? plan.selectedEntityIds.join('、') : plan.entityCandidates.join('、') || '未确定'
+      }；属性：${plan.attribute || '未指定'}；证据词：${plan.evidenceTerms.join('、') || '无'}。`,
+    };
+  } catch (error) {
+    return {
+      plan: fallback,
+      trace: `Query Agent 规划失败，回退规则解析：${error instanceof Error ? error.message : '未知错误'}`,
+    };
+  }
+}
+
+function buildFallbackQueryPlan(question: string, entityName: string | undefined): QueryPlan {
+  const attributeTerms = buildAttributeTerms(question);
+  const cleanedQuestion = cleanupSearchText(question);
+  const cleanedEntityName = cleanupSearchText(entityName ?? '');
+  return {
+    intent: attributeTerms.length > 0 ? 'attribute_lookup' : 'evidence_search',
+    selectedEntityIds: [],
+    entityCandidates: [cleanedEntityName, cleanedQuestion].filter((term) => term.length >= 2),
+    attribute: inferAttribute(question),
+    evidenceTerms: attributeTerms,
+    needsRawEvidence: attributeTerms.length > 0,
+    needsGlobalSearch: true,
+    answerType: /(能否|是否|能不能|可不可以|可以吗)/.test(question) ? 'yes_no_with_evidence' : 'unknown',
+    confidence: 0.45,
+  };
+}
+
+function mergeQueryPlans(plan: QueryPlan, fallback: QueryPlan): QueryPlan {
+  return {
+    ...plan,
+    entityCandidates: uniqueStrings([...plan.entityCandidates, ...fallback.entityCandidates]).slice(0, 8),
+    evidenceTerms: uniqueStrings([...plan.evidenceTerms, ...fallback.evidenceTerms]).slice(0, 12),
+    needsRawEvidence: plan.needsRawEvidence || fallback.needsRawEvidence,
+    needsGlobalSearch: plan.needsGlobalSearch || fallback.needsGlobalSearch,
+    attribute: plan.attribute || fallback.attribute,
+  };
+}
+
+async function findWikiEntityCandidates(
+  terms: string[],
+  selectedEntityIds: string[] = [],
+): Promise<WikiEntityCandidate[]> {
+  if (terms.length === 0 && selectedEntityIds.length === 0) return [];
+
+  const [entities, relationships] = await Promise.all([db.entities.toArray(), db.relationships.toArray()]);
+  const selectedIds = new Set(selectedEntityIds);
+  const relationshipCountByEntity = new Map<string, number>();
+  for (const relationship of relationships) {
+    relationshipCountByEntity.set(relationship.from, (relationshipCountByEntity.get(relationship.from) ?? 0) + 1);
+    relationshipCountByEntity.set(relationship.to, (relationshipCountByEntity.get(relationship.to) ?? 0) + 1);
+  }
+
+  return entities
     .map((entity) => {
-      const baseScore = Math.max(...terms.map((term) => scoreEntityForTerm(entity, term)));
+      const baseScore = terms.length > 0 ? Math.max(...terms.map((term) => scoreEntityForTerm(entity, term))) : 0;
+      const agentBoost = selectedIds.has(entity.id) ? 120 : 0;
       const sourceBoost = Math.min(entity.sourceEntries.length * 2, 6);
       const relationshipBoost = Math.min(relationshipCountByEntity.get(entity.id) ?? 0, 5);
-      return { entity, score: baseScore + sourceBoost + relationshipBoost };
+      return { entity, score: agentBoost + baseScore + sourceBoost + relationshipBoost };
     })
     .filter((candidate) => candidate.score >= 30)
     .sort((a, b) => b.score - a.score || b.entity.updatedAt - a.entity.updatedAt)
     .slice(0, 5);
 }
 
-async function readEntityDocument(entity: Entity, question: string): Promise<EntityDocument> {
+async function readEntityDocument(entity: Entity, question: string, plan: QueryPlan): Promise<EntityDocument> {
   const [tasks, subgraph] = await Promise.all([
     db.tasks
       .filter((task) => task.owner === entity.id || task.linkedTo.includes(entity.id))
@@ -290,7 +384,7 @@ async function readEntityDocument(entity: Entity, question: string): Promise<Ent
     ...relationships.flatMap((relationship) => relationship.evidence),
   ];
   const entries = await getEntriesByIds(entryIds);
-  const evidenceHits = await findRawEvidenceHits(question, entity, entries);
+  const evidenceHits = await findRawEvidenceHits(question, entity, entries, plan);
 
   return { entity, tasks, relationships, relatedEntities, entries, evidenceHits };
 }
@@ -358,22 +452,24 @@ async function answerEvidenceFallback(
   );
 }
 
-async function findRawEvidenceHits(question: string, entity: Entity, linkedEntries: Entry[]) {
-  const terms = buildEvidenceTerms(question, entity);
+async function findRawEvidenceHits(question: string, entity: Entity, linkedEntries: Entry[], plan: QueryPlan) {
+  const terms = buildEvidenceTerms(question, entity, plan);
   if (terms.length === 0) return [];
 
   const linkedHits = findEvidenceHitsInEntries(linkedEntries, terms, 'entity-source');
-  if (linkedHits.length > 0) {
+  if (linkedHits.length > 0 && !plan.needsGlobalSearch) {
     return linkedHits.slice(0, 5);
   }
 
   const linkedEntryIds = new Set(linkedEntries.map((entry) => entry.id));
   const entries = await db.entries.orderBy('capturedAt').reverse().toArray();
-  return findEvidenceHitsInEntries(
+  const globalHits = findEvidenceHitsInEntries(
     entries.filter((entry) => !linkedEntryIds.has(entry.id)),
     terms,
     'global-fallback',
-  ).slice(0, 5);
+  );
+
+  return [...linkedHits, ...globalHits].sort((a, b) => b.score - a.score).slice(0, 5);
 }
 
 function findEvidenceHitsInEntries(
@@ -523,6 +619,78 @@ function buildComposeEntries(document: EntityDocument): QueryComposePayload['ent
   return [...evidenceEntries, ...contextEntries];
 }
 
+function buildCompileSuggestions(document: EntityDocument, plan: QueryPlan): WikiCompileSuggestion[] {
+  const propertyKey = normalizePropertyKey(plan.attribute ?? inferAttribute(plan.evidenceTerms.join(' ')));
+  if (!propertyKey || document.evidenceHits.length === 0) return [];
+
+  return document.evidenceHits
+    .map((hit, index) => {
+      const propertyValue = extractPropertyValue(propertyKey, hit.snippet, hit.matchedTerms);
+      if (!propertyValue) return undefined;
+      return {
+        id: `${document.entity.id}:${propertyKey}:${index}`,
+        entityId: document.entity.id,
+        entityTitle: document.entity.title,
+        propertyKey,
+        propertyValue,
+        evidenceEntryId: hit.entry.id,
+        evidenceSnippet: hit.snippet,
+        confidence: hit.scope === 'entity-source' ? 0.78 : 0.62,
+      } satisfies WikiCompileSuggestion;
+    })
+    .filter((suggestion): suggestion is WikiCompileSuggestion => Boolean(suggestion))
+    .slice(0, 3);
+}
+
+function normalizePropertyKey(attribute: string | undefined) {
+  if (!attribute) return undefined;
+  const normalized = attribute.toLowerCase();
+  if (/(runtime|environment|windows|平台|运行)/i.test(normalized)) return 'runtimeEnvironment';
+  if (/(wake|唤醒|kws)/i.test(normalized)) return 'wakeWord';
+  if (/(stop|终止|停止|打断)/i.test(normalized)) return 'stopWord';
+  if (/(path|路径|目录)/i.test(normalized)) return 'localPath';
+  if (/(model|模型|llm|asr|tts)/i.test(normalized)) return 'models';
+  if (/(owner|负责人)/i.test(normalized)) return 'ownerNote';
+  return attribute.replace(/[^A-Za-z0-9_]/g, '') || undefined;
+}
+
+function extractPropertyValue(propertyKey: string, text: string, matchedTerms: string[]) {
+  if (propertyKey === 'runtimeEnvironment') {
+    if (/Windows/i.test(text)) return 'Windows';
+    if (/macOS/i.test(text)) return 'macOS';
+    if (/Linux/i.test(text)) return 'Linux';
+  }
+
+  if (propertyKey === 'wakeWord') {
+    const match = text.match(/(?:主)?唤醒词(?:目前)?(?:是|为|叫|使用)?[：:\s“"]*([^”"。；;，,]+)/);
+    return cleanExtractedValue(match?.[1]);
+  }
+
+  if (propertyKey === 'stopWord') {
+    const match = text.match(/(?:终止词|停止词|打断词).*?(?:是|为|使用)?[：:\s“"]*([^。；;\n]+)/);
+    return cleanExtractedValue(match?.[1]);
+  }
+
+  if (propertyKey === 'localPath') {
+    const match = text.match(/[A-Z]:\\[^\s。；;，,]+/i);
+    return cleanExtractedValue(match?.[0]);
+  }
+
+  if (propertyKey === 'models') {
+    const models = matchedTerms.filter((term) => /[A-Za-z0-9]/.test(term));
+    return models.length > 0 ? uniqueStrings(models).join('、') : undefined;
+  }
+
+  return cleanExtractedValue(matchedTerms[0]);
+}
+
+function cleanExtractedValue(value: string | undefined) {
+  return value
+    ?.replace(/^[“"'\s]+|[”"'\s]+$/g, '')
+    .replace(/^(：|:|是|为|使用|目前)/, '')
+    .trim();
+}
+
 async function composeResultIfRequested(
   result: StructuredQueryResult,
   payload: QueryComposePayload,
@@ -572,16 +740,22 @@ function buildEntitySuggestions(entity: Entity) {
   return [`查看${entity.title}当前状态`, `查看${entity.title}关联实体`, `将命中信息编译回${entity.title}`];
 }
 
-function buildSearchTerms(question: string, entityName: string | undefined) {
+function buildSearchTerms(question: string, entityName: string | undefined, plan?: QueryPlan) {
   const cleanedQuestion = cleanupSearchText(question);
   const cleanedEntityName = cleanupSearchText(entityName ?? '');
-  const attributeTerms = buildAttributeTerms(question);
+  const attributeTerms = uniqueStrings([...(plan?.evidenceTerms ?? []), ...buildAttributeTerms(question)]);
   let entityOnlyQuestion = cleanedQuestion;
   for (const term of attributeTerms) {
     entityOnlyQuestion = entityOnlyQuestion.replace(cleanupSearchText(term), '');
   }
   return Array.from(
-    new Set([cleanedEntityName, entityOnlyQuestion, cleanedQuestion].filter((term) => term.length >= 2)),
+    new Set([
+      ...(plan?.entityCandidates ?? []),
+      cleanedEntityName,
+      entityOnlyQuestion,
+      cleanedQuestion,
+      ...(plan?.evidenceTerms ?? []),
+    ].filter((term) => term.length >= 2)),
   );
 }
 
@@ -593,12 +767,13 @@ function cleanupSearchText(value: string) {
       /(下一阶段|当前|短期优先级|优先级|推荐后续|后续|需要|有哪些|有什么|用了哪些|使用哪些|用了|使用|关联|相关|状态|进展|进度|任务|待办|未完成|没完成|重点问题|问题|叫什么|叫啥|名字|名称|是谁|是什么|介绍|讲讲|档案|信息|概况|总结|吗|呢|的)/g,
       '',
     )
+    .replace(/(能否|是否|能不能|可不可以|可以不|可以吗|在|环境|运行|平台|支持|windows|Windows)/g, '')
     .replace(/\s+/g, '')
     .trim();
 }
 
-function buildEvidenceTerms(question: string, entity: Entity) {
-  const terms = new Set(buildAttributeTerms(question));
+function buildEvidenceTerms(question: string, entity: Entity, plan?: QueryPlan) {
+  const terms = new Set([...(plan?.evidenceTerms ?? []), ...buildAttributeTerms(question)]);
   const entityAliases = buildEntityAliases(entity);
   let stripped = question;
 
@@ -622,6 +797,7 @@ function buildAttributeTerms(question: string) {
     { test: /(终止词|停止词|结束词|打断词|miki|mi ki|米基|米奇)/i, terms: ['终止词', '停止词', '结束词', '打断词', 'miki', 'mi ki', '米基', '米奇'] },
     { test: /(API\s*key|apikey|密钥|token)/i, terms: ['API key', 'apikey', '密钥', 'token'] },
     { test: /(模型|LLM|ASR|TTS)/i, terms: ['模型', 'LLM', 'ASR', 'TTS'] },
+    { test: /(Windows|windows|运行环境|桌面环境|操作系统|平台|能否.*运行|是否.*运行|运行在)/i, terms: ['Windows', 'Windows 桌面', '运行在 Windows', '运行环境', '桌面', '平台'] },
     { test: /(路径|目录|文件夹|本地项目)/, terms: ['路径', '目录', '文件夹', '本地项目路径'] },
     { test: /(负责人|owner|谁负责|归谁)/i, terms: ['负责人', 'owner', '负责'] },
     { test: /(角色名|名字|名称|叫什么|叫啥)/, terms: ['角色名', '名字', '名称'] },
@@ -630,6 +806,29 @@ function buildAttributeTerms(question: string) {
   return Array.from(
     new Set(groups.flatMap((group) => (group.test.test(question) ? group.terms : []))),
   );
+}
+
+function inferAttribute(question: string) {
+  if (/(Windows|windows|运行环境|桌面环境|操作系统|平台|能否.*运行|是否.*运行|运行在)/i.test(question)) {
+    return 'runtimeEnvironment';
+  }
+  if (/(唤醒词|叫醒词|唤醒|KWS)/i.test(question)) return 'wakeWord';
+  if (/(终止词|停止词|结束词|打断词|miki|mi ki|米基|米奇)/i.test(question)) return 'stopWord';
+  if (/(API\s*key|apikey|密钥|token)/i.test(question)) return 'apiKey';
+  if (/(路径|目录|文件夹|本地项目)/.test(question)) return 'localPath';
+  if (/(负责人|owner|谁负责|归谁)/i.test(question)) return 'owner';
+  return undefined;
+}
+
+function uniqueStrings(values: string[]) {
+  const seen = new Set<string>();
+  return values.filter((value) => {
+    const trimmed = value.trim();
+    const key = normalize(trimmed);
+    if (!trimmed || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function buildEntityAliases(entity: Entity) {

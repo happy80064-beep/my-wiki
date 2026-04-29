@@ -183,6 +183,50 @@ describe('structured query', () => {
     expect(result.sources.some((source) => source.type === 'entry' && source.id === globalEntry.id)).toBe(true);
   });
 
+  it('uses Query Agent planning to match natural questions to wiki pages and evidence terms', async () => {
+    const entry = await createEntry({
+      content: '项目定位：“桌面数字生命体”是一个运行在 Windows 桌面的 AI 生命体原型。',
+      source: 'text',
+    });
+    const project = await createEntity({
+      type: 'project',
+      title: '桌面数字生命体',
+      summary: '桌面智能体原型。',
+      sourceEntries: [entry.id],
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(
+        JSON.stringify({
+          intent: 'attribute_lookup',
+          selectedEntityIds: [project.id],
+          entityCandidates: ['数字生命体', '桌面数字生命体', '桌面生命体'],
+          attribute: 'runtimeEnvironment',
+          evidenceTerms: ['Windows', 'Windows 桌面', '运行在 Windows', '运行环境'],
+          needsRawEvidence: true,
+          needsGlobalSearch: false,
+          answerType: 'yes_no_with_evidence',
+          confidence: 0.9,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )),
+    );
+
+    const result = await runStructuredQuery('数字生命体能否在windows环境运行？', { planWithAgent: true });
+
+    expect(result.answer).toContain('Windows');
+    expect(result.sources.some((source) => source.id === entry.id)).toBe(true);
+    expect(result.trace?.some((step) => step.layer === 'agent')).toBe(true);
+    expect(result.compileSuggestions?.[0]).toEqual(
+      expect.objectContaining({
+        entityId: project.id,
+        propertyKey: 'runtimeEnvironment',
+        propertyValue: 'Windows',
+      }),
+    );
+  });
+
   it('uses the LLM expression layer when requested', async () => {
     vi.stubGlobal(
       'fetch',

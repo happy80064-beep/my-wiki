@@ -5,6 +5,11 @@ import tailwindcss from '@tailwindcss/vite';
 import { fileURLToPath, URL } from 'node:url';
 import { buildMiniMaxCapturePrompt, normalizeMiniMaxCaptureResponse } from './src/lib/ai/minimaxCapture';
 import { buildQueryComposePrompt, type QueryComposePayload } from './src/lib/ai/queryComposer';
+import {
+  buildQueryPlanPrompt,
+  normalizeQueryPlan,
+  type QueryPlanRequest,
+} from './src/lib/ai/queryPlanner';
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
@@ -177,6 +182,84 @@ export default defineConfig(({ mode }) => {
             } catch (error) {
               sendJson(res, 500, {
                 error: error instanceof Error ? error.message : 'Query composition failed.',
+              });
+            }
+          });
+
+          server.middlewares.use('/api/query/plan', async (req, res) => {
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { error: 'Method not allowed' });
+              return;
+            }
+
+            try {
+              const payload = (await readJsonBody(req)) as QueryPlanRequest;
+              if (!payload.question?.trim() || !Array.isArray(payload.index)) {
+                sendJson(res, 400, { error: 'question and index are required.' });
+                return;
+              }
+
+              const prompt = buildQueryPlanPrompt(payload);
+              const minimaxResult = minimaxApiKey
+                ? await requestOpenAiCompatibleText({
+                    apiKey: minimaxApiKey,
+                    baseUrl: minimaxBaseUrl,
+                    model: minimaxModel,
+                    providerName: 'MiniMax',
+                    prompt,
+                    systemPrompt: '你是 MyWiki Query Agent。只输出符合 schema 的 JSON 对象。',
+                    maxTokens: 1200,
+                    extraBody: { response_format: { type: 'json_object' } },
+                  })
+                : { ok: false as const, error: 'MINIMAX_API_KEY is not configured.' };
+
+              const minimaxFailure = minimaxResult.ok ? '' : minimaxResult.error;
+              if (minimaxResult.ok) {
+                try {
+                  sendJson(res, 200, normalizeQueryPlan(minimaxResult.text, payload));
+                  return;
+                } catch (error) {
+                  // Fall through to DeepSeek.
+                }
+              }
+
+              let deepseekFailure = '';
+              for (const deepseekApiKey of deepseekApiKeys) {
+                const deepseekResult = await requestOpenAiCompatibleText({
+                  apiKey: deepseekApiKey,
+                  baseUrl: deepseekBaseUrl,
+                  model: deepseekModel,
+                  providerName: 'DeepSeek',
+                  prompt,
+                  systemPrompt: '你是 MyWiki Query Agent。只输出符合 schema 的 JSON 对象。',
+                  maxTokens: 1200,
+                  extraBody: {
+                    thinking: { type: 'disabled' },
+                    response_format: { type: 'json_object' },
+                  },
+                });
+
+                if (deepseekResult.ok) {
+                  try {
+                    sendJson(res, 200, normalizeQueryPlan(deepseekResult.text, payload));
+                    return;
+                  } catch (error) {
+                    deepseekFailure = error instanceof Error ? error.message : 'DeepSeek returned invalid query plan.';
+                    continue;
+                  }
+                }
+
+                deepseekFailure = deepseekResult.error;
+              }
+
+              sendJson(res, 502, {
+                error: `MiniMax failed: ${minimaxFailure}. DeepSeek fallback failed: ${
+                  deepseekFailure || 'not configured'
+                }.`,
+              });
+            } catch (error) {
+              sendJson(res, 500, {
+                error: error instanceof Error ? error.message : 'Query planning failed.',
               });
             }
           });

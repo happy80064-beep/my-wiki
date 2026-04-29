@@ -1,18 +1,36 @@
-import { Loader2, Search } from 'lucide-react';
+import { Check, Loader2, Search } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router';
 import { type StructuredQueryResult, runStructuredQuery } from '@/lib/graph';
+import { getEntity, updateEntity } from '@/lib/db';
 
 export function QueryPage() {
   const [question, setQuestion] = useState('桌面生命体叫什么');
   const [result, setResult] = useState<StructuredQueryResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [appliedSuggestionIds, setAppliedSuggestionIds] = useState<string[]>([]);
 
   async function handleAsk() {
     if (!question.trim()) return;
     setIsLoading(true);
-    setResult(await runStructuredQuery(question, { composeWithLlm: true }));
+    setAppliedSuggestionIds([]);
+    setResult(await runStructuredQuery(question, { composeWithLlm: true, planWithAgent: true }));
     setIsLoading(false);
+  }
+
+  async function handleApplyCompileSuggestion(
+    suggestion: NonNullable<StructuredQueryResult['compileSuggestions']>[number],
+  ) {
+    const entity = await getEntity(suggestion.entityId);
+    if (!entity) return;
+
+    await updateEntity(entity.id, {
+      properties: {
+        ...(entity.properties as Record<string, unknown>),
+        [suggestion.propertyKey]: suggestion.propertyValue,
+      } as typeof entity.properties,
+    });
+    setAppliedSuggestionIds((ids) => [...ids, suggestion.id]);
   }
 
   return (
@@ -56,6 +74,37 @@ export function QueryPage() {
                 <p className="text-xs text-[#626965]">
                   已由 {providerTypeLabel[result.llm.provider]} · {result.llm.model} 优化表达
                 </p>
+              ) : null}
+
+              {result.compileSuggestions && result.compileSuggestions.length > 0 ? (
+                <div>
+                  <h3 className="text-sm font-semibold text-[#1f2937]">待编译回 Wiki</h3>
+                  <div className="mt-2 grid gap-2">
+                    {result.compileSuggestions.map((suggestion) => {
+                      const applied = appliedSuggestionIds.includes(suggestion.id);
+                      return (
+                        <div
+                          key={suggestion.id}
+                          className="rounded-[10px] border border-[#d9d9d6] bg-[#fbfbfa] p-3 text-xs leading-5"
+                        >
+                          <div className="font-medium text-[#1f2937]">
+                            {suggestion.entityTitle}.{suggestion.propertyKey} = {suggestion.propertyValue}
+                          </div>
+                          <div className="mt-1 text-[#626965]">{suggestion.evidenceSnippet}</div>
+                          <button
+                            type="button"
+                            onClick={() => handleApplyCompileSuggestion(suggestion)}
+                            disabled={applied}
+                            className="mt-2 inline-flex items-center gap-1 rounded-full border border-[#155eef] px-3 py-1 text-xs font-medium text-[#155eef] disabled:border-[#a8b7d8] disabled:text-[#7b8794]"
+                          >
+                            <Check size={13} />
+                            {applied ? '已写回' : '确认写回'}
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
               ) : null}
 
               <div>
