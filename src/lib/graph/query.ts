@@ -22,11 +22,20 @@ import { parseQueryIntent } from './queryIntent';
 import { getSubgraph } from './traverse';
 import type { QuerySource, QueryTraceStep, StructuredQueryResult } from './types';
 import type { Entity, Entry, Relationship, Task } from '@/types';
+import { composeQueryAnswer } from '@/lib/ai/queryComposerClient';
+import type { QueryComposePayload } from '@/lib/ai/queryComposer';
 import { db } from '@/lib/db';
 
 export type { QuerySource, StructuredQueryResult } from './types';
 
-export async function runStructuredQuery(question: string): Promise<StructuredQueryResult> {
+export type RunStructuredQueryOptions = {
+  composeWithLlm?: boolean;
+};
+
+export async function runStructuredQuery(
+  question: string,
+  options: RunStructuredQueryOptions = {},
+): Promise<StructuredQueryResult> {
   const trimmed = question.trim();
   if (!trimmed) {
     return emptyResult('请输入一个问题。');
@@ -59,10 +68,10 @@ export async function runStructuredQuery(question: string): Promise<StructuredQu
   }
 
   if (intent.type === 'entity_profile') {
-    return answerWikiRead(trimmed, intent.entityName);
+    return answerWikiRead(trimmed, intent.entityName, options);
   }
 
-  return answerWikiRead(trimmed, intent.entityName);
+  return answerWikiRead(trimmed, intent.entityName, options);
 }
 
 async function answerOwnerTasks(personName: string | undefined, isSelf: boolean): Promise<StructuredQueryResult> {
@@ -141,7 +150,11 @@ async function answerProjectRelatedEntities(projectName: string | undefined): Pr
   };
 }
 
-async function answerWikiRead(question: string, entityName: string | undefined): Promise<StructuredQueryResult> {
+async function answerWikiRead(
+  question: string,
+  entityName: string | undefined,
+  options: RunStructuredQueryOptions,
+): Promise<StructuredQueryResult> {
   const terms = buildSearchTerms(question, entityName);
   const trace: QueryTraceStep[] = [
     {
@@ -162,7 +175,7 @@ async function answerWikiRead(question: string, entityName: string | undefined):
   });
 
   if (candidates.length === 0) {
-    return answerEvidenceFallback(question, terms, trace);
+    return answerEvidenceFallback(question, terms, trace, options);
   }
 
   if (isAmbiguous(candidates)) {
@@ -196,13 +209,16 @@ async function answerWikiRead(question: string, entityName: string | undefined):
     },
   );
 
-  return {
-    answer: formatWikiReadAnswer(question, document),
+  const draftAnswer = formatWikiReadAnswer(question, document);
+  const result: StructuredQueryResult = {
+    answer: draftAnswer,
     candidates: [entity],
     sources: buildWikiReadSources(document),
     suggestions: buildEntitySuggestions(entity),
     trace,
   };
+
+  return composeResultIfRequested(result, buildQueryComposePayload(question, draftAnswer, document), options);
 }
 
 type WikiEntityCandidate = {
@@ -264,6 +280,7 @@ async function answerEvidenceFallback(
   question: string,
   terms: string[],
   trace: QueryTraceStep[],
+  options: RunStructuredQueryOptions,
 ): Promise<StructuredQueryResult> {
   const [entries, tasks] = await Promise.all([findEntryEvidence(terms), findTaskEvidence(terms)]);
   trace.push({
@@ -293,12 +310,33 @@ async function answerEvidenceFallback(
     .filter(Boolean)
     .join('');
 
-  return {
+  const result: StructuredQueryResult = {
     answer,
     sources: dedupeSources([...entries.map(entrySource), ...tasks.map(taskSource)]),
     suggestions: ['查看来源记录', '换一个更明确的实体名再问'],
     trace,
   };
+
+  return composeResultIfRequested(
+    result,
+    {
+      question,
+      draftAnswer: answer,
+      entities: [],
+      tasks: tasks.slice(0, 6).map((task) => ({
+        id: task.id,
+        description: task.description,
+        status: task.status,
+        dueDate: task.dueDate,
+      })),
+      relationships: [],
+      entries: entries.slice(0, 5).map((entry) => ({
+        id: entry.id,
+        content: snippet(entry.content, 240),
+      })),
+    },
+    options,
+  );
 }
 
 function formatWikiReadAnswer(question: string, document: EntityDocument) {
@@ -360,6 +398,84 @@ function buildWikiReadSources(document: EntityDocument): QuerySource[] {
     ...document.relatedEntities.slice(0, 8).map(entitySource),
     ...document.entries.slice(0, 6).map(entrySource),
   ]);
+}
+
+function buildQueryComposePayload(question: string, draftAnswer: string, document: EntityDocument): QueryComposePayload {
+  const entityById = new Map(
+    [document.entity, ...document.relatedEntities].map((entity) => [entity.id, entity]),
+  );
+
+  return {
+    question,
+    draftAnswer,
+    entities: [document.entity, ...document.relatedEntities].slice(0, 10).map((entity) => ({
+      id: entity.id,
+      type: entity.type,
+      title: entity.title,
+      summary: entity.summary,
+    })),
+    tasks: document.tasks.slice(0, 8).map((task) => ({
+      id: task.id,
+      description: task.description,
+      status: task.status,
+      dueDate: task.dueDate,
+    })),
+    relationships: document.relationships.slice(0, 10).map((relationship) => ({
+      id: relationship.id,
+      type: relationship.type,
+      fromTitle: entityById.get(relationship.from)?.title ?? relationship.from,
+      toTitle: entityById.get(relationship.to)?.title ?? relationship.to,
+    })),
+    entries: document.entries.slice(0, 5).map((entry) => ({
+      id: entry.id,
+      content: snippet(entry.content, 240),
+    })),
+  };
+}
+
+async function composeResultIfRequested(
+  result: StructuredQueryResult,
+  payload: QueryComposePayload,
+  options: RunStructuredQueryOptions,
+): Promise<StructuredQueryResult> {
+  if (!options.composeWithLlm) return result;
+
+  try {
+    const composed = await composeQueryAnswer(payload);
+    return {
+      ...result,
+      answer: composed.answer.trim() || result.answer,
+      llm: {
+        provider: composed.provider,
+        model: composed.model,
+        fallbackFrom: composed.fallbackFrom,
+      },
+      trace: [
+        ...(result.trace ?? []),
+        {
+          layer: 'answer',
+          label: 'LLM 表达',
+          detail: `${providerLabel(composed.provider)} · ${composed.model} 已基于结构化召回材料优化回答。`,
+        },
+      ],
+    };
+  } catch (error) {
+    return {
+      ...result,
+      trace: [
+        ...(result.trace ?? []),
+        {
+          layer: 'answer',
+          label: 'LLM 表达',
+          detail: `模型表达失败，已回退到结构化模板答案：${error instanceof Error ? error.message : '未知错误'}`,
+        },
+      ],
+    };
+  }
+}
+
+function providerLabel(provider: 'minimax' | 'deepseek') {
+  return provider === 'minimax' ? 'MiniMax' : 'DeepSeek';
 }
 
 function buildEntitySuggestions(entity: Entity) {
@@ -457,9 +573,9 @@ function entityTypeLabel(type: Entity['type']) {
   return labels[type];
 }
 
-function snippet(value: string) {
+function snippet(value: string, maxLength = 80) {
   const compact = value.replace(/\s+/g, ' ').trim();
-  return compact.length > 80 ? `${compact.slice(0, 80)}...` : compact;
+  return compact.length > maxLength ? `${compact.slice(0, maxLength)}...` : compact;
 }
 
 function normalize(value: string) {

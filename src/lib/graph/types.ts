@@ -19,4 +19,9 @@ export type StructuredQueryResult = {
   suggestions: string[];
   candidates?: Entity[];
   trace?: QueryTraceStep[];
+  llm?: {
+    provider: 'minimax' | 'deepseek';
+    model: string;
+    fallbackFrom?: string;
+  };
 };

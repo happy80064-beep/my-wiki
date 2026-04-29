@@ -11,7 +11,7 @@ export function QueryPage() {
   async function handleAsk() {
     if (!question.trim()) return;
     setIsLoading(true);
-    setResult(await runStructuredQuery(question));
+    setResult(await runStructuredQuery(question, { composeWithLlm: true }));
     setIsLoading(false);
   }
 
@@ -52,6 +52,11 @@ export function QueryPage() {
               <pre className="whitespace-pre-wrap rounded-[12px] border border-[#e5e5e4] bg-[#fbfbfa] p-4 text-sm leading-7 text-[#1f2937]">
                 {result.answer}
               </pre>
+              {result.llm ? (
+                <p className="text-xs text-[#626965]">
+                  已由 {providerTypeLabel[result.llm.provider]} · {result.llm.model} 优化表达
+                </p>
+              ) : null}
 
               <div>
                 <h3 className="text-sm font-semibold text-[#1f2937]">来源</h3>
@@ -125,4 +130,9 @@ const sourceTypeLabel: Record<StructuredQueryResult['sources'][number]['type'], 
   entity: '实体',
   task: '任务',
   entry: '原文',
+};
+
+const providerTypeLabel: Record<NonNullable<StructuredQueryResult['llm']>['provider'], string> = {
+  minimax: 'MiniMax',
+  deepseek: 'DeepSeek',
 };

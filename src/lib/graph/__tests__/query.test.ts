@@ -1,10 +1,14 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createEntity, createEntry, createRelationship, createTask, resetDatabase } from '@/lib/db';
 import { runStructuredQuery } from '@/lib/graph';
 
 describe('structured query', () => {
   beforeEach(async () => {
     await resetDatabase();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it('answers pending tasks by exact owner id', async () => {
@@ -133,6 +137,61 @@ describe('structured query', () => {
     expect(result.answer).toContain('桌面智能体原型');
     expect(result.answer).toContain('OpenCLI');
     expect(result.sources.some((source) => source.id === entry.id)).toBe(true);
+  });
+
+  it('uses the LLM expression layer when requested', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(
+        JSON.stringify({
+          answer: '赛琳娜是桌面数字生命体项目里的角色名，用来代表这个具备语音和情绪能力的桌面智能体。',
+          provider: 'deepseek',
+          model: 'deepseek-v4-pro',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )),
+    );
+
+    const entry = await createEntry({
+      content: '当前角色名为 Serina / 赛琳娜，是桌面数字生命体的拟人形象。',
+      source: 'text',
+    });
+    await createEntity({
+      type: 'topic',
+      title: 'Serina/赛琳娜',
+      summary: '项目的角色名，一个具备拟人音色和情绪的桌面数字生命体形象。',
+      sourceEntries: [entry.id],
+    });
+
+    const result = await runStructuredQuery('赛琳娜是谁', { composeWithLlm: true });
+
+    expect(result.answer).toContain('赛琳娜是桌面数字生命体项目里的角色名');
+    expect(result.llm?.provider).toBe('deepseek');
+    expect(result.trace?.some((step) => step.layer === 'answer' && step.label === 'LLM 表达')).toBe(true);
+  });
+
+  it('falls back to the structured answer when LLM expression fails', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ error: 'busy' }), { status: 502 })),
+    );
+
+    const entry = await createEntry({
+      content: '桌面数字生命体是一个运行在 Windows 桌面的 AI 生命体原型。',
+      source: 'text',
+    });
+    await createEntity({
+      type: 'project',
+      title: '桌面数字生命体',
+      summary: '运行在 Windows 桌面的 AI 生命体原型。',
+      sourceEntries: [entry.id],
+    });
+
+    const result = await runStructuredQuery('桌面生命体是什么', { composeWithLlm: true });
+
+    expect(result.answer).toContain('桌面数字生命体');
+    expect(result.llm).toBeUndefined();
+    expect(result.trace?.some((step) => step.detail.includes('模型表达失败'))).toBe(true);
   });
 
   it('does not fabricate when no records match', async () => {

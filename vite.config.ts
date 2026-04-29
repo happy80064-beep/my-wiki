@@ -4,6 +4,7 @@ import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import { fileURLToPath, URL } from 'node:url';
 import { buildMiniMaxCapturePrompt, normalizeMiniMaxCaptureResponse } from './src/lib/ai/minimaxCapture';
+import { buildQueryComposePrompt, type QueryComposePayload } from './src/lib/ai/queryComposer';
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
@@ -103,6 +104,82 @@ export default defineConfig(({ mode }) => {
               });
             }
           });
+
+          server.middlewares.use('/api/query/compose', async (req, res) => {
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { error: 'Method not allowed' });
+              return;
+            }
+
+            try {
+              const payload = (await readJsonBody(req)) as QueryComposePayload;
+              if (!payload.question?.trim() || !payload.draftAnswer?.trim()) {
+                sendJson(res, 400, { error: 'question and draftAnswer are required.' });
+                return;
+              }
+
+              const prompt = buildQueryComposePrompt(payload);
+              const minimaxResult = minimaxApiKey
+                ? await requestOpenAiCompatibleText({
+                    apiKey: minimaxApiKey,
+                    baseUrl: minimaxBaseUrl,
+                    model: minimaxModel,
+                    providerName: 'MiniMax',
+                    prompt,
+                    systemPrompt: '你是严谨的中文知识库查询表达助手。只输出最终回答正文。',
+                    maxTokens: 1200,
+                  })
+                : { ok: false as const, error: 'MINIMAX_API_KEY is not configured.' };
+
+              const minimaxFailure = minimaxResult.ok ? '' : minimaxResult.error;
+              if (minimaxResult.ok) {
+                sendJson(res, 200, {
+                  answer: normalizeComposedAnswer(minimaxResult.text, payload.draftAnswer),
+                  provider: 'minimax',
+                  model: minimaxModel,
+                });
+                return;
+              }
+
+              let deepseekFailure = '';
+              for (const deepseekApiKey of deepseekApiKeys) {
+                const deepseekResult = await requestOpenAiCompatibleText({
+                  apiKey: deepseekApiKey,
+                  baseUrl: deepseekBaseUrl,
+                  model: deepseekModel,
+                  providerName: 'DeepSeek',
+                  prompt,
+                  systemPrompt: '你是严谨的中文知识库查询表达助手。只输出最终回答正文。',
+                  maxTokens: 1200,
+                  extraBody: {
+                    thinking: { type: 'disabled' },
+                  },
+                });
+
+                if (deepseekResult.ok) {
+                  sendJson(res, 200, {
+                    answer: normalizeComposedAnswer(deepseekResult.text, payload.draftAnswer),
+                    provider: 'deepseek',
+                    model: deepseekModel,
+                    fallbackFrom: minimaxFailure,
+                  });
+                  return;
+                }
+
+                deepseekFailure = deepseekResult.error;
+              }
+
+              sendJson(res, 502, {
+                error: `MiniMax failed: ${minimaxFailure}. DeepSeek fallback failed: ${
+                  deepseekFailure || 'not configured'
+                }.`,
+              });
+            } catch (error) {
+              sendJson(res, 500, {
+                error: error instanceof Error ? error.message : 'Query composition failed.',
+              });
+            }
+          });
         },
       },
     ],
@@ -186,6 +263,77 @@ async function requestOpenAiCompatibleCapture({
   }
 }
 
+async function requestOpenAiCompatibleText({
+  apiKey,
+  baseUrl,
+  model,
+  providerName,
+  prompt,
+  systemPrompt,
+  maxTokens,
+  extraBody,
+}: {
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  providerName: string;
+  prompt: string;
+  systemPrompt: string;
+  maxTokens: number;
+  extraBody?: Record<string, unknown>;
+}): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
+  try {
+    const response = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          {
+            role: 'system',
+            content: systemPrompt,
+          },
+          {
+            role: 'user',
+            content: prompt,
+          },
+        ],
+        stream: false,
+        temperature: 0.2,
+        max_tokens: maxTokens,
+        ...extraBody,
+      }),
+    });
+
+    const data = (await response.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
+      error?: { message?: string; type?: string };
+    };
+
+    if (!response.ok || data.error) {
+      return {
+        ok: false,
+        error: data.error?.message || `${providerName} request failed with ${response.status}.`,
+      };
+    }
+
+    const text = data.choices?.[0]?.message?.content?.trim();
+    if (!text) {
+      return { ok: false, error: `${providerName} returned empty content.` };
+    }
+
+    return { ok: true, text };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : `${providerName} request failed.`,
+    };
+  }
+}
+
 function readJsonBody(req: import('node:http').IncomingMessage) {
   return new Promise<unknown>((resolve, reject) => {
     let raw = '';
@@ -224,4 +372,14 @@ function assertUsableDraft(draft: ReturnType<typeof normalizeMiniMaxCaptureRespo
     throw new Error(`${providerName} returned a low-quality extraction.`);
   }
   return draft;
+}
+
+function normalizeComposedAnswer(text: string, fallback: string) {
+  const answer = text
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/```(?:text|markdown)?/g, '')
+    .replace(/```/g, '')
+    .trim();
+  if (!answer || answer.length < 6) return fallback;
+  return answer;
 }
