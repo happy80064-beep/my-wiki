@@ -22,6 +22,8 @@ export type QueryComposeRelationship = {
 export type QueryComposeEntry = {
   id: string;
   content: string;
+  scope?: 'entity-source' | 'global-fallback';
+  matchedTerms?: string[];
 };
 
 export type QueryComposePayload = {
@@ -68,6 +70,7 @@ ${JSON.stringify(
 - 不要照搬零散字段；要合并同义信息，去掉调试口吻。
 - 如果问题是“是谁/是什么/叫什么”，优先说明名称、身份/定位、与用户或项目的关系。
 - 如果材料不足，明确说“目前知识库里只能确认...”并给出可继续追问的方向。
+- 如果 entries 中有 scope=global-fallback，必须说明这是从全库原始材料兜底扫描得到的，还没有正式编译进实体页。
 - 保留实体名、项目名、模型名等专有名词的原文写法。
 - 不要输出思考过程，不要输出 <think> 标签或内部推理。
 - 输出纯文本，不要 markdown 表格，不要 JSON，不要代码块。`;

@@ -139,6 +139,50 @@ describe('structured query', () => {
     expect(result.sources.some((source) => source.id === entry.id)).toBe(true);
   });
 
+  it('scans linked raw entries for attribute questions when the entity profile is incomplete', async () => {
+    const entry = await createEntry({
+      content:
+        '项目定位：桌面数字生命体是运行在 Windows 桌面的 AI 生命体原型。语音输入部分持续优化，唤醒词目前走本地 PowerShell / Windows System.Speech 方案，主唤醒词是“小林”。',
+      source: 'text',
+    });
+    await createEntity({
+      type: 'project',
+      title: '桌面数字生命体',
+      summary: '一个本地桌面智能体原型。',
+      sourceEntries: [entry.id],
+    });
+
+    const result = await runStructuredQuery('桌面生命体的唤醒词是什么');
+
+    expect(result.answer).toContain('主唤醒词是“小林”');
+    expect(result.answer).toContain('原始材料命中');
+    expect(result.sources.some((source) => source.type === 'entry' && source.id === entry.id)).toBe(true);
+    expect(result.trace?.some((step) => step.label === '原始材料兜底扫描')).toBe(true);
+  });
+
+  it('falls back to global raw entries when linked entries miss the requested attribute', async () => {
+    const linkedEntry = await createEntry({
+      content: '桌面数字生命体是运行在 Windows 桌面的 AI 生命体原型。',
+      source: 'text',
+    });
+    const globalEntry = await createEntry({
+      content: '语音链路补充：桌面生命体主唤醒词是“小林”，终止词使用 miki / mi ki / 米基 / 米奇 近音组。',
+      source: 'text',
+    });
+    await createEntity({
+      type: 'project',
+      title: '桌面数字生命体',
+      summary: '一个本地桌面智能体原型。',
+      sourceEntries: [linkedEntry.id],
+    });
+
+    const result = await runStructuredQuery('桌面生命体的终止词是什么');
+
+    expect(result.answer).toContain('miki / mi ki / 米基 / 米奇');
+    expect(result.answer).toContain('全库原始材料兜底');
+    expect(result.sources.some((source) => source.type === 'entry' && source.id === globalEntry.id)).toBe(true);
+  });
+
   it('uses the LLM expression layer when requested', async () => {
     vi.stubGlobal(
       'fetch',

@@ -187,7 +187,7 @@ async function answerWikiRead(
   }
 
   const entity = candidates[0].entity;
-  const document = await readEntityDocument(entity);
+  const document = await readEntityDocument(entity, question);
   trace.push(
     {
       layer: 'entity',
@@ -208,6 +208,15 @@ async function answerWikiRead(
           : '当前实体还没有可回读的原始捕获。',
     },
   );
+  if (document.evidenceHits.length > 0) {
+    const linkedCount = document.evidenceHits.filter((hit) => hit.scope === 'entity-source').length;
+    const globalCount = document.evidenceHits.filter((hit) => hit.scope === 'global-fallback').length;
+    trace.push({
+      layer: 'evidence',
+      label: '原始材料兜底扫描',
+      detail: `围绕问题关键词定位到 ${document.evidenceHits.length} 个片段：相关来源 ${linkedCount} 个，全库兜底 ${globalCount} 个。`,
+    });
+  }
 
   const draftAnswer = formatWikiReadAnswer(question, document);
   const result: StructuredQueryResult = {
@@ -232,6 +241,15 @@ type EntityDocument = {
   relationships: Relationship[];
   relatedEntities: Entity[];
   entries: Entry[];
+  evidenceHits: EvidenceHit[];
+};
+
+type EvidenceHit = {
+  entry: Entry;
+  snippet: string;
+  matchedTerms: string[];
+  scope: 'entity-source' | 'global-fallback';
+  score: number;
 };
 
 async function findWikiEntityCandidates(terms: string[]): Promise<WikiEntityCandidate[]> {
@@ -256,7 +274,7 @@ async function findWikiEntityCandidates(terms: string[]): Promise<WikiEntityCand
     .slice(0, 5);
 }
 
-async function readEntityDocument(entity: Entity): Promise<EntityDocument> {
+async function readEntityDocument(entity: Entity, question: string): Promise<EntityDocument> {
   const [tasks, subgraph] = await Promise.all([
     db.tasks
       .filter((task) => task.owner === entity.id || task.linkedTo.includes(entity.id))
@@ -272,8 +290,9 @@ async function readEntityDocument(entity: Entity): Promise<EntityDocument> {
     ...relationships.flatMap((relationship) => relationship.evidence),
   ];
   const entries = await getEntriesByIds(entryIds);
+  const evidenceHits = await findRawEvidenceHits(question, entity, entries);
 
-  return { entity, tasks, relationships, relatedEntities, entries };
+  return { entity, tasks, relationships, relatedEntities, entries, evidenceHits };
 }
 
 async function answerEvidenceFallback(
@@ -339,8 +358,49 @@ async function answerEvidenceFallback(
   );
 }
 
+async function findRawEvidenceHits(question: string, entity: Entity, linkedEntries: Entry[]) {
+  const terms = buildEvidenceTerms(question, entity);
+  if (terms.length === 0) return [];
+
+  const linkedHits = findEvidenceHitsInEntries(linkedEntries, terms, 'entity-source');
+  if (linkedHits.length > 0) {
+    return linkedHits.slice(0, 5);
+  }
+
+  const linkedEntryIds = new Set(linkedEntries.map((entry) => entry.id));
+  const entries = await db.entries.orderBy('capturedAt').reverse().toArray();
+  return findEvidenceHitsInEntries(
+    entries.filter((entry) => !linkedEntryIds.has(entry.id)),
+    terms,
+    'global-fallback',
+  ).slice(0, 5);
+}
+
+function findEvidenceHitsInEntries(
+  entries: Entry[],
+  terms: string[],
+  scope: EvidenceHit['scope'],
+): EvidenceHit[] {
+  return entries
+    .map((entry) => {
+      const matchedTerms = terms.filter((term) => evidenceTextMatches(entry.content, term));
+      if (matchedTerms.length === 0) return undefined;
+
+      const firstIndex = findFirstTermIndex(entry.content, matchedTerms);
+      return {
+        entry,
+        snippet: snippetAround(entry.content, firstIndex, 150),
+        matchedTerms,
+        scope,
+        score: matchedTerms.length * 100 + Math.max(0, 5000 - Math.max(firstIndex, 0)),
+      };
+    })
+    .filter((hit): hit is EvidenceHit => Boolean(hit))
+    .sort((a, b) => b.score - a.score || b.entry.capturedAt - a.entry.capturedAt);
+}
+
 function formatWikiReadAnswer(question: string, document: EntityDocument) {
-  const { entity, tasks, relationships, relatedEntities, entries } = document;
+  const { entity, tasks, relationships, relatedEntities, entries, evidenceHits } = document;
   const lines: string[] = [];
 
   if (isNameQuestion(question)) {
@@ -351,6 +411,9 @@ function formatWikiReadAnswer(question: string, document: EntityDocument) {
     }
     if (entity.summary) {
       lines.push(`摘要：${entity.summary}`);
+    }
+    if (evidenceHits.length > 0) {
+      lines.push(formatEvidenceHitLines(evidenceHits));
     }
     return lines.join('\n');
   }
@@ -384,6 +447,10 @@ function formatWikiReadAnswer(question: string, document: EntityDocument) {
     lines.push(`关系证据：已读取 ${relationships.length} 条一跳关系。`);
   }
 
+  if (evidenceHits.length > 0) {
+    lines.push(formatEvidenceHitLines(evidenceHits));
+  }
+
   if (entries.length > 0) {
     lines.push(`来源：${entries.length} 条原始捕获可追溯。`);
   }
@@ -396,6 +463,7 @@ function buildWikiReadSources(document: EntityDocument): QuerySource[] {
     entitySource(document.entity),
     ...document.tasks.slice(0, 6).map(taskSource),
     ...document.relatedEntities.slice(0, 8).map(entitySource),
+    ...document.evidenceHits.map((hit) => entrySource(hit.entry)),
     ...document.entries.slice(0, 6).map(entrySource),
   ]);
 }
@@ -426,11 +494,33 @@ function buildQueryComposePayload(question: string, draftAnswer: string, documen
       fromTitle: entityById.get(relationship.from)?.title ?? relationship.from,
       toTitle: entityById.get(relationship.to)?.title ?? relationship.to,
     })),
-    entries: document.entries.slice(0, 5).map((entry) => ({
+    entries: buildComposeEntries(document),
+  };
+}
+
+function buildComposeEntries(document: EntityDocument): QueryComposePayload['entries'] {
+  const used = new Set<string>();
+  const evidenceEntries = document.evidenceHits.map((hit) => {
+    used.add(hit.entry.id);
+    return {
+      id: hit.entry.id,
+      content: hit.snippet,
+      scope: hit.scope,
+      matchedTerms: hit.matchedTerms,
+    };
+  });
+
+  const contextEntries = document.entries
+    .filter((entry) => !used.has(entry.id))
+    .slice(0, Math.max(0, 5 - evidenceEntries.length))
+    .map((entry) => ({
       id: entry.id,
       content: snippet(entry.content, 240),
-    })),
-  };
+      scope: 'entity-source' as const,
+      matchedTerms: [],
+    }));
+
+  return [...evidenceEntries, ...contextEntries];
 }
 
 async function composeResultIfRequested(
@@ -479,13 +569,20 @@ function providerLabel(provider: 'minimax' | 'deepseek') {
 }
 
 function buildEntitySuggestions(entity: Entity) {
-  return [`查看${entity.title}当前状态`, `查看${entity.title}关联实体`, `查看${entity.title}未完成任务`];
+  return [`查看${entity.title}当前状态`, `查看${entity.title}关联实体`, `将命中信息编译回${entity.title}`];
 }
 
 function buildSearchTerms(question: string, entityName: string | undefined) {
   const cleanedQuestion = cleanupSearchText(question);
   const cleanedEntityName = cleanupSearchText(entityName ?? '');
-  return Array.from(new Set([cleanedEntityName, cleanedQuestion].filter((term) => term.length >= 2)));
+  const attributeTerms = buildAttributeTerms(question);
+  let entityOnlyQuestion = cleanedQuestion;
+  for (const term of attributeTerms) {
+    entityOnlyQuestion = entityOnlyQuestion.replace(cleanupSearchText(term), '');
+  }
+  return Array.from(
+    new Set([cleanedEntityName, entityOnlyQuestion, cleanedQuestion].filter((term) => term.length >= 2)),
+  );
 }
 
 function cleanupSearchText(value: string) {
@@ -498,6 +595,52 @@ function cleanupSearchText(value: string) {
     )
     .replace(/\s+/g, '')
     .trim();
+}
+
+function buildEvidenceTerms(question: string, entity: Entity) {
+  const terms = new Set(buildAttributeTerms(question));
+  const entityAliases = buildEntityAliases(entity);
+  let stripped = question;
+
+  for (const alias of entityAliases) {
+    stripped = stripped.replace(new RegExp(escapeRegExp(alias), 'gi'), '');
+  }
+
+  const cleaned = cleanupSearchText(stripped);
+  if (cleaned.length >= 2 && !entityAliases.some((alias) => normalize(alias) === normalize(cleaned))) {
+    terms.add(cleaned);
+  }
+
+  return Array.from(terms)
+    .map((term) => term.trim())
+    .filter((term) => term.length >= 2);
+}
+
+function buildAttributeTerms(question: string) {
+  const groups: Array<{ test: RegExp; terms: string[] }> = [
+    { test: /(唤醒词|叫醒词|唤醒|KWS)/i, terms: ['唤醒词', '主唤醒词', '叫醒词', '唤醒', 'KWS'] },
+    { test: /(终止词|停止词|结束词|打断词|miki|mi ki|米基|米奇)/i, terms: ['终止词', '停止词', '结束词', '打断词', 'miki', 'mi ki', '米基', '米奇'] },
+    { test: /(API\s*key|apikey|密钥|token)/i, terms: ['API key', 'apikey', '密钥', 'token'] },
+    { test: /(模型|LLM|ASR|TTS)/i, terms: ['模型', 'LLM', 'ASR', 'TTS'] },
+    { test: /(路径|目录|文件夹|本地项目)/, terms: ['路径', '目录', '文件夹', '本地项目路径'] },
+    { test: /(负责人|owner|谁负责|归谁)/i, terms: ['负责人', 'owner', '负责'] },
+    { test: /(角色名|名字|名称|叫什么|叫啥)/, terms: ['角色名', '名字', '名称'] },
+  ];
+
+  return Array.from(
+    new Set(groups.flatMap((group) => (group.test.test(question) ? group.terms : []))),
+  );
+}
+
+function buildEntityAliases(entity: Entity) {
+  return Array.from(
+    new Set([
+      entity.title,
+      entity.title.replace(/数字/g, ''),
+      entity.title.replace(/项目/g, ''),
+      ...entity.tags,
+    ].filter((alias) => alias.trim().length >= 2)),
+  );
 }
 
 function scoreEntityForTerm(entity: Entity, term: string) {
@@ -536,6 +679,40 @@ function evidenceTextMatches(text: string, term: string) {
   const normalizedTerm = normalize(term);
   if (!normalizedText || !normalizedTerm) return false;
   return normalizedText.includes(normalizedTerm) || isSubsequence(normalizedTerm, normalizedText);
+}
+
+function formatEvidenceHitLines(hits: EvidenceHit[]) {
+  const lines = hits.slice(0, 3).map((hit, index) => {
+    const scopeLabel = hit.scope === 'global-fallback' ? '全库原始材料兜底' : '关联原始材料';
+    return `${index + 1}. ${hit.snippet}（${scopeLabel}，命中：${hit.matchedTerms.slice(0, 3).join('、')}）`;
+  });
+
+  return `原始材料命中：\n${lines.join('\n')}\n\n建议：这些信息应后续编译回实体档案，下次就能直接从 Wiki 回答。`;
+}
+
+function findFirstTermIndex(text: string, terms: string[]) {
+  const lowerText = text.toLowerCase();
+  const indexes = terms
+    .flatMap((term) => [term, term.replace(/\s+/g, '')])
+    .map((term) => lowerText.indexOf(term.toLowerCase()))
+    .filter((index) => index >= 0);
+
+  return indexes.length > 0 ? Math.min(...indexes) : -1;
+}
+
+function snippetAround(value: string, index: number, radius = 150) {
+  const compact = value.replace(/\s+/g, ' ').trim();
+  if (index < 0) return snippet(compact, radius * 2);
+
+  const start = Math.max(0, index - radius);
+  const end = Math.min(compact.length, index + radius);
+  const prefix = start > 0 ? '...' : '';
+  const suffix = end < compact.length ? '...' : '';
+  return `${prefix}${compact.slice(start, end)}${suffix}`;
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function isAmbiguous(candidates: WikiEntityCandidate[]) {
