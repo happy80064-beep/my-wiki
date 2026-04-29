@@ -87,10 +87,21 @@ export function QueryPage() {
                           key={suggestion.id}
                           className="rounded-[10px] border border-[#d9d9d6] bg-[#fbfbfa] p-3 text-xs leading-5"
                         >
-                          <div className="font-medium text-[#1f2937]">
-                            {suggestion.entityTitle}.{suggestion.propertyKey} = {suggestion.propertyValue}
+                          <div className="grid gap-1">
+                            <div className="font-medium text-[#1f2937]">建议写回 Wiki</div>
+                            <div className="text-[#626965]">
+                              实体：<span className="text-[#1f2937]">{suggestion.entityTitle}</span>
+                            </div>
+                            <div className="text-[#626965]">
+                              字段：<span className="text-[#1f2937]">{suggestion.propertyLabel}</span>
+                            </div>
+                            <div className="text-[#626965]">
+                              建议值：<span className="text-[#1f2937]">{suggestion.propertyValue}</span>
+                            </div>
+                            <div className="mt-1 rounded-[8px] border border-[#e5e5e4] bg-white px-3 py-2 text-[#626965]">
+                              证据：{suggestion.evidenceSnippet}
+                            </div>
                           </div>
-                          <div className="mt-1 text-[#626965]">{suggestion.evidenceSnippet}</div>
                           <button
                             type="button"
                             onClick={() => handleApplyCompileSuggestion(suggestion)}

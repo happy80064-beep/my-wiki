@@ -632,6 +632,7 @@ function buildCompileSuggestions(document: EntityDocument, plan: QueryPlan): Wik
         entityId: document.entity.id,
         entityTitle: document.entity.title,
         propertyKey,
+        propertyLabel: propertyLabel(propertyKey),
         propertyValue,
         evidenceEntryId: hit.entry.id,
         evidenceSnippet: hit.snippet,
@@ -646,12 +647,26 @@ function normalizePropertyKey(attribute: string | undefined) {
   if (!attribute) return undefined;
   const normalized = attribute.toLowerCase();
   if (/(runtime|environment|windows|平台|运行)/i.test(normalized)) return 'runtimeEnvironment';
+  if (/(derived|source|from|基于|来源|开源|二次开发)/i.test(normalized)) return 'derivedFrom';
   if (/(wake|唤醒|kws)/i.test(normalized)) return 'wakeWord';
   if (/(stop|终止|停止|打断)/i.test(normalized)) return 'stopWord';
   if (/(path|路径|目录)/i.test(normalized)) return 'localPath';
   if (/(model|模型|llm|asr|tts)/i.test(normalized)) return 'models';
   if (/(owner|负责人)/i.test(normalized)) return 'ownerNote';
   return attribute.replace(/[^A-Za-z0-9_]/g, '') || undefined;
+}
+
+function propertyLabel(propertyKey: string) {
+  const labels: Record<string, string> = {
+    runtimeEnvironment: '运行环境',
+    wakeWord: '唤醒词',
+    stopWord: '终止词',
+    localPath: '本地路径',
+    models: '相关模型',
+    ownerNote: '负责人说明',
+    derivedFrom: '来源/基于项目',
+  };
+  return labels[propertyKey] ?? propertyKey;
 }
 
 function extractPropertyValue(propertyKey: string, text: string, matchedTerms: string[]) {
@@ -674,6 +689,21 @@ function extractPropertyValue(propertyKey: string, text: string, matchedTerms: s
   if (propertyKey === 'localPath') {
     const match = text.match(/[A-Z]:\\[^\s。；;，,]+/i);
     return cleanExtractedValue(match?.[0]);
+  }
+
+  if (propertyKey === 'derivedFrom') {
+    const sourcePatterns = [
+      /基于\s*([A-Za-z0-9_.\- /]+?开源项目)(?:二次开发|开发|构建|。|，|,|；|;|\s)/i,
+      /基于\s*([A-Za-z0-9_.\- /]+?)(?:二次开发|开源项目|项目)/i,
+      /(?:来源于|源自|衍生自|fork\s*自)\s*([A-Za-z0-9_.\- /]+?)(?:开源项目|项目|。|，|,|；|;|\s)/i,
+    ];
+    for (const pattern of sourcePatterns) {
+      const match = text.match(pattern);
+      const value = cleanExtractedValue(match?.[1]);
+      if (value) {
+        return /开源项目/.test(value) ? value : `${value} 开源项目`;
+      }
+    }
   }
 
   if (propertyKey === 'models') {
@@ -798,6 +828,7 @@ function buildAttributeTerms(question: string) {
     { test: /(API\s*key|apikey|密钥|token)/i, terms: ['API key', 'apikey', '密钥', 'token'] },
     { test: /(模型|LLM|ASR|TTS)/i, terms: ['模型', 'LLM', 'ASR', 'TTS'] },
     { test: /(Windows|windows|运行环境|桌面环境|操作系统|平台|能否.*运行|是否.*运行|运行在)/i, terms: ['Windows', 'Windows 桌面', '运行在 Windows', '运行环境', '桌面', '平台'] },
+    { test: /(开源项目|开源|基于|来源|源自|二次开发|derived|fork)/i, terms: ['基于', '开源项目', '二次开发', '来源', '源自'] },
     { test: /(路径|目录|文件夹|本地项目)/, terms: ['路径', '目录', '文件夹', '本地项目路径'] },
     { test: /(负责人|owner|谁负责|归谁)/i, terms: ['负责人', 'owner', '负责'] },
     { test: /(角色名|名字|名称|叫什么|叫啥)/, terms: ['角色名', '名字', '名称'] },
@@ -816,6 +847,7 @@ function inferAttribute(question: string) {
   if (/(终止词|停止词|结束词|打断词|miki|mi ki|米基|米奇)/i.test(question)) return 'stopWord';
   if (/(API\s*key|apikey|密钥|token)/i.test(question)) return 'apiKey';
   if (/(路径|目录|文件夹|本地项目)/.test(question)) return 'localPath';
+  if (/(开源项目|开源|基于|来源|源自|二次开发|derived|fork)/i.test(question)) return 'derivedFrom';
   if (/(负责人|owner|谁负责|归谁)/i.test(question)) return 'owner';
   return undefined;
 }

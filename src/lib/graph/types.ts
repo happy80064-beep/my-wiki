@@ -18,6 +18,7 @@ export type WikiCompileSuggestion = {
   entityId: string;
   entityTitle: string;
   propertyKey: string;
+  propertyLabel: string;
   propertyValue: string;
   evidenceEntryId: string;
   evidenceSnippet: string;

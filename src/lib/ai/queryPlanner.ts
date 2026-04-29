@@ -80,6 +80,7 @@ ${JSON.stringify(request.index, null, 2)}
 - 对“唤醒词/叫醒词/KWS”类问题，attribute 用 wakeWord。
 - 对“终止词/停止词/打断词/miki”类问题，attribute 用 stopWord。
 - 对“路径/目录/文件夹/本地项目路径”类问题，attribute 用 localPath。
+- 对“基于什么开源项目/来源于什么/二次开发自什么”类问题，attribute 用 derivedFrom，evidenceTerms 包含 基于、开源项目、二次开发、来源、项目名。
 - 如果目录中没有足够确定的页面，但问题看起来可能在原始材料里，needsGlobalSearch 设为 true。
 - 不要编造 EntityIndex 中不存在的 entity id。`;
 }
