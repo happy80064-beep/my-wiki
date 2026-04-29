@@ -4,7 +4,7 @@ import { Link } from 'react-router';
 import { type StructuredQueryResult, runStructuredQuery } from '@/lib/graph';
 
 export function QueryPage() {
-  const [question, setQuestion] = useState('桌面生命体下一阶段有哪些需要优化的');
+  const [question, setQuestion] = useState('桌面生命体叫什么');
   const [result, setResult] = useState<StructuredQueryResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
@@ -36,7 +36,7 @@ export function QueryPage() {
             查询
           </button>
           <p className="mt-4 text-sm leading-6 text-[#626965]">
-            当前版本先用代码做精确过滤，支持人员待办、事项状态、优化项和关联实体召回。后续再把已过滤结果交给 LLM 表达。
+            当前版本按 Wiki 阅读式查询执行：先扫知识目录，再读实体文档、关系子图和来源证据，最后组织回答。
           </p>
         </section>
 
@@ -80,6 +80,23 @@ export function QueryPage() {
                   </div>
                 )}
               </div>
+
+              {result.trace && result.trace.length > 0 ? (
+                <div>
+                  <h3 className="text-sm font-semibold text-[#1f2937]">扫描轨迹</h3>
+                  <div className="mt-2 grid gap-2">
+                    {result.trace.map((step, index) => (
+                      <div
+                        key={`${step.layer}:${index}`}
+                        className="rounded-[10px] border border-[#e5e5e4] bg-[#fbfbfa] px-3 py-2 text-xs leading-5"
+                      >
+                        <div className="font-medium text-[#1f2937]">{step.label}</div>
+                        <div className="text-[#626965]">{step.detail}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
 
               <div>
                 <h3 className="text-sm font-semibold text-[#1f2937]">追问建议</h3>

@@ -7,9 +7,16 @@ export type QuerySource = {
   href?: string;
 };
 
+export type QueryTraceStep = {
+  layer: 'intent' | 'directory' | 'entity' | 'graph' | 'evidence' | 'answer';
+  label: string;
+  detail: string;
+};
+
 export type StructuredQueryResult = {
   answer: string;
   sources: QuerySource[];
   suggestions: string[];
   candidates?: Entity[];
+  trace?: QueryTraceStep[];
 };

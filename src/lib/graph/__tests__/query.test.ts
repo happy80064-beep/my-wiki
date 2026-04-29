@@ -89,6 +89,52 @@ describe('structured query', () => {
     expect(result.sources.some((source) => source.id === project.id)).toBe(true);
   });
 
+  it('reads the entity document for name questions instead of only listing candidates', async () => {
+    const entry = await createEntry({
+      content: '“桌面数字生命体”是一个运行在 Windows 桌面的 AI 生命体原型，当前角色名为 Serina / 赛琳娜。',
+      source: 'text',
+    });
+    const project = await createEntity({
+      type: 'project',
+      title: '桌面数字生命体',
+      summary: '一个具备形象、语音、情绪、任务执行和桌面陪伴能力的本地桌面智能体。',
+      sourceEntries: [entry.id],
+    });
+    const voice = await createEntity({ type: 'topic', title: 'SenseVoice-Small' });
+    await createRelationship({ from: project.id, to: voice.id, type: 'depends-on', evidence: [entry.id] });
+
+    const result = await runStructuredQuery('桌面生命体叫什么');
+
+    expect(result.answer).toContain('桌面数字生命体');
+    expect(result.answer).toContain('Serina / 赛琳娜');
+    expect(result.answer).not.toContain('找到 1 条可能相关的实体');
+    expect(result.sources.some((source) => source.type === 'entry' && source.id === entry.id)).toBe(true);
+    expect(result.trace?.some((step) => step.layer === 'entity')).toBe(true);
+    expect(result.trace?.some((step) => step.layer === 'graph')).toBe(true);
+  });
+
+  it('answers general entity profile questions with summary, graph, and evidence', async () => {
+    const entry = await createEntry({
+      content: '桌面数字生命体已经具备语音交互、联网搜索、任务规划和网页执行能力。',
+      source: 'text',
+    });
+    const project = await createEntity({
+      type: 'project',
+      title: '桌面数字生命体',
+      summary: '从会聊天的桌宠进化到具备任务规划和网页执行能力的桌面智能体原型。',
+      sourceEntries: [entry.id],
+    });
+    const openCli = await createEntity({ type: 'topic', title: 'OpenCLI' });
+    await createRelationship({ from: project.id, to: openCli.id, type: 'depends-on', evidence: [entry.id] });
+
+    const result = await runStructuredQuery('桌面生命体是什么');
+
+    expect(result.answer).toContain('桌面数字生命体');
+    expect(result.answer).toContain('桌面智能体原型');
+    expect(result.answer).toContain('OpenCLI');
+    expect(result.sources.some((source) => source.id === entry.id)).toBe(true);
+  });
+
   it('does not fabricate when no records match', async () => {
     const result = await runStructuredQuery('不存在项目下一阶段有哪些需要优化的');
 

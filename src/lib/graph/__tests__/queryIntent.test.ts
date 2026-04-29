@@ -29,4 +29,11 @@ describe('query intent parser', () => {
     expect(intent.type).toBe('project_related_entities');
     expect(intent.entityName).toBe('桌面生命体');
   });
+
+  it('detects entity profile questions', () => {
+    const intent = parseQueryIntent('桌面生命体叫什么');
+
+    expect(intent.type).toBe('entity_profile');
+    expect(intent.entityName).toBe('桌面生命体');
+  });
 });

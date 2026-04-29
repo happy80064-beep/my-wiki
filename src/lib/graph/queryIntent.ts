@@ -5,6 +5,7 @@ export type QueryIntentType =
   | 'project_status'
   | 'project_improvements'
   | 'project_related_entities'
+  | 'entity_profile'
   | 'fuzzy_memory';
 
 export type QueryIntent = {
@@ -17,6 +18,7 @@ const taskWords = /(未完成|没完成|待办|任务|承诺|没兑现|待处理
 const improvementWords = /(下一阶段|后续|路线|短期优先级|优先级|优化|改进|重点问题|问题|需要.*做|需要.*处理|需要.*完善|需要.*强化)/;
 const relatedEntityWords = /(用了哪些|使用哪些|依赖|相关.*工具|相关.*模型|相关.*组件|工具|模型|组件|技术栈|方案)/;
 const statusWords = /(状态|进展|进度|当前情况|现在怎么样|做到了哪|完成情况)/;
+const profileWords = /(叫什么|叫啥|名字|名称|是谁|是什么|介绍|讲讲|档案|信息|概况|总结)/;
 const firstPersonWords = /(我|自己|本人)/;
 
 export function parseQueryIntent(question: string): QueryIntent {
@@ -45,6 +47,14 @@ export function parseQueryIntent(question: string): QueryIntent {
   if (statusWords.test(normalized)) {
     return {
       type: 'project_status',
+      entityName: extractProjectName(normalized),
+      originalQuestion: question,
+    };
+  }
+
+  if (profileWords.test(normalized)) {
+    return {
+      type: 'entity_profile',
       entityName: extractProjectName(normalized),
       originalQuestion: question,
     };
@@ -91,7 +101,7 @@ function extractPersonName(question: string) {
 
 function extractProjectName(question: string) {
   const beforeIntent = question.split(
-    /下一阶段|当前|短期优先级|优先级|推荐后续|后续|需要|有哪些|有什么|用了哪些|使用哪些|用了|使用|关联|相关|状态|进展|进度|任务|待办|未完成|没完成|重点问题|问题/,
+    /下一阶段|当前|短期优先级|优先级|推荐后续|后续|需要|有哪些|有什么|用了哪些|使用哪些|用了|使用|关联|相关|状态|进展|进度|任务|待办|未完成|没完成|重点问题|问题|叫什么|叫啥|名字|名称|是谁|是什么|介绍|讲讲|档案|信息|概况|总结/,
   )[0];
 
   const cleanedBefore = cleanupName(beforeIntent);
@@ -104,6 +114,7 @@ function extractProjectName(question: string) {
       .replace(improvementWords, '')
       .replace(relatedEntityWords, '')
       .replace(statusWords, '')
+      .replace(profileWords, '')
       .replace(taskWords, ''),
   );
 
