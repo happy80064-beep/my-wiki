@@ -98,6 +98,16 @@ export function QueryPage() {
                             <div className="text-[#626965]">
                               建议值：<span className="text-[#1f2937]">{suggestion.propertyValue}</span>
                             </div>
+                            <div className="flex flex-wrap gap-2 text-[#626965]">
+                              <span>
+                                证据范围：
+                                <span className="text-[#1f2937]">{evidenceScopeLabel[suggestion.evidenceScope]}</span>
+                              </span>
+                              <span>
+                                置信度：
+                                <span className="text-[#1f2937]">{confidenceLabel(suggestion.confidence)}</span>
+                              </span>
+                            </div>
                             <div className="mt-1 rounded-[8px] border border-[#e5e5e4] bg-white px-3 py-2 text-[#626965]">
                               证据：{suggestion.evidenceSnippet}
                             </div>
@@ -196,3 +206,14 @@ const providerTypeLabel: Record<NonNullable<StructuredQueryResult['llm']>['provi
   minimax: 'MiniMax',
   deepseek: 'DeepSeek',
 };
+
+const evidenceScopeLabel: Record<NonNullable<StructuredQueryResult['compileSuggestions']>[number]['evidenceScope'], string> = {
+  'entity-source': '关联原始材料',
+  'global-fallback': '全库兜底',
+};
+
+function confidenceLabel(confidence: number) {
+  if (confidence >= 0.8) return '高';
+  if (confidence >= 0.65) return '中';
+  return '低';
+}

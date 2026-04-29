@@ -233,6 +233,54 @@ describe('structured query', () => {
         '项目定位：企业 AI 培训课程市集是基于 OpenMaic 开源项目二次开发的企业内部培训平台。',
       source: 'text',
     });
+    const duplicateEntry = await createEntry({
+      content: '补充记录：企业 AI 培训课程市集来源于 OpenMaic 开源项目。',
+      source: 'text',
+    });
+    const project = await createEntity({
+      type: 'project',
+      title: '企业 AI 培训课程市集',
+      summary: '企业内部培训平台。',
+      sourceEntries: [entry.id, duplicateEntry.id],
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(
+        JSON.stringify({
+          intent: 'attribute_lookup',
+          selectedEntityIds: [project.id],
+          entityCandidates: ['企业 AI 培训课程市集'],
+          attribute: 'derivedFrom',
+          evidenceTerms: ['基于', 'OpenMaic', '开源项目', '二次开发'],
+          needsRawEvidence: true,
+          needsGlobalSearch: false,
+          answerType: 'direct',
+          confidence: 0.9,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )),
+    );
+
+    const result = await runStructuredQuery('企业 AI 培训课程市集基于什么开源项目？', { planWithAgent: true });
+
+    expect(result.compileSuggestions).toHaveLength(1);
+    expect(result.compileSuggestions?.[0]).toEqual(
+      expect.objectContaining({
+        entityId: project.id,
+        propertyKey: 'derivedFrom',
+        propertyLabel: '来源/基于项目',
+        propertyValue: 'OpenMaic 开源项目',
+      }),
+    );
+    expect(result.compileSuggestions?.[0]?.propertyValue).not.toBe('开源');
+  });
+
+  it('filters compile suggestions when derivedFrom evidence belongs to another entity', async () => {
+    const entry = await createEntry({
+      content: '桌面数字生命体是基于 OpenMaic 开源项目二次开发的桌面智能体原型。',
+      source: 'text',
+    });
     const project = await createEntity({
       type: 'project',
       title: '企业 AI 培训课程市集',
@@ -260,15 +308,7 @@ describe('structured query', () => {
 
     const result = await runStructuredQuery('企业 AI 培训课程市集基于什么开源项目？', { planWithAgent: true });
 
-    expect(result.compileSuggestions?.[0]).toEqual(
-      expect.objectContaining({
-        entityId: project.id,
-        propertyKey: 'derivedFrom',
-        propertyLabel: '来源/基于项目',
-        propertyValue: 'OpenMaic 开源项目',
-      }),
-    );
-    expect(result.compileSuggestions?.[0]?.propertyValue).not.toBe('开源');
+    expect(result.compileSuggestions ?? []).toEqual([]);
   });
 
   it('uses the LLM expression layer when requested', async () => {

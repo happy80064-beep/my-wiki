@@ -623,11 +623,11 @@ function buildCompileSuggestions(document: EntityDocument, plan: QueryPlan): Wik
   const propertyKey = normalizePropertyKey(plan.attribute ?? inferAttribute(plan.evidenceTerms.join(' ')));
   if (!propertyKey || document.evidenceHits.length === 0) return [];
 
-  return document.evidenceHits
+  const suggestions = document.evidenceHits
     .map((hit, index) => {
       const propertyValue = extractPropertyValue(propertyKey, hit.snippet, hit.matchedTerms);
       if (!propertyValue) return undefined;
-      return {
+      const suggestion = {
         id: `${document.entity.id}:${propertyKey}:${index}`,
         entityId: document.entity.id,
         entityTitle: document.entity.title,
@@ -636,11 +636,14 @@ function buildCompileSuggestions(document: EntityDocument, plan: QueryPlan): Wik
         propertyValue,
         evidenceEntryId: hit.entry.id,
         evidenceSnippet: hit.snippet,
-        confidence: hit.scope === 'entity-source' ? 0.78 : 0.62,
+        evidenceScope: hit.scope,
+        confidence: scoreCompileSuggestion(propertyKey, propertyValue, hit),
       } satisfies WikiCompileSuggestion;
+      return validateCompileSuggestionByRule(suggestion) ? suggestion : undefined;
     })
-    .filter((suggestion): suggestion is WikiCompileSuggestion => Boolean(suggestion))
-    .slice(0, 3);
+    .filter((suggestion): suggestion is WikiCompileSuggestion => Boolean(suggestion));
+
+  return dedupeCompileSuggestions(suggestions).slice(0, 3);
 }
 
 function normalizePropertyKey(attribute: string | undefined) {
@@ -719,6 +722,100 @@ function cleanExtractedValue(value: string | undefined) {
     ?.replace(/^[“"'\s]+|[”"'\s]+$/g, '')
     .replace(/^(：|:|是|为|使用|目前)/, '')
     .trim();
+}
+
+function scoreCompileSuggestion(propertyKey: string, propertyValue: string, hit: EvidenceHit) {
+  let score = hit.scope === 'entity-source' ? 0.55 : 0.45;
+
+  if (compileEvidenceContainsValue(hit.snippet, propertyValue)) score += 0.2;
+  if (compileEvidenceHasTrigger(propertyKey, hit.snippet)) score += 0.15;
+  score += Math.min(hit.matchedTerms.length * 0.03, 0.1);
+
+  return Math.round(Math.min(score, 0.95) * 100) / 100;
+}
+
+function validateCompileSuggestionByRule(suggestion: WikiCompileSuggestion) {
+  if (!suggestion.propertyValue.trim() || !suggestion.evidenceSnippet.trim()) return false;
+
+  const hasValue = compileEvidenceContainsValue(suggestion.evidenceSnippet, suggestion.propertyValue);
+  if (!hasValue) return false;
+
+  if (suggestion.propertyKey === 'derivedFrom') {
+    return (
+      compileEvidenceHasTrigger(suggestion.propertyKey, suggestion.evidenceSnippet) &&
+      compileEvidenceMentionsEntity(suggestion.evidenceSnippet, suggestion.entityTitle)
+    );
+  }
+
+  if (suggestion.propertyKey === 'runtimeEnvironment') {
+    return /(Windows|macOS|Linux)/i.test(suggestion.evidenceSnippet);
+  }
+
+  if (['wakeWord', 'stopWord', 'localPath'].includes(suggestion.propertyKey)) {
+    return compileEvidenceHasTrigger(suggestion.propertyKey, suggestion.evidenceSnippet);
+  }
+
+  return true;
+}
+
+function dedupeCompileSuggestions(suggestions: WikiCompileSuggestion[]) {
+  const byKey = new Map<string, WikiCompileSuggestion>();
+
+  for (const suggestion of suggestions) {
+    const key = [
+      suggestion.entityId,
+      suggestion.propertyKey,
+      normalizeCompileKey(suggestion.propertyValue),
+    ].join(':');
+    const current = byKey.get(key);
+
+    if (!current || compileSuggestionRank(suggestion) > compileSuggestionRank(current)) {
+      byKey.set(key, suggestion);
+    }
+  }
+
+  return Array.from(byKey.values()).sort((a, b) => compileSuggestionRank(b) - compileSuggestionRank(a));
+}
+
+function compileSuggestionRank(suggestion: WikiCompileSuggestion) {
+  return suggestion.confidence + (suggestion.evidenceScope === 'entity-source' ? 0.05 : 0);
+}
+
+function compileEvidenceContainsValue(text: string, value: string) {
+  const normalizedText = normalizeCompileKey(text);
+  return compileValueCandidates(value).some((candidate) => {
+    const normalizedCandidate = normalizeCompileKey(candidate);
+    return normalizedCandidate.length >= 2 && normalizedText.includes(normalizedCandidate);
+  });
+}
+
+function compileEvidenceMentionsEntity(text: string, entityTitle: string) {
+  const normalizedText = normalizeCompileKey(text);
+  const normalizedEntity = normalizeCompileKey(entityTitle);
+  return normalizedEntity.length >= 2 && normalizedText.includes(normalizedEntity);
+}
+
+function compileEvidenceHasTrigger(propertyKey: string, text: string) {
+  const triggerPatterns: Record<string, RegExp> = {
+    derivedFrom: /(基于|来源于|源自|衍生自|二次开发|fork\s*自|derived\s+from)/i,
+    wakeWord: /(唤醒词|叫醒|KWS|wake)/i,
+    stopWord: /(终止词|停止词|打断词|终止|停止|打断|stop)/i,
+    localPath: /[A-Z]:\\/i,
+  };
+  return triggerPatterns[propertyKey]?.test(text) ?? true;
+}
+
+function compileValueCandidates(value: string) {
+  const base = value.trim();
+  const descriptorFree = base
+    .replace(/开源项目|项目|平台|方案|路线|方向|近音组/g, '')
+    .trim();
+  const splitValues = base.split(/[、/，,；;\s]+/).map((item) => item.trim());
+  return uniqueStrings([base, descriptorFree, ...splitValues].filter(Boolean));
+}
+
+function normalizeCompileKey(value: string) {
+  return normalize(value);
 }
 
 async function composeResultIfRequested(

@@ -22,6 +22,7 @@ export type WikiCompileSuggestion = {
   propertyValue: string;
   evidenceEntryId: string;
   evidenceSnippet: string;
+  evidenceScope: 'entity-source' | 'global-fallback';
   confidence: number;
 };
 
