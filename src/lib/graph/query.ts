@@ -169,10 +169,14 @@ async function answerEntityRelationshipPath(
     return emptyResult('我还不能确定你问的是哪两个实体之间的关系。');
   }
 
-  const [fromCandidates, toCandidates] = await Promise.all([
+  const [fromCandidates, rawToCandidates] = await Promise.all([
     findEntityCandidates(fromName),
     findEntityCandidates(toName),
   ]);
+  const resolvedFrom = fromCandidates[0]?.entity;
+  const toCandidates = resolvedFrom
+    ? rawToCandidates.filter((candidate) => candidate.entity.id !== resolvedFrom.id)
+    : rawToCandidates;
 
   if (fromCandidates.length === 0 || toCandidates.length === 0) {
     if (fromCandidates.length > 0 && toCandidates.length === 0 && toName) {

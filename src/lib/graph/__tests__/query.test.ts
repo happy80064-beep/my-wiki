@@ -237,6 +237,25 @@ describe('structured query', () => {
     expect(result.trace?.some((step) => step.label === '原始材料兜底扫描')).toBe(true);
   });
 
+  it('does not resolve both sides of a relationship question to the same entity', async () => {
+    const entry = await createEntry({
+      content: '语音链路说明：桌面数字生命体主唤醒词是“小林”，唤醒稳定性仍需优化。',
+      source: 'text',
+    });
+    await createEntity({
+      type: 'project',
+      title: '桌面数字生命体',
+      summary: '桌面智能体原型，需要稳定唤醒词和语音交互主链。',
+      sourceEntries: [entry.id],
+    });
+
+    const result = await runStructuredQuery('桌面生命体和唤醒方案有什么关系');
+
+    expect(result.answer).toContain('没有找到独立实体「唤醒方案」');
+    expect(result.answer).not.toContain('桌面数字生命体 和 桌面数字生命体');
+    expect(result.trace?.some((step) => step.detail.includes('改为扫描'))).toBe(true);
+  });
+
   it('scans linked raw entries for attribute questions when the entity profile is incomplete', async () => {
     const entry = await createEntry({
       content:
