@@ -418,6 +418,70 @@ describe('structured query', () => {
     expect(result.sources.some((source) => source.type === 'entry' && source.id === globalEntry.id)).toBe(true);
   });
 
+  it('reads source entries from graph-expanded candidate pages', async () => {
+    const projectEntry = await createEntry({
+      content: '桌面数字生命体需要稳定语音交互主链。',
+      source: 'text',
+    });
+    const voiceEntry = await createEntry({
+      content: '语音链路补充：桌面生命体终止词使用 miki / mi ki / 米基 / 米奇 近音组。',
+      source: 'text',
+    });
+    const project = await createEntity({
+      type: 'project',
+      title: '桌面数字生命体',
+      summary: '桌面智能体原型。',
+      sourceEntries: [projectEntry.id],
+    });
+    const voice = await createEntity({
+      type: 'topic',
+      title: '语音链路',
+      summary: '语音交互主链。',
+      sourceEntries: [voiceEntry.id],
+    });
+    await createRelationship({ from: project.id, to: voice.id, type: 'relevant-to', evidence: [projectEntry.id] });
+
+    const result = await runStructuredQuery('桌面生命体的终止词是什么');
+
+    expect(result.answer).toContain('miki / mi ki / 米基 / 米奇');
+    expect(result.sources.some((source) => source.id === voiceEntry.id)).toBe(true);
+    expect(result.trace?.some((step) => step.label === '多种子图谱扩展')).toBe(true);
+  });
+
+  it('limits LLM compose entries by context budget', async () => {
+    let composePayload: unknown;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url, init) => {
+        composePayload = JSON.parse(String((init as RequestInit).body));
+        return new Response(
+          JSON.stringify({
+            answer: '预算内回答',
+            provider: 'deepseek',
+            model: 'deepseek-v4-pro',
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }),
+    );
+    const entry = await createEntry({
+      content: `项目定位：桌面数字生命体是一个运行在 Windows 桌面的 AI 生命体原型。${'长材料。'.repeat(2000)}`,
+      source: 'text',
+    });
+    await createEntity({
+      type: 'project',
+      title: '桌面数字生命体',
+      summary: '桌面智能体原型。',
+      sourceEntries: [entry.id],
+    });
+
+    await runStructuredQuery('桌面生命体是什么', { composeWithLlm: true, maxContextChars: 4000 });
+
+    const entries = (composePayload as { entries: Array<{ content: string }> }).entries;
+    const totalChars = entries.reduce((sum, item) => sum + item.content.length, 0);
+    expect(totalChars).toBeLessThanOrEqual(2000);
+  });
+
   it('uses Query Agent planning to match natural questions to wiki pages and evidence terms', async () => {
     const entry = await createEntry({
       content: '项目定位：“桌面数字生命体”是一个运行在 Windows 桌面的 AI 生命体原型。',

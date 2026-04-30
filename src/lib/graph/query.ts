@@ -36,6 +36,7 @@ export type { QuerySource, StructuredQueryResult } from './types';
 export type RunStructuredQueryOptions = {
   composeWithLlm?: boolean;
   planWithAgent?: boolean;
+  maxContextChars?: number;
 };
 
 export async function runStructuredQuery(
@@ -318,6 +319,7 @@ async function answerRelationshipEvidenceFallback(
         relationships: [],
         relatedEntities: [],
         agentSelectedEntities: [],
+        retrievalEntities: [],
         entries: linkedEntries,
         evidenceHits,
       },
@@ -421,7 +423,19 @@ async function answerWikiRead(
   }
 
   const entity = candidates[0].entity;
-  const document = await readEntityDocument(entity, question, plan);
+  const expandedCandidates = await expandWikiEntityCandidates(candidates);
+  trace.push({
+    layer: 'graph',
+    label: '多种子图谱扩展',
+    detail: `以 ${Math.min(candidates.length, SEED_LIMIT)} 个候选为种子，按 1 跳 0.5、2 跳 0.25 衰减扩展，得到 ${expandedCandidates.length} 个候选页面。`,
+  });
+
+  const document = await readEntityDocument(
+    entity,
+    question,
+    plan,
+    expandedCandidates.map((candidate) => candidate.entity),
+  );
   trace.push(
     {
       layer: 'entity',
@@ -431,7 +445,7 @@ async function answerWikiRead(
     {
       layer: 'graph',
       label: '关系子图',
-      detail: `展开 2 跳关系，并按直接关系、共同来源、共同邻居和类型亲和度排序；读取 ${document.relationships.length} 条关系、${document.relatedEntities.length} 个相关实体。`,
+      detail: `展开 2 跳关系，并按直接关系、共同来源、共同邻居和类型亲和度排序；读取 ${document.relationships.length} 条关系、${document.relatedEntities.length} 个相关实体，其中多种子扩展页面 ${document.retrievalEntities.length} 个。`,
     },
     {
       layer: 'evidence',
@@ -471,7 +485,11 @@ async function answerWikiRead(
     compileSuggestions: await materializeCompileSuggestions(buildCompileSuggestions(document, plan), question),
   };
 
-  return composeResultIfRequested(result, buildQueryComposePayload(question, draftAnswer, document), options);
+  return composeResultIfRequested(
+    result,
+    buildQueryComposePayload(question, draftAnswer, document, computeContextBudget(options.maxContextChars)),
+    options,
+  );
 }
 
 type WikiEntityCandidate = {
@@ -485,6 +503,7 @@ type EntityDocument = {
   relationships: Relationship[];
   relatedEntities: Entity[];
   agentSelectedEntities: Entity[];
+  retrievalEntities: Entity[];
   entries: Entry[];
   evidenceHits: EvidenceHit[];
 };
@@ -496,6 +515,21 @@ type EvidenceHit = {
   scope: 'entity-source' | 'global-fallback';
   score: number;
 };
+
+type QueryContextBudget = {
+  maxContextChars: number;
+  responseReserve: number;
+  indexBudget: number;
+  pageBudget: number;
+  maxPageSize: number;
+};
+
+const SEED_LIMIT = 10;
+const HOP1_PER_SEED = 5;
+const HOP2_PER_HOP1 = 3;
+const DECAY_HOP1 = 0.5;
+const DECAY_HOP2 = 0.25;
+const DEFAULT_QUERY_CONTEXT_CHARS = 24000;
 
 async function buildEntityIndex(): Promise<QueryIndexEntity[]> {
   const [entities, relationships] = await Promise.all([db.entities.toArray(), db.relationships.toArray()]);
@@ -688,10 +722,59 @@ async function findWikiEntityCandidates(
     })
     .filter((candidate) => candidate.score >= 30)
     .sort((a, b) => b.score - a.score || b.entity.updatedAt - a.entity.updatedAt)
-    .slice(0, 5);
+    .slice(0, SEED_LIMIT);
 }
 
-async function readEntityDocument(entity: Entity, question: string, plan: QueryPlan): Promise<EntityDocument> {
+async function expandWikiEntityCandidates(seedCandidates: WikiEntityCandidate[]): Promise<WikiEntityCandidate[]> {
+  if (seedCandidates.length === 0) return [];
+
+  const scoreById = new Map<string, number>();
+  const entityById = new Map<string, Entity>();
+
+  const addCandidate = (entity: Entity, score: number) => {
+    entityById.set(entity.id, entity);
+    scoreById.set(entity.id, (scoreById.get(entity.id) ?? 0) + score);
+  };
+
+  for (const seed of seedCandidates.slice(0, SEED_LIMIT)) {
+    addCandidate(seed.entity, seed.score);
+
+    const oneHop = await getSubgraph(seed.entity.id, 1);
+    const hop1 = rankRelatedEntities(
+      seed.entity,
+      oneHop.nodes.filter((node) => node.id !== seed.entity.id),
+      oneHop.edges,
+    ).slice(0, HOP1_PER_SEED);
+
+    for (const rankedHop1 of hop1) {
+      addCandidate(rankedHop1.entity, rankedHop1.score * DECAY_HOP1);
+
+      const twoHop = await getSubgraph(rankedHop1.entity.id, 1);
+      const hop2 = rankRelatedEntities(
+        rankedHop1.entity,
+        twoHop.nodes.filter((node) => node.id !== rankedHop1.entity.id && node.id !== seed.entity.id),
+        twoHop.edges,
+      ).slice(0, HOP2_PER_HOP1);
+
+      for (const rankedHop2 of hop2) {
+        addCandidate(rankedHop2.entity, rankedHop2.score * DECAY_HOP2);
+      }
+    }
+  }
+
+  return [...scoreById.entries()]
+    .map(([id, score]) => ({ entity: entityById.get(id), score }))
+    .filter((candidate): candidate is WikiEntityCandidate => Boolean(candidate.entity))
+    .sort((a, b) => b.score - a.score || b.entity.updatedAt - a.entity.updatedAt)
+    .slice(0, 16);
+}
+
+async function readEntityDocument(
+  entity: Entity,
+  question: string,
+  plan: QueryPlan,
+  retrievalEntities: Entity[] = [],
+): Promise<EntityDocument> {
   const agentSelectedEntities = await getPlanSelectedEntities(plan, entity.id);
   const [tasks, subgraph] = await Promise.all([
     db.tasks
@@ -708,17 +791,32 @@ async function readEntityDocument(entity: Entity, question: string, plan: QueryP
   )
     .slice(0, 12)
     .map((ranked) => ranked.entity);
-  const relatedEntities = mergeUniqueEntities([...agentSelectedEntities, ...graphRelatedEntities]).slice(0, 12);
+  const normalizedRetrievalEntities = mergeUniqueEntities(retrievalEntities.filter((candidate) => candidate.id !== entity.id));
+  const relatedEntities = mergeUniqueEntities([
+    ...agentSelectedEntities,
+    ...normalizedRetrievalEntities,
+    ...graphRelatedEntities,
+  ]).slice(0, 12);
   const entryIds = [
     ...entity.sourceEntries,
     ...agentSelectedEntities.flatMap((selectedEntity) => selectedEntity.sourceEntries),
+    ...normalizedRetrievalEntities.flatMap((retrievalEntity) => retrievalEntity.sourceEntries),
     ...tasks.map((task) => task.source),
     ...relationships.flatMap((relationship) => relationship.evidence),
   ];
   const entries = await getEntriesByIds(entryIds);
   const evidenceHits = await findRawEvidenceHits(question, entity, entries, plan);
 
-  return { entity, tasks, relationships, relatedEntities, agentSelectedEntities, entries, evidenceHits };
+  return {
+    entity,
+    tasks,
+    relationships,
+    relatedEntities,
+    agentSelectedEntities,
+    retrievalEntities: normalizedRetrievalEntities,
+    entries,
+    evidenceHits,
+  };
 }
 
 async function answerEvidenceFallback(
@@ -935,7 +1033,28 @@ function formatNoRelationshipPathAnswer(from: Entity, to: Entity) {
   return `${from.title} 和 ${to.title} 都存在于知识库中，但目前 3 跳内没有找到显式关系路径。`;
 }
 
-function buildQueryComposePayload(question: string, draftAnswer: string, document: EntityDocument): QueryComposePayload {
+function computeContextBudget(maxContextChars = DEFAULT_QUERY_CONTEXT_CHARS): QueryContextBudget {
+  const maxContext = Math.max(4000, Math.min(maxContextChars, 1_000_000));
+  const responseReserve = Math.floor(maxContext * 0.15);
+  const indexBudget = Math.floor(maxContext * 0.05);
+  const pageBudget = Math.floor(maxContext * 0.5);
+  const maxPageSize = Math.min(pageBudget, Math.max(5000, Math.floor(pageBudget * 0.3)));
+
+  return {
+    maxContextChars: maxContext,
+    responseReserve,
+    indexBudget,
+    pageBudget,
+    maxPageSize,
+  };
+}
+
+function buildQueryComposePayload(
+  question: string,
+  draftAnswer: string,
+  document: EntityDocument,
+  budget = computeContextBudget(),
+): QueryComposePayload {
   const entityById = new Map(
     [document.entity, ...document.relatedEntities].map((entity) => [entity.id, entity]),
   );
@@ -961,7 +1080,7 @@ function buildQueryComposePayload(question: string, draftAnswer: string, documen
       fromTitle: entityById.get(relationship.from)?.title ?? relationship.from,
       toTitle: entityById.get(relationship.to)?.title ?? relationship.to,
     })),
-    entries: buildComposeEntries(document),
+    entries: buildComposeEntries(document, budget),
   };
 }
 
@@ -987,27 +1106,44 @@ function extractEvidencePropertyValue(propertyKey: string, evidenceHits: Evidenc
   return undefined;
 }
 
-function buildComposeEntries(document: EntityDocument): QueryComposePayload['entries'] {
+function buildComposeEntries(document: EntityDocument, budget: QueryContextBudget): QueryComposePayload['entries'] {
   const used = new Set<string>();
+  let usedChars = 0;
+  const remainingBudget = () => Math.max(0, budget.pageBudget - usedChars);
+  const budgetedContent = (value: string) => {
+    const maxLength = Math.min(budget.maxPageSize, remainingBudget());
+    if (maxLength <= 0) return '';
+    const compact = value.replace(/\s+/g, ' ').trim();
+    const content = compact.length > maxLength ? compact.slice(0, maxLength) : compact;
+    usedChars += content.length;
+    return content;
+  };
+
   const evidenceEntries = document.evidenceHits.map((hit) => {
     used.add(hit.entry.id);
+    const content = budgetedContent(hit.snippet);
+    if (!content) return undefined;
     return {
       id: hit.entry.id,
-      content: hit.snippet,
+      content,
       scope: hit.scope,
       matchedTerms: hit.matchedTerms,
     };
-  });
+  }).filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
 
   const contextEntries = document.entries
     .filter((entry) => !used.has(entry.id))
-    .slice(0, Math.max(0, 5 - evidenceEntries.length))
-    .map((entry) => ({
-      id: entry.id,
-      content: snippet(entry.content, 240),
-      scope: 'entity-source' as const,
-      matchedTerms: [],
-    }));
+    .map((entry) => {
+      const content = budgetedContent(entry.content);
+      if (!content) return undefined;
+      return {
+        id: entry.id,
+        content,
+        scope: 'entity-source' as const,
+        matchedTerms: [],
+      };
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
 
   return [...evidenceEntries, ...contextEntries];
 }

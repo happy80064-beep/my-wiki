@@ -113,7 +113,14 @@ ${entityIndexJson}
 
 规则：
 - 只提取材料中有证据的内容。
+- entities 必须对照当前 Wiki 目录判断 existsLikely；名称相近、别名相近、摘要相近都应视为可能已存在。
+- concepts 用来记录重要概念、方法、技术路线或主题，不要把所有普通名词都列进去。
+- claims 必须是可写入 Wiki 的事实属性或关系事实，例如 runtimeEnvironment、wakeWord、stopWord、localPath、models、ownerNote、derivedFrom、openSourceStatus。
+- 每条 claim 的 evidence 必须是原文中能支撑 subject / predicate / object 的短片段，不要只给关键词。
+- contradictions 只放真正冲突或张力，不要把普通不确定都放进去。
+- recommendedUpdates 要明确建议创建或更新哪些实体、关系、任务或待审核项。
 - 不确定、冲突或需要用户判断的内容放入 contradictions 或 recommendedUpdates。
+- 如果材料暗示需要后续深度研究，可在 recommendedUpdates.reason 中写出 2-3 个搜索关键词。
 - 不要生成数据库 ID，不要输出 markdown。`;
 }
 
@@ -142,6 +149,12 @@ patches 中每一项必须符合以下 patch 类型之一：
 - UPDATE_ENTITY_PROPERTY.propertyKey 只能使用：${allowedWikiPatchPropertyKeys.join(', ')}
 - REVIEW_REQUIRED.options 只能从 Create Page / Update Existing / Skip 中选择。
 - 每个 patch 都必须带 evidence，evidence 必须是原文中的短证据片段。
+- CREATE_ENTITY 只在分析认为实体不存在或值得新建时使用；可能已存在的实体优先 UPDATE_ENTITY_PROPERTY、CREATE_RELATIONSHIP 或 REVIEW_REQUIRED。
+- UPDATE_ENTITY_PROPERTY 的 propertyValue 必须是完整值，不要用“开源”“方案”“模型”等泛词代替具体对象；例如“OpenMaic 开源项目”“小林”“Windows”。
+- CREATE_RELATIONSHIP 必须同时有 fromTitle、toTitle、relationshipType 和能证明二者关系的 evidence。
+- REVIEW_REQUIRED 只用于冲突、疑似重复、重要但缺页、需要用户判断的内容；不要创建琐碎 review。
+- 如果 REVIEW_REQUIRED 是 suggestion 或 missing-page 类问题，reason 中应包含可用于后续搜索的关键词。
+- 如果没有足够证据，不要生成 patch；宁可 REVIEW_REQUIRED。
 - 不要输出 markdown，不要输出解释。`;
 }
 
