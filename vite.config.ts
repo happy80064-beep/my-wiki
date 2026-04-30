@@ -10,6 +10,13 @@ import {
   normalizeQueryPlan,
   type QueryPlanRequest,
 } from './src/lib/ai/queryPlanner';
+import {
+  buildCaptureAnalysisPrompt,
+  buildWikiPatchPrompt,
+  normalizeCaptureAnalysis,
+  normalizeWikiPatchesToCaptureDraft,
+  normalizeWikiPatchResponse,
+} from './src/lib/ai/wikiPatch';
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
@@ -34,7 +41,7 @@ export default defineConfig(({ mode }) => {
             }
 
             try {
-              const body = (await readJsonBody(req)) as { content?: string };
+              const body = (await readJsonBody(req)) as { content?: string; entityIndex?: unknown[] };
               const content = body.content?.trim();
               if (!content) {
                 sendJson(res, 400, { error: 'content is required.' });
@@ -42,12 +49,13 @@ export default defineConfig(({ mode }) => {
               }
 
               const minimaxResult = minimaxApiKey
-                ? await requestOpenAiCompatibleCapture({
+                ? await requestOpenAiCompatibleTwoStepCapture({
                     apiKey: minimaxApiKey,
                     baseUrl: minimaxBaseUrl,
                     model: minimaxModel,
                     providerName: 'MiniMax',
                     content,
+                    entityIndex: body.entityIndex ?? [],
                     extraBody: { response_format: { type: 'json_object' } },
                   })
                 : { ok: false as const, error: 'MINIMAX_API_KEY is not configured.' };
@@ -56,9 +64,10 @@ export default defineConfig(({ mode }) => {
               if (minimaxResult.ok) {
                 try {
                   sendJson(res, 200, {
-                    draft: assertUsableDraft(normalizeMiniMaxCaptureResponse(minimaxResult.text), 'MiniMax'),
+                    draft: assertUsableDraft(minimaxResult.draft, 'MiniMax'),
                     provider: 'minimax',
                     model: minimaxModel,
+                    mode: 'two-step',
                   });
                   return;
                 } catch (error) {
@@ -87,6 +96,7 @@ export default defineConfig(({ mode }) => {
                       provider: 'deepseek',
                       model: deepseekModel,
                       fallbackFrom: minimaxFailure,
+                      mode: 'single-step',
                     });
                     return;
                   } catch (error) {
@@ -342,6 +352,65 @@ async function requestOpenAiCompatibleCapture({
     return {
       ok: false,
       error: error instanceof Error ? error.message : `${providerName} request failed.`,
+    };
+  }
+}
+
+async function requestOpenAiCompatibleTwoStepCapture({
+  apiKey,
+  baseUrl,
+  model,
+  providerName,
+  content,
+  entityIndex,
+  extraBody,
+}: {
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  providerName: string;
+  content: string;
+  entityIndex: unknown[];
+  extraBody?: Record<string, unknown>;
+}): Promise<{ ok: true; draft: ReturnType<typeof normalizeWikiPatchesToCaptureDraft> } | { ok: false; error: string }> {
+  try {
+    const analysisResult = await requestOpenAiCompatibleText({
+      apiKey,
+      baseUrl,
+      model,
+      providerName,
+      prompt: buildCaptureAnalysisPrompt(content, JSON.stringify(entityIndex.slice(0, 120), null, 2)),
+      systemPrompt: '你是 MyWiki 摄入分析 Agent。只输出符合 schema 的 JSON 对象。',
+      maxTokens: 2200,
+      extraBody,
+    });
+
+    if (!analysisResult.ok) return analysisResult;
+
+    const analysis = normalizeCaptureAnalysis(analysisResult.text);
+    const patchResult = await requestOpenAiCompatibleText({
+      apiKey,
+      baseUrl,
+      model,
+      providerName,
+      prompt: buildWikiPatchPrompt(content, analysis),
+      systemPrompt: '你是 MyWiki WikiPatch 生成 Agent。只输出 JSON 对象。',
+      maxTokens: 2600,
+      extraBody,
+    });
+
+    if (!patchResult.ok) return patchResult;
+
+    const patches = normalizeWikiPatchResponse(patchResult.text);
+    if (patches.length === 0) {
+      return { ok: false, error: `${providerName} did not return usable WikiPatch items.` };
+    }
+
+    return { ok: true, draft: normalizeWikiPatchesToCaptureDraft(patches, content) };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : `${providerName} two-step capture failed.`,
     };
   }
 }

@@ -5,6 +5,7 @@ import {
   createRelationship,
   createTask,
   db,
+  materializeCompileSuggestions,
   updateEntity,
   updateEntry,
   updateRelationship,
@@ -21,6 +22,7 @@ export type CaptureCompilationSummary = {
   createdRelationships: number;
   updatedRelationships: number;
   createdTasks: number;
+  queuedCompileSuggestions: number;
 };
 
 export async function persistCaptureDraft(content: string, draft: CaptureDraft, source: EntrySource = 'text') {
@@ -34,6 +36,7 @@ export async function persistCaptureDraft(content: string, draft: CaptureDraft, 
     createdRelationships: 0,
     updatedRelationships: 0,
     createdTasks: 0,
+    queuedCompileSuggestions: 0,
   };
 
   const entities: Entity[] = [];
@@ -87,6 +90,29 @@ export async function persistCaptureDraft(content: string, draft: CaptureDraft, 
     );
     compilation.createdTasks += 1;
   }
+
+  const compileSuggestions = await materializeCompileSuggestions(
+    (draft.compileSuggestions ?? [])
+      .map((suggestion) => {
+        const entityId = entityIdByClientId.get(suggestion.entityClientId);
+        if (!entityId) return undefined;
+
+        return {
+          entityId,
+          entityTitle: suggestion.entityTitle,
+          propertyKey: suggestion.propertyKey,
+          propertyLabel: suggestion.propertyLabel,
+          propertyValue: suggestion.propertyValue,
+          evidenceEntryId: entry.id,
+          evidenceSnippet: suggestion.evidenceSnippet,
+          evidenceScope: 'entity-source' as const,
+          confidence: suggestion.confidence,
+        };
+      })
+      .filter((suggestion): suggestion is NonNullable<typeof suggestion> => Boolean(suggestion)),
+    'capture-ingest',
+  );
+  compilation.queuedCompileSuggestions = compileSuggestions.length;
 
   await updateEntry(entry.id, {
     derivedEntities: entities.map((entity) => entity.id),

@@ -58,6 +58,7 @@ type SaveResult = {
   updatedTopics: number;
   createdRelationships: number;
   updatedRelationships: number;
+  queuedCompileSuggestions: number;
 };
 
 export function CapturePage() {
@@ -83,7 +84,7 @@ export function CapturePage() {
     try {
       const result = await extractCaptureDraft(trimmed);
       setDraft(result.draft);
-      setProviderLabel(`${result.provider} · ${result.model}`);
+      setProviderLabel(`${result.provider} · ${result.model}${result.mode === 'two-step' ? ' · 两步摄入' : ''}`);
     } catch (error) {
       setDraft(null);
       setExtractError(error instanceof Error ? error.message : 'AI 提取失败');
@@ -115,6 +116,7 @@ export function CapturePage() {
       updatedTopics: result.compilation.updatedTopics,
       createdRelationships: result.compilation.createdRelationships,
       updatedRelationships: result.compilation.updatedRelationships,
+      queuedCompileSuggestions: result.compilation.queuedCompileSuggestions,
     });
     setIsSaving(false);
   }
@@ -209,7 +211,8 @@ export function CapturePage() {
               <p className="text-xs">
                 编译影响：新建 {lastSave.createdEntities} 个实体，复用 {lastSave.reusedEntities} 个实体，更新{' '}
                 {lastSave.updatedPeople} 个人员、{lastSave.updatedTopics} 个主题；关系新建{' '}
-                {lastSave.createdRelationships} 条，合并证据 {lastSave.updatedRelationships} 条。
+                {lastSave.createdRelationships} 条，合并证据 {lastSave.updatedRelationships} 条；待编译{' '}
+                {lastSave.queuedCompileSuggestions} 条。
               </p>
             </div>
           ) : null}
@@ -249,11 +252,37 @@ export function CapturePage() {
               />
               <RelationshipSection draft={draft} draftEntities={draftEntities} setDraft={setDraft} />
               <TaskSection draft={draft} draftEntities={draftEntities} setDraft={setDraft} />
+              <CompileSuggestionSection draft={draft} />
             </div>
           )}
         </section>
       </div>
     </section>
+  );
+}
+
+function CompileSuggestionSection({ draft }: { draft: CaptureDraft }) {
+  const suggestions = draft.compileSuggestions ?? [];
+
+  if (suggestions.length === 0) return null;
+
+  return (
+    <div>
+      <h3 className="text-sm font-semibold text-[#1f2937]">待编译建议</h3>
+      <div className="mt-3 space-y-2">
+        {suggestions.map((suggestion) => (
+          <div key={suggestion.clientId} className="rounded-[12px] border border-[#e5e5e4] bg-[#fbfbfa] p-3 text-xs leading-5">
+            <div className="font-medium text-[#1f2937]">{suggestion.entityTitle}</div>
+            <div className="text-[#626965]">
+              {suggestion.propertyLabel}：<span className="text-[#1f2937]">{suggestion.propertyValue}</span>
+            </div>
+            <div className="mt-1 rounded-[8px] border border-[#e5e5e4] bg-white px-3 py-2 text-[#626965]">
+              证据：{suggestion.evidenceSnippet}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 

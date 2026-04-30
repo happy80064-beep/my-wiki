@@ -98,4 +98,35 @@ describe('capture flow', () => {
     expect(result.compilation.updatedTopics).toBeGreaterThanOrEqual(1);
     expect(result.compilation.updatedRelationships).toBeGreaterThanOrEqual(1);
   });
+
+  it('persists capture compile suggestions into the review queue', async () => {
+    const draft = createLocalCaptureDraft('OpenMaic 是开源项目。');
+    draft.primaryEntity.type = 'topic';
+    draft.primaryEntity.title = 'OpenMaic';
+    draft.compileSuggestions = [
+      {
+        clientId: 'compile_open_source',
+        entityClientId: draft.primaryEntity.clientId,
+        entityTitle: 'OpenMaic',
+        propertyKey: 'openSourceStatus',
+        propertyLabel: '开源状态',
+        propertyValue: '开源项目',
+        evidenceSnippet: 'OpenMaic 是开源项目。',
+        confidence: 0.9,
+      },
+    ];
+
+    const result = await persistCaptureDraft('OpenMaic 是开源项目。', draft);
+    const suggestions = await db.compileSuggestions.where('status').equals('pending').toArray();
+
+    expect(result.compilation.queuedCompileSuggestions).toBe(1);
+    expect(suggestions).toHaveLength(1);
+    expect(suggestions[0]).toEqual(
+      expect.objectContaining({
+        entityTitle: 'OpenMaic',
+        propertyKey: 'openSourceStatus',
+        propertyValue: '开源项目',
+      }),
+    );
+  });
 });

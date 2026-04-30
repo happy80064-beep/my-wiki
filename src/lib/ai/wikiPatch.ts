@@ -1,4 +1,6 @@
-import type { EntityType, RelationshipType, Scene, TaskStatus } from '@/types';
+import type { EntityType, RelationshipType, Scene, TaskStatus } from '../../types';
+import type { CaptureDraft, DraftEntity } from '../capture/draft';
+import { createDraftId } from '../capture/draft';
 
 export type WikiPatchType =
   | 'CREATE_ENTITY'
@@ -124,7 +126,12 @@ ${content}
 分析结果：
 ${JSON.stringify(analysis, null, 2)}
 
-请只输出 JSON 数组，每一项必须符合以下 patch 类型之一：
+请只输出 JSON 对象，格式为：
+{
+  "patches": []
+}
+
+patches 中每一项必须符合以下 patch 类型之一：
 - CREATE_ENTITY
 - UPDATE_ENTITY_PROPERTY
 - CREATE_RELATIONSHIP
@@ -136,6 +143,156 @@ ${JSON.stringify(analysis, null, 2)}
 - REVIEW_REQUIRED.options 只能从 Create Page / Update Existing / Skip 中选择。
 - 每个 patch 都必须带 evidence，evidence 必须是原文中的短证据片段。
 - 不要输出 markdown，不要输出解释。`;
+}
+
+export function normalizeCaptureAnalysis(rawText: string): CaptureAnalysis {
+  const parsed = parseBestJson(rawText) as Partial<CaptureAnalysis>;
+  return {
+    entities: toArray<Record<string, unknown>>(parsed.entities)
+      .map((entity) => ({
+        title: stringValue(entity.title),
+        type: pickEnum(entity.type, entityTypes, 'topic'),
+        aliases: toArray(entity.aliases).map((alias) => String(alias).trim()).filter(Boolean),
+        evidence: stringValue(entity.evidence),
+        existsLikely: Boolean(entity.existsLikely),
+      }))
+      .filter((entity) => entity.title && entity.evidence),
+    concepts: toArray<Record<string, unknown>>(parsed.concepts)
+      .map((concept) => ({
+        title: stringValue(concept.title),
+        evidence: stringValue(concept.evidence),
+      }))
+      .filter((concept) => concept.title && concept.evidence),
+    claims: toArray<Record<string, unknown>>(parsed.claims)
+      .map((claim) => ({
+        subject: stringValue(claim.subject),
+        predicate: stringValue(claim.predicate),
+        object: stringValue(claim.object),
+        evidence: stringValue(claim.evidence),
+        confidence: pickEnum(claim.confidence, confidenceLevels, 'medium'),
+      }))
+      .filter((claim) => claim.subject && claim.predicate && claim.object && claim.evidence),
+    contradictions: toArray<Record<string, unknown>>(parsed.contradictions)
+      .map((item) => ({
+        title: stringValue(item.title),
+        evidence: stringValue(item.evidence),
+      }))
+      .filter((item) => item.title && item.evidence),
+    recommendedUpdates: toArray<Record<string, unknown>>(parsed.recommendedUpdates)
+      .map((item) => ({
+        targetTitle: stringValue(item.targetTitle),
+        action: pickEnum(item.action, wikiPatchTypes, 'REVIEW_REQUIRED'),
+        reason: stringValue(item.reason),
+      }))
+      .filter((item) => item.targetTitle && item.reason),
+  };
+}
+
+export function normalizeWikiPatchResponse(rawText: string): WikiPatch[] {
+  const parsed = parseBestJson(rawText) as { patches?: unknown } | unknown[];
+  const rawPatches = Array.isArray(parsed) ? parsed : toArray((parsed as { patches?: unknown }).patches);
+  return rawPatches.map(normalizeWikiPatch).filter((patch): patch is WikiPatch => Boolean(patch && validateWikiPatch(patch)));
+}
+
+export function normalizeWikiPatchesToCaptureDraft(patches: WikiPatch[], content: string): CaptureDraft {
+  const entityByTitle = new Map<string, DraftEntity>();
+
+  const ensureEntity = (title: string, fallbackType: EntityType = 'topic', summary?: string) => {
+    const key = normalizeTitle(title);
+    const existing = entityByTitle.get(key);
+    if (existing) return existing;
+
+    const entity: DraftEntity = {
+      clientId: createDraftId('entity'),
+      type: fallbackType,
+      title: title.trim(),
+      summary: summary?.trim() || `${title.trim()} 相关记录。`,
+      tags: [],
+      scenes: ['work'],
+    };
+    entityByTitle.set(key, entity);
+    return entity;
+  };
+
+  for (const patch of patches) {
+    if (patch.type === 'CREATE_ENTITY') {
+      const entity = ensureEntity(patch.title, patch.entityType, patch.summary);
+      entity.tags = patch.tags;
+      entity.scenes = patch.scenes.length > 0 ? patch.scenes : entity.scenes;
+    }
+    if (patch.type === 'UPDATE_ENTITY_PROPERTY') {
+      ensureEntity(patch.entityTitle, inferEntityTypeFromPropertyPatch(patch), patch.evidence);
+    }
+    if (patch.type === 'CREATE_RELATIONSHIP') {
+      ensureEntity(patch.fromTitle);
+      ensureEntity(patch.toTitle);
+    }
+    if (patch.type === 'CREATE_TASK') {
+      ensureEntity(patch.ownerTitle, 'person');
+      for (const title of patch.linkedToTitles) ensureEntity(title);
+    }
+  }
+
+  if (entityByTitle.size === 0) {
+    ensureEntity(content.slice(0, 24) || '未命名主题', 'topic', content.slice(0, 120));
+  }
+
+  const entities = Array.from(entityByTitle.values());
+  const primaryEntity = entities[0];
+  const relatedEntities = entities.slice(1);
+
+  const relationships = patches
+    .filter((patch): patch is Extract<WikiPatch, { type: 'CREATE_RELATIONSHIP' }> => patch.type === 'CREATE_RELATIONSHIP')
+    .map((patch) => {
+      const from = entityByTitle.get(normalizeTitle(patch.fromTitle));
+      const to = entityByTitle.get(normalizeTitle(patch.toTitle));
+      if (!from || !to) return undefined;
+      return {
+        clientId: createDraftId('rel'),
+        fromClientId: from.clientId,
+        toClientId: to.clientId,
+        type: patch.relationshipType,
+      };
+    })
+    .filter((item): item is NonNullable<typeof item> => Boolean(item));
+
+  const tasks = patches
+    .filter((patch): patch is Extract<WikiPatch, { type: 'CREATE_TASK' }> => patch.type === 'CREATE_TASK')
+    .map((patch) => {
+      const owner = entityByTitle.get(normalizeTitle(patch.ownerTitle));
+      if (!owner) return undefined;
+      return {
+        clientId: createDraftId('task'),
+        description: patch.description,
+        ownerClientId: owner.clientId,
+        linkedToClientIds: patch.linkedToTitles
+          .map((title) => entityByTitle.get(normalizeTitle(title))?.clientId)
+          .filter((id): id is string => Boolean(id)),
+        dueDate: patch.dueDate,
+        status: patch.status,
+      };
+    })
+    .filter((item): item is NonNullable<typeof item> => Boolean(item));
+
+  const compileSuggestions = patches
+    .filter((patch): patch is Extract<WikiPatch, { type: 'UPDATE_ENTITY_PROPERTY' }> => patch.type === 'UPDATE_ENTITY_PROPERTY')
+    .map((patch) => {
+      const entity = entityByTitle.get(normalizeTitle(patch.entityTitle));
+      if (!entity) return undefined;
+      return {
+        clientId: createDraftId('compile'),
+        entityClientId: entity.clientId,
+        entityTitle: entity.title,
+        propertyKey: patch.propertyKey,
+        propertyLabel: propertyLabel(patch.propertyKey),
+        propertyValue: patch.propertyValue,
+        evidenceSnippet: patch.evidence,
+        confidence: patch.confidence,
+      };
+    })
+    .filter((item): item is NonNullable<typeof item> => Boolean(item));
+
+  return { primaryEntity, relatedEntities, relationships, tasks, compileSuggestions };
 }
 
 export function validateWikiPatch(patch: WikiPatch) {
@@ -153,3 +310,153 @@ export function validateWikiPatch(patch: WikiPatch) {
 
   return true;
 }
+
+function normalizeWikiPatch(value: unknown): WikiPatch | undefined {
+  const raw = value as Record<string, unknown>;
+  const type = pickEnum(raw.type, wikiPatchTypes, undefined);
+  if (!type) return undefined;
+
+  if (type === 'CREATE_ENTITY') {
+    return {
+      type,
+      title: stringValue(raw.title),
+      entityType: pickEnum(raw.entityType ?? raw.typeName, entityTypes, 'topic'),
+      summary: stringValue(raw.summary),
+      tags: toArray(raw.tags).map((tag) => String(tag).trim()).filter(Boolean),
+      scenes: toArray(raw.scenes).map((scene) => pickEnum(scene, scenes, undefined)).filter((scene): scene is Scene => Boolean(scene)),
+      evidence: stringValue(raw.evidence),
+    };
+  }
+
+  if (type === 'UPDATE_ENTITY_PROPERTY') {
+    return {
+      type,
+      entityTitle: stringValue(raw.entityTitle),
+      propertyKey: stringValue(raw.propertyKey),
+      propertyValue: stringValue(raw.propertyValue),
+      evidence: stringValue(raw.evidence),
+      confidence: clamp(Number(raw.confidence) || 0.65, 0, 1),
+    };
+  }
+
+  if (type === 'CREATE_RELATIONSHIP') {
+    return {
+      type,
+      fromTitle: stringValue(raw.fromTitle),
+      toTitle: stringValue(raw.toTitle),
+      relationshipType: pickEnum(raw.relationshipType, relationshipTypes, 'related-to'),
+      evidence: stringValue(raw.evidence),
+      confidence: clamp(Number(raw.confidence) || 0.65, 0, 1),
+    };
+  }
+
+  if (type === 'CREATE_TASK') {
+    return {
+      type,
+      description: stringValue(raw.description),
+      ownerTitle: stringValue(raw.ownerTitle) || '我',
+      linkedToTitles: toArray(raw.linkedToTitles).map((title) => String(title).trim()).filter(Boolean),
+      dueDate: typeof raw.dueDate === 'string' ? raw.dueDate : undefined,
+      status: pickEnum(raw.status, taskStatuses, 'pending'),
+      evidence: stringValue(raw.evidence),
+    };
+  }
+
+  return {
+    type,
+    title: stringValue(raw.title),
+    reason: stringValue(raw.reason),
+    evidence: stringValue(raw.evidence),
+    options: toArray(raw.options).filter((option): option is 'Create Page' | 'Update Existing' | 'Skip' =>
+      ['Create Page', 'Update Existing', 'Skip'].includes(String(option)),
+    ),
+  };
+}
+
+function inferEntityTypeFromPropertyPatch(patch: Extract<WikiPatch, { type: 'UPDATE_ENTITY_PROPERTY' }>): EntityType {
+  if (['wakeWord', 'stopWord', 'runtimeEnvironment', 'localPath', 'derivedFrom'].includes(patch.propertyKey)) {
+    return 'project';
+  }
+  return 'topic';
+}
+
+function propertyLabel(propertyKey: string) {
+  const labels: Record<string, string> = {
+    runtimeEnvironment: '运行环境',
+    wakeWord: '唤醒词',
+    stopWord: '终止词',
+    localPath: '本地路径',
+    models: '相关模型',
+    ownerNote: '负责人说明',
+    derivedFrom: '来源/基于项目',
+    openSourceStatus: '开源状态',
+  };
+  return labels[propertyKey] ?? propertyKey;
+}
+
+function parseBestJson(text: string) {
+  const withoutFence = text.replace(/```(?:json)?/g, '').replace(/```/g, '').trim();
+  const start = withoutFence.indexOf('{');
+  const end = withoutFence.lastIndexOf('}');
+  if (start < 0 || end < start) {
+    throw new Error('LLM did not return a JSON object.');
+  }
+  return JSON.parse(withoutFence.slice(start, end + 1).replace(/,\s*([}\]])/g, '$1')) as unknown;
+}
+
+function stringValue(value: unknown) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function toArray<T = unknown>(value: unknown): T[] {
+  return Array.isArray(value) ? (value as T[]) : [];
+}
+
+function pickEnum<T extends string, TFallback extends T | undefined>(
+  value: unknown,
+  values: readonly T[],
+  fallback: TFallback,
+) {
+  return values.includes(value as T) ? (value as T) : fallback;
+}
+
+function normalizeTitle(value: string) {
+  return value.toLowerCase().replace(/[^\u4e00-\u9fa5a-z0-9]/g, '').trim();
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+const entityTypes = ['person', 'project', 'event', 'topic'] as const;
+const scenes = ['work', 'life', 'social', 'personal'] as const;
+const confidenceLevels = ['high', 'medium', 'low'] as const;
+const wikiPatchTypes: WikiPatchType[] = [
+  'CREATE_ENTITY',
+  'UPDATE_ENTITY_PROPERTY',
+  'CREATE_RELATIONSHIP',
+  'CREATE_TASK',
+  'REVIEW_REQUIRED',
+];
+const relationshipTypes: RelationshipType[] = [
+  'owner',
+  'participant',
+  'stakeholder',
+  'decision-maker',
+  'attendee',
+  'organizer',
+  'mentioned-in',
+  'colleague',
+  'friend',
+  'family',
+  'mentor',
+  'reports-to',
+  'parent-of',
+  'depends-on',
+  'related-to',
+  'about',
+  'kicked-off',
+  'relevant-to',
+  'mentions',
+];
+const taskStatuses: TaskStatus[] = ['pending', 'done', 'overdue', 'cancelled'];

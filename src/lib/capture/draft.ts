@@ -25,11 +25,23 @@ export type DraftTask = {
   status: TaskStatus;
 };
 
+export type DraftCompileSuggestion = {
+  clientId: string;
+  entityClientId: string;
+  entityTitle: string;
+  propertyKey: string;
+  propertyLabel: string;
+  propertyValue: string;
+  evidenceSnippet: string;
+  confidence: number;
+};
+
 export type CaptureDraft = {
   primaryEntity: DraftEntity;
   relatedEntities: DraftEntity[];
   relationships: DraftRelationship[];
   tasks: DraftTask[];
+  compileSuggestions?: DraftCompileSuggestion[];
 };
 
 let draftIdSeed = 0;
@@ -89,7 +101,7 @@ export function createLocalCaptureDraft(content: string): CaptureDraft {
   const relationships = createDraftRelationships(primaryEntity, personEntity, projectEntity);
   const tasks = createDraftTasks(cleaned, personEntity ?? primaryEntity, projectEntity ?? primaryEntity);
 
-  return { primaryEntity, relatedEntities, relationships, tasks };
+  return { primaryEntity, relatedEntities, relationships, tasks, compileSuggestions: [] };
 }
 
 function inferPrimaryType(content: string, projectTitle?: string): EntityType {
