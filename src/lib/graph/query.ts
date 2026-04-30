@@ -19,6 +19,7 @@ import {
   getRelationshipsWithEntity,
 } from './filter';
 import { parseQueryIntent } from './queryIntent';
+import { rankRelatedEntities } from './relevance';
 import { getSubgraph } from './traverse';
 import type { QuerySource, QueryTraceStep, StructuredQueryResult, WikiCompileSuggestion } from './types';
 import type { CompileSuggestionDraft, Entity, Entry, Relationship, Task } from '@/types';
@@ -202,7 +203,7 @@ async function answerWikiRead(
     {
       layer: 'graph',
       label: '关系子图',
-      detail: `展开 1 跳关系，读取 ${document.relationships.length} 条关系、${document.relatedEntities.length} 个相邻实体。`,
+      detail: `展开 2 跳关系，并按直接关系、共同来源、共同邻居和类型亲和度排序；读取 ${document.relationships.length} 条关系、${document.relatedEntities.length} 个相关实体。`,
     },
     {
       layer: 'evidence',
@@ -389,11 +390,17 @@ async function readEntityDocument(entity: Entity, question: string, plan: QueryP
     db.tasks
       .filter((task) => task.owner === entity.id || task.linkedTo.includes(entity.id))
       .toArray(),
-    getSubgraph(entity.id, 1),
+    getSubgraph(entity.id, 2),
   ]);
 
   const relationships = subgraph.edges;
-  const relatedEntities = subgraph.nodes.filter((node) => node.id !== entity.id);
+  const relatedEntities = rankRelatedEntities(
+    entity,
+    subgraph.nodes.filter((node) => node.id !== entity.id),
+    relationships,
+  )
+    .slice(0, 12)
+    .map((ranked) => ranked.entity);
   const entryIds = [
     ...entity.sourceEntries,
     ...tasks.map((task) => task.source),

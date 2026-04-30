@@ -147,6 +147,40 @@ describe('structured query', () => {
     expect(result.sources.some((source) => source.id === entry.id)).toBe(true);
   });
 
+  it('expands wiki reads through two-hop graph relevance', async () => {
+    const entry = await createEntry({
+      content: '桌面数字生命体需要稳定唤醒方案和语音交互主链。',
+      source: 'text',
+    });
+    const project = await createEntity({
+      type: 'project',
+      title: '桌面数字生命体',
+      summary: '桌面智能体原型。',
+      sourceEntries: [entry.id],
+    });
+    const voice = await createEntity({
+      type: 'topic',
+      title: '语音交互',
+      summary: '语音输入输出链路。',
+      sourceEntries: [entry.id],
+    });
+    const wake = await createEntity({
+      type: 'topic',
+      title: '唤醒方案',
+      summary: '小林唤醒和 KWS 稳定性方案。',
+      sourceEntries: [],
+    });
+
+    await createRelationship({ from: project.id, to: voice.id, type: 'relevant-to', evidence: [entry.id] });
+    await createRelationship({ from: voice.id, to: wake.id, type: 'related-to', evidence: [entry.id] });
+
+    const result = await runStructuredQuery('桌面生命体是什么');
+
+    expect(result.answer).toContain('语音交互');
+    expect(result.answer).toContain('唤醒方案');
+    expect(result.trace?.some((step) => step.detail.includes('展开 2 跳关系'))).toBe(true);
+  });
+
   it('scans linked raw entries for attribute questions when the entity profile is incomplete', async () => {
     const entry = await createEntry({
       content:
