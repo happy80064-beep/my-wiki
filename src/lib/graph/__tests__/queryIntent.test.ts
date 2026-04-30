@@ -30,6 +30,14 @@ describe('query intent parser', () => {
     expect(intent.entityName).toBe('桌面生命体');
   });
 
+  it('detects relationship path questions between two entities', () => {
+    const intent = parseQueryIntent('桌面生命体和唤醒方案有什么关系');
+
+    expect(intent.type).toBe('entity_relationship_path');
+    expect(intent.entityName).toBe('桌面生命体');
+    expect(intent.targetEntityName).toBe('唤醒方案');
+  });
+
   it('detects entity profile questions', () => {
     const intent = parseQueryIntent('桌面生命体叫什么');
 

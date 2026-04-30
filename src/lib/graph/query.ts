@@ -8,6 +8,7 @@ import {
   formatProjectStatusAnswer,
   formatProjectTasksAnswer,
   formatRelatedEntitiesAnswer,
+  relationshipTypeLabel,
   taskSource,
 } from './answer';
 import {
@@ -20,7 +21,7 @@ import {
 } from './filter';
 import { parseQueryIntent } from './queryIntent';
 import { rankRelatedEntities } from './relevance';
-import { getSubgraph } from './traverse';
+import { findPaths, getSubgraph } from './traverse';
 import type { QuerySource, QueryTraceStep, StructuredQueryResult, WikiCompileSuggestion } from './types';
 import type { CompileSuggestionDraft, Entity, Entry, Relationship, Task } from '@/types';
 import { composeQueryAnswer } from '@/lib/ai/queryComposerClient';
@@ -69,6 +70,10 @@ export async function runStructuredQuery(
 
   if (intent.type === 'project_related_entities') {
     return answerProjectRelatedEntities(intent.entityName);
+  }
+
+  if (intent.type === 'entity_relationship_path') {
+    return answerEntityRelationshipPath(intent.entityName, intent.targetEntityName, trimmed, options);
   }
 
   if (intent.type === 'entity_profile') {
@@ -152,6 +157,112 @@ async function answerProjectRelatedEntities(projectName: string | undefined): Pr
     sources: dedupeSources([entitySource(project.entity), ...relatedEntities.map(entitySource), ...entries.map(entrySource)]),
     suggestions: [`查看${project.entity.title}下一阶段优化项`, `查看${project.entity.title}未完成任务`],
   };
+}
+
+async function answerEntityRelationshipPath(
+  fromName: string | undefined,
+  toName: string | undefined,
+  question: string,
+  options: RunStructuredQueryOptions,
+): Promise<StructuredQueryResult> {
+  if (!fromName || !toName) {
+    return emptyResult('我还不能确定你问的是哪两个实体之间的关系。');
+  }
+
+  const [fromCandidates, toCandidates] = await Promise.all([
+    findEntityCandidates(fromName),
+    findEntityCandidates(toName),
+  ]);
+
+  if (fromCandidates.length === 0 || toCandidates.length === 0) {
+    const missing = [
+      fromCandidates.length === 0 ? `「${fromName}」` : '',
+      toCandidates.length === 0 ? `「${toName}」` : '',
+    ].filter(Boolean);
+
+    return {
+      ...emptyResult(`没有找到 ${missing.join('、')} 对应的实体。可以先捕获包含它的材料，或换一个知识库里已有的实体名。`),
+      trace: [
+        {
+          layer: 'intent',
+          label: '关系问题解析',
+          detail: `已识别为实体关系查询：${fromName} ↔ ${toName}。`,
+        },
+        {
+          layer: 'directory',
+          label: '知识目录',
+          detail: `未命中实体：${missing.join('、')}。`,
+        },
+      ],
+    };
+  }
+
+  const from = fromCandidates[0].entity;
+  const to = toCandidates[0].entity;
+  const paths = await findPaths(from.id, to.id, 3);
+  const pathRelationships = paths.slice(0, 3).flat();
+  const entries = await getEntriesByIds(pathRelationships.flatMap((relationship) => relationship.evidence));
+  const pathEntityIds = Array.from(new Set(pathRelationships.flatMap((relationship) => [relationship.from, relationship.to])));
+  const pathEntities = (await db.entities.bulkGet(pathEntityIds)).filter((entity): entity is Entity => Boolean(entity));
+
+  const trace: QueryTraceStep[] = [
+    {
+      layer: 'intent',
+      label: '关系问题解析',
+      detail: `已识别为实体关系查询：${from.title} ↔ ${to.title}。`,
+    },
+    {
+      layer: 'graph',
+      label: '路径搜索',
+      detail: paths.length > 0 ? `在 3 跳内找到 ${paths.length} 条关系路径。` : '3 跳内没有显式关系路径。',
+    },
+  ];
+
+  const draftAnswer =
+    paths.length > 0
+      ? formatRelationshipPathAnswer(from, to, paths.slice(0, 3), pathEntities)
+      : formatNoRelationshipPathAnswer(from, to);
+
+  const result: StructuredQueryResult = {
+    answer: draftAnswer,
+    candidates: [from, to],
+    sources: dedupeSources([
+      entitySource(from),
+      entitySource(to),
+      ...pathEntities.map(entitySource),
+      ...entries.map(entrySource),
+    ]),
+    suggestions: [`查看${from.title}的关系图谱`, `查看${to.title}的实体页`],
+    trace,
+  };
+
+  return composeResultIfRequested(
+    result,
+    {
+      question,
+      draftAnswer,
+      entities: [from, to, ...pathEntities].slice(0, 10).map((entity) => ({
+        id: entity.id,
+        type: entity.type,
+        title: entity.title,
+        summary: entity.summary,
+      })),
+      tasks: [],
+      relationships: pathRelationships.slice(0, 10).map((relationship) => ({
+        id: relationship.id,
+        type: relationship.type,
+        fromTitle: pathEntities.find((entity) => entity.id === relationship.from)?.title ?? relationship.from,
+        toTitle: pathEntities.find((entity) => entity.id === relationship.to)?.title ?? relationship.to,
+      })),
+      entries: entries.slice(0, 5).map((entry) => ({
+        id: entry.id,
+        content: snippet(entry.content, 240),
+        scope: 'entity-source',
+        matchedTerms: [],
+      })),
+    },
+    options,
+  );
 }
 
 async function answerWikiRead(
@@ -591,6 +702,34 @@ function buildWikiReadSources(document: EntityDocument): QuerySource[] {
     ...document.evidenceHits.map((hit) => entrySource(hit.entry)),
     ...document.entries.slice(0, 6).map(entrySource),
   ]);
+}
+
+function formatRelationshipPathAnswer(from: Entity, to: Entity, paths: Relationship[][], pathEntities: Entity[]) {
+  const entityById = new Map([from, to, ...pathEntities].map((entity) => [entity.id, entity]));
+  const pathLines = paths.map((path, index) => {
+    const parts: string[] = [];
+    for (const relationship of path) {
+      const fromTitle = entityById.get(relationship.from)?.title ?? relationship.from;
+      const toTitle = entityById.get(relationship.to)?.title ?? relationship.to;
+      if (parts.length === 0) parts.push(fromTitle);
+      parts.push(`--${relationshipTypeLabel(relationship.type)}--> ${toTitle}`);
+    }
+    return `${index + 1}. ${parts.join(' ')}`;
+  });
+
+  return [
+    `${from.title} 和 ${to.title} 在知识图谱中存在关系路径：`,
+    pathLines.join('\n'),
+  ].join('\n\n');
+}
+
+function formatNoRelationshipPathAnswer(from: Entity, to: Entity) {
+  const sharedSourceCount = from.sourceEntries.filter((entryId) => to.sourceEntries.includes(entryId)).length;
+  if (sharedSourceCount > 0) {
+    return `${from.title} 和 ${to.title} 目前没有显式关系边，但它们共享 ${sharedSourceCount} 条原始来源。建议把这类来源中的关系编译成正式关系。`;
+  }
+
+  return `${from.title} 和 ${to.title} 都存在于知识库中，但目前 3 跳内没有找到显式关系路径。`;
 }
 
 function buildQueryComposePayload(question: string, draftAnswer: string, document: EntityDocument): QueryComposePayload {

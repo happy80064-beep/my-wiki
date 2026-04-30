@@ -5,12 +5,14 @@ export type QueryIntentType =
   | 'project_status'
   | 'project_improvements'
   | 'project_related_entities'
+  | 'entity_relationship_path'
   | 'entity_profile'
   | 'fuzzy_memory';
 
 export type QueryIntent = {
   type: QueryIntentType;
   entityName?: string;
+  targetEntityName?: string;
   originalQuestion: string;
 };
 
@@ -23,6 +25,16 @@ const firstPersonWords = /(我|自己|本人)/;
 
 export function parseQueryIntent(question: string): QueryIntent {
   const normalized = normalizeQuestion(question);
+  const relationshipPair = extractRelationshipPair(normalized);
+
+  if (relationshipPair) {
+    return {
+      type: 'entity_relationship_path',
+      entityName: relationshipPair.from,
+      targetEntityName: relationshipPair.to,
+      originalQuestion: question,
+    };
+  }
 
   if (firstPersonWords.test(normalized) && taskWords.test(normalized)) {
     return { type: 'my_pending_tasks', entityName: '我', originalQuestion: question };
@@ -78,6 +90,17 @@ export function parseQueryIntent(question: string): QueryIntent {
     entityName: extractProjectName(normalized),
     originalQuestion: question,
   };
+}
+
+function extractRelationshipPair(question: string) {
+  const match = question.match(/^(.{1,40}?)(?:和|与|跟)(.{1,40}?)(?:有什么关系|是什么关系|关系是什么|有什么关联|如何关联|怎么关联|的关系)$/);
+  if (!match?.[1] || !match[2]) return undefined;
+
+  const from = cleanupName(match[1]);
+  const to = cleanupName(match[2]);
+  if (!from || !to) return undefined;
+
+  return { from, to };
 }
 
 function normalizeQuestion(question: string) {
