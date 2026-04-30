@@ -175,6 +175,11 @@ async function answerEntityRelationshipPath(
   ]);
 
   if (fromCandidates.length === 0 || toCandidates.length === 0) {
+    if (fromCandidates.length > 0 && toCandidates.length === 0 && toName) {
+      const fallback = await answerRelationshipEvidenceFallback(fromCandidates[0].entity, toName, question, options);
+      if (fallback) return fallback;
+    }
+
     const missing = [
       fromCandidates.length === 0 ? `「${fromName}」` : '',
       toCandidates.length === 0 ? `「${toName}」` : '',
@@ -259,6 +264,80 @@ async function answerEntityRelationshipPath(
         content: snippet(entry.content, 240),
         scope: 'entity-source',
         matchedTerms: [],
+      })),
+    },
+    options,
+  );
+}
+
+async function answerRelationshipEvidenceFallback(
+  from: Entity,
+  missingName: string,
+  question: string,
+  options: RunStructuredQueryOptions,
+): Promise<StructuredQueryResult | undefined> {
+  const linkedEntries = await getEntriesByIds(from.sourceEntries);
+  const plan: QueryPlan = {
+    ...buildFallbackQueryPlan(question, from.title),
+    evidenceTerms: uniqueStrings([
+      missingName,
+      ...buildAttributeTerms(`${question} ${missingName}`),
+      ...cjkBigrams(missingName),
+    ]).slice(0, 16),
+    needsRawEvidence: true,
+    needsGlobalSearch: true,
+  };
+  const evidenceHits = await findRawEvidenceHits(question, from, linkedEntries, plan);
+  if (evidenceHits.length === 0) return undefined;
+
+  const answer = [
+    `没有找到独立实体「${missingName}」，但在「${from.title}」的来源材料里找到了相关线索：`,
+    formatEvidenceHitLines(evidenceHits),
+  ].join('\n\n');
+  const result: StructuredQueryResult = {
+    answer,
+    candidates: [from],
+    sources: dedupeSources([entitySource(from), ...evidenceHits.map((hit) => entrySource(hit.entry))]),
+    suggestions: [`把「${missingName}」编译成独立实体或属性`, `查看${from.title}的实体页`],
+    trace: [
+      {
+        layer: 'intent',
+        label: '关系问题解析',
+        detail: `已识别为实体关系查询：${from.title} ↔ ${missingName}。`,
+      },
+      {
+        layer: 'directory',
+        label: '知识目录',
+        detail: `没有找到独立实体「${missingName}」，改为扫描「${from.title}」的来源材料。`,
+      },
+      {
+        layer: 'evidence',
+        label: '原始材料兜底扫描',
+        detail: `定位到 ${evidenceHits.length} 个可能说明二者关系的片段。`,
+      },
+    ],
+  };
+
+  return composeResultIfRequested(
+    result,
+    {
+      question,
+      draftAnswer: answer,
+      entities: [
+        {
+          id: from.id,
+          type: from.type,
+          title: from.title,
+          summary: from.summary,
+        },
+      ],
+      tasks: [],
+      relationships: [],
+      entries: evidenceHits.slice(0, 5).map((hit) => ({
+        id: hit.entry.id,
+        content: hit.snippet,
+        scope: hit.scope,
+        matchedTerms: hit.matchedTerms,
       })),
     },
     options,
@@ -1063,7 +1142,7 @@ function buildSearchTerms(question: string, entityName: string | undefined, plan
   for (const term of attributeTerms) {
     entityOnlyQuestion = entityOnlyQuestion.replace(cleanupSearchText(term), '');
   }
-  return Array.from(
+  const baseTerms = Array.from(
     new Set([
       ...(plan?.entityCandidates ?? []),
       cleanedEntityName,
@@ -1072,6 +1151,25 @@ function buildSearchTerms(question: string, entityName: string | undefined, plan
       ...(plan?.evidenceTerms ?? []),
     ].filter((term) => term.length >= 2)),
   );
+
+  return expandQuerySearchTerms(baseTerms).slice(0, 32);
+}
+
+function expandQuerySearchTerms(terms: string[]) {
+  return uniqueStrings(
+    terms.flatMap((term) => [
+      term,
+      stripQueryDescriptors(term),
+      ...cjkBigrams(term),
+    ]),
+  ).filter((term) => {
+    const normalized = normalize(term);
+    return normalized.length >= 2 && !isWeakQueryTerm(normalized);
+  });
+}
+
+function stripQueryDescriptors(value: string) {
+  return value.replace(/(方案|机制|路线|链路|能力|模块|系统|平台|项目|事项|问题)$/g, '').trim();
 }
 
 function cleanupSearchText(value: string) {
@@ -1212,6 +1310,34 @@ function cjkBigrams(value: string) {
     grams.push(cjkText.slice(index, index + 2));
   }
   return grams;
+}
+
+function isWeakQueryTerm(term: string) {
+  return new Set([
+    '什么',
+    '哪些',
+    '是否',
+    '能否',
+    '可以',
+    '关系',
+    '关联',
+    '相关',
+    '方案',
+    '机制',
+    '路线',
+    '链路',
+    '能力',
+    '模块',
+    '系统',
+    '平台',
+    '项目',
+    '事项',
+    '问题',
+    '任务',
+    '状态',
+    '进展',
+    '优化',
+  ]).has(term);
 }
 
 function formatEvidenceHitLines(hits: EvidenceHit[]) {

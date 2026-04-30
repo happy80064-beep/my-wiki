@@ -200,7 +200,7 @@ describe('structured query', () => {
     });
     const wake = await createEntity({
       type: 'topic',
-      title: '唤醒方案',
+      title: '唤醒词',
       summary: '小林唤醒和 KWS 稳定性方案。',
       sourceEntries: [entry.id],
     });
@@ -210,10 +210,31 @@ describe('structured query', () => {
 
     const result = await runStructuredQuery('桌面生命体和唤醒方案有什么关系');
 
-    expect(result.answer).toContain('桌面数字生命体 和 唤醒方案');
+    expect(result.answer).toContain('桌面数字生命体 和 唤醒词');
     expect(result.answer).toContain('语音交互');
     expect(result.trace?.some((step) => step.label === '路径搜索')).toBe(true);
     expect(result.sources.some((source) => source.id === entry.id)).toBe(true);
+  });
+
+  it('falls back to source evidence when a relationship target is not yet an entity', async () => {
+    const entry = await createEntry({
+      content: '桌面数字生命体需要稳定唤醒方案和语音交互主链，主唤醒词是“小林”。',
+      source: 'text',
+    });
+    await createEntity({
+      type: 'project',
+      title: '桌面数字生命体',
+      summary: '桌面智能体原型。',
+      sourceEntries: [entry.id],
+    });
+
+    const result = await runStructuredQuery('桌面生命体和唤醒方案有什么关系');
+
+    expect(result.answer).toContain('没有找到独立实体「唤醒方案」');
+    expect(result.answer).toContain('来源材料');
+    expect(result.answer).toContain('唤醒方案');
+    expect(result.sources.some((source) => source.id === entry.id)).toBe(true);
+    expect(result.trace?.some((step) => step.label === '原始材料兜底扫描')).toBe(true);
   });
 
   it('scans linked raw entries for attribute questions when the entity profile is incomplete', async () => {
