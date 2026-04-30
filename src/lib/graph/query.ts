@@ -861,6 +861,11 @@ function formatWikiReadAnswer(question: string, document: EntityDocument) {
   const compiledPropertyValue = queriedPropertyKey ? getEntityPropertyDisplayValue(entity, queriedPropertyKey) : undefined;
   if (queriedPropertyKey && compiledPropertyValue) {
     lines.push(`${propertyLabel(queriedPropertyKey)}：${compiledPropertyValue}`);
+  } else if (queriedPropertyKey) {
+    const evidencePropertyValue = extractEvidencePropertyValue(queriedPropertyKey, evidenceHits);
+    if (evidencePropertyValue) {
+      lines.push(`${propertyLabel(queriedPropertyKey)}：${evidencePropertyValue}（来源材料命中，待编译回 Wiki）`);
+    }
   }
 
   const openTasks = tasks.filter((task) => task.status !== 'done' && task.status !== 'cancelled');
@@ -960,6 +965,27 @@ function buildQueryComposePayload(question: string, draftAnswer: string, documen
   };
 }
 
+function extractEvidencePropertyValue(propertyKey: string, evidenceHits: EvidenceHit[]) {
+  for (const hit of evidenceHits) {
+    const value = extractPropertyValue(propertyKey, hit.snippet, hit.matchedTerms);
+    if (value && validateCompileSuggestionByRule({
+      entityId: 'preview',
+      entityTitle: '',
+      propertyKey,
+      propertyLabel: propertyLabel(propertyKey),
+      propertyValue: value,
+      evidenceEntryId: hit.entry.id,
+      evidenceSnippet: hit.snippet,
+      evidenceScope: hit.scope,
+      confidence: 1,
+    })) {
+      return value;
+    }
+  }
+
+  return undefined;
+}
+
 function buildComposeEntries(document: EntityDocument): QueryComposePayload['entries'] {
   const used = new Set<string>();
   const evidenceEntries = document.evidenceHits.map((hit) => {
@@ -1049,8 +1075,14 @@ function extractPropertyValue(propertyKey: string, text: string, matchedTerms: s
   }
 
   if (propertyKey === 'wakeWord') {
-    const match = text.match(/(?:主)?唤醒词(?:目前)?(?:是|为|叫|使用)?[：:\s“"]*([^”"。；;，,]+)/);
-    return cleanExtractedValue(match?.[1]);
+    const patterns = [
+      /主唤醒词(?:目前)?(?:是|为|叫|使用)?[：:\s“"]*([^”"。；;，,]+)/,
+      /(?:唤醒词|叫醒词)(?:目前)?(?:是|为|叫|使用)[：:\s“"]*([^”"。；;，,]+)/,
+    ];
+    for (const pattern of patterns) {
+      const value = cleanExtractedValue(text.match(pattern)?.[1]);
+      if (value && isLikelyWakeWordValue(value)) return value;
+    }
   }
 
   if (propertyKey === 'stopWord') {
@@ -1096,6 +1128,10 @@ function cleanExtractedValue(value: string | undefined) {
     ?.replace(/^[“"'\s]+|[”"'\s]+$/g, '')
     .replace(/^(：|:|是|为|使用|目前)/, '')
     .trim();
+}
+
+function isLikelyWakeWordValue(value: string) {
+  return !/(方案|路线|架构|PowerShell|System\.Speech|KWS|关键词检测|本地|云端|识别器)/i.test(value);
 }
 
 function scoreCompileSuggestion(propertyKey: string, propertyValue: string, hit: EvidenceHit) {
@@ -1213,6 +1249,19 @@ async function composeResultIfRequested(
 
   try {
     const composed = await composeQueryAnswer(payload);
+    if (composedContradictsConcreteDraft(payload.draftAnswer, composed.answer)) {
+      return {
+        ...result,
+        trace: [
+          ...(result.trace ?? []),
+          {
+            layer: 'answer',
+            label: 'LLM 表达',
+            detail: '模型表达与结构化属性结论冲突，已保留结构化答案。',
+          },
+        ],
+      };
+    }
     return {
       ...result,
       answer: composed.answer.trim() || result.answer,
@@ -1243,6 +1292,15 @@ async function composeResultIfRequested(
       ],
     };
   }
+}
+
+function composedContradictsConcreteDraft(draftAnswer: string, composedAnswer: string) {
+  if (!hasConcretePropertyLine(draftAnswer)) return false;
+  return /(没有|未|暂未|尚未).{0,12}(找到|记录|明确|确认)|无法确认|不能确认|不确定/.test(composedAnswer);
+}
+
+function hasConcretePropertyLine(answer: string) {
+  return /(运行环境|唤醒词|终止词|本地路径|相关模型|负责人说明|来源\/基于项目|开源状态)：[^。\n]+/.test(answer);
 }
 
 function providerLabel(provider: 'minimax' | 'deepseek') {

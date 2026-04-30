@@ -328,10 +328,43 @@ describe('structured query', () => {
 
     const result = await runStructuredQuery('桌面生命体的唤醒词是什么');
 
+    expect(result.answer).toContain('唤醒词：小林');
     expect(result.answer).toContain('主唤醒词是“小林”');
     expect(result.answer).toContain('原始材料命中');
     expect(result.sources.some((source) => source.type === 'entry' && source.id === entry.id)).toBe(true);
     expect(result.trace?.some((step) => step.label === '原始材料兜底扫描')).toBe(true);
+  });
+
+  it('keeps structured property answers when LLM expression contradicts evidence', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(
+        JSON.stringify({
+          answer: '桌面数字生命体的唤醒词目前没有找到明确记录。',
+          provider: 'minimax',
+          model: 'MiniMax-M2.7',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )),
+    );
+
+    const entry = await createEntry({
+      content: '语音输入部分持续优化，主唤醒词是“小林”，终止词使用 miki / mi ki。',
+      source: 'text',
+    });
+    await createEntity({
+      type: 'project',
+      title: '桌面数字生命体',
+      summary: '一个本地桌面智能体原型。',
+      sourceEntries: [entry.id],
+    });
+
+    const result = await runStructuredQuery('桌面生命体的唤醒词是什么', { composeWithLlm: true });
+
+    expect(result.answer).toContain('唤醒词：小林');
+    expect(result.answer).not.toContain('没有找到明确记录');
+    expect(result.llm).toBeUndefined();
+    expect(result.trace?.some((step) => step.detail.includes('结构化属性结论冲突'))).toBe(true);
   });
 
   it('falls back to global raw entries when linked entries miss the requested attribute', async () => {
