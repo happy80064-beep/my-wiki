@@ -21,12 +21,12 @@ import {
 import { parseQueryIntent } from './queryIntent';
 import { getSubgraph } from './traverse';
 import type { QuerySource, QueryTraceStep, StructuredQueryResult, WikiCompileSuggestion } from './types';
-import type { Entity, Entry, Relationship, Task } from '@/types';
+import type { CompileSuggestionDraft, Entity, Entry, Relationship, Task } from '@/types';
 import { composeQueryAnswer } from '@/lib/ai/queryComposerClient';
 import type { QueryComposePayload } from '@/lib/ai/queryComposer';
 import { planQueryWithAgent } from '@/lib/ai/queryPlannerClient';
 import type { QueryIndexEntity, QueryPlan } from '@/lib/ai/queryPlanner';
-import { db } from '@/lib/db';
+import { db, materializeCompileSuggestions } from '@/lib/db';
 
 export type { QuerySource, StructuredQueryResult } from './types';
 
@@ -230,7 +230,7 @@ async function answerWikiRead(
     sources: buildWikiReadSources(document),
     suggestions: buildEntitySuggestions(entity),
     trace,
-    compileSuggestions: buildCompileSuggestions(document, plan),
+    compileSuggestions: await materializeCompileSuggestions(buildCompileSuggestions(document, plan), question),
   };
 
   return composeResultIfRequested(result, buildQueryComposePayload(question, draftAnswer, document), options);
@@ -299,11 +299,14 @@ async function resolveQueryPlan(
 
   try {
     const plan = await planQueryWithAgent(question, index);
+    const mergedPlan = correctQueryPlanAttribute(question, mergeQueryPlans(plan, fallback));
     return {
-      plan: mergeQueryPlans(plan, fallback),
+      plan: mergedPlan,
       trace: `读取 ${index.length} 个目录项，选择实体：${
-        plan.selectedEntityIds.length > 0 ? plan.selectedEntityIds.join('、') : plan.entityCandidates.join('、') || '未确定'
-      }；属性：${plan.attribute || '未指定'}；证据词：${plan.evidenceTerms.join('、') || '无'}。`,
+        mergedPlan.selectedEntityIds.length > 0
+          ? mergedPlan.selectedEntityIds.join('、')
+          : mergedPlan.entityCandidates.join('、') || '未确定'
+      }；属性：${mergedPlan.attribute || '未指定'}；证据词：${mergedPlan.evidenceTerms.join('、') || '无'}。`,
     };
   } catch (error) {
     return {
@@ -339,6 +342,19 @@ function mergeQueryPlans(plan: QueryPlan, fallback: QueryPlan): QueryPlan {
     needsGlobalSearch: plan.needsGlobalSearch || fallback.needsGlobalSearch,
     attribute: plan.attribute || fallback.attribute,
   };
+}
+
+function correctQueryPlanAttribute(question: string, plan: QueryPlan): QueryPlan {
+  const inferredAttribute = inferAttribute(question);
+  if (inferredAttribute === 'openSourceStatus' && plan.attribute === 'derivedFrom') {
+    return {
+      ...plan,
+      attribute: 'openSourceStatus',
+      evidenceTerms: uniqueStrings([...plan.evidenceTerms, ...buildAttributeTerms(question)]).slice(0, 12),
+    };
+  }
+
+  return plan;
 }
 
 async function findWikiEntityCandidates(
@@ -525,6 +541,12 @@ function formatWikiReadAnswer(question: string, document: EntityDocument) {
     lines.push(`当前状态：${status}`);
   }
 
+  const queriedPropertyKey = normalizePropertyKey(inferAttribute(question));
+  const compiledPropertyValue = queriedPropertyKey ? getEntityPropertyDisplayValue(entity, queriedPropertyKey) : undefined;
+  if (queriedPropertyKey && compiledPropertyValue) {
+    lines.push(`${propertyLabel(queriedPropertyKey)}：${compiledPropertyValue}`);
+  }
+
   const openTasks = tasks.filter((task) => task.status !== 'done' && task.status !== 'cancelled');
   if (openTasks.length > 0) {
     lines.push(`未完成任务：\n${openTasks.slice(0, 5).map((task, index) => `${index + 1}. ${task.description}`).join('\n')}`);
@@ -619,7 +641,7 @@ function buildComposeEntries(document: EntityDocument): QueryComposePayload['ent
   return [...evidenceEntries, ...contextEntries];
 }
 
-function buildCompileSuggestions(document: EntityDocument, plan: QueryPlan): WikiCompileSuggestion[] {
+function buildCompileSuggestions(document: EntityDocument, plan: QueryPlan): CompileSuggestionDraft[] {
   const propertyKey = normalizePropertyKey(plan.attribute ?? inferAttribute(plan.evidenceTerms.join(' ')));
   if (!propertyKey || document.evidenceHits.length === 0) return [];
 
@@ -628,7 +650,6 @@ function buildCompileSuggestions(document: EntityDocument, plan: QueryPlan): Wik
       const propertyValue = extractPropertyValue(propertyKey, hit.snippet, hit.matchedTerms);
       if (!propertyValue) return undefined;
       const suggestion = {
-        id: `${document.entity.id}:${propertyKey}:${index}`,
         entityId: document.entity.id,
         entityTitle: document.entity.title,
         propertyKey,
@@ -638,10 +659,10 @@ function buildCompileSuggestions(document: EntityDocument, plan: QueryPlan): Wik
         evidenceSnippet: hit.snippet,
         evidenceScope: hit.scope,
         confidence: scoreCompileSuggestion(propertyKey, propertyValue, hit),
-      } satisfies WikiCompileSuggestion;
+      } satisfies CompileSuggestionDraft;
       return validateCompileSuggestionByRule(suggestion) ? suggestion : undefined;
     })
-    .filter((suggestion): suggestion is WikiCompileSuggestion => Boolean(suggestion));
+    .filter((suggestion): suggestion is CompileSuggestionDraft => Boolean(suggestion));
 
   return dedupeCompileSuggestions(suggestions).slice(0, 3);
 }
@@ -650,7 +671,10 @@ function normalizePropertyKey(attribute: string | undefined) {
   if (!attribute) return undefined;
   const normalized = attribute.toLowerCase();
   if (/(runtime|environment|windows|平台|运行)/i.test(normalized)) return 'runtimeEnvironment';
-  if (/(derived|source|from|基于|来源|开源|二次开发)/i.test(normalized)) return 'derivedFrom';
+  if (/(opensourcestatus|open\s*source|开源状态|是否开源|是不是开源|开源吗|开源)/i.test(normalized)) {
+    return 'openSourceStatus';
+  }
+  if (/(derived|source|from|基于|来源|源自|衍生|二次开发|fork)/i.test(normalized)) return 'derivedFrom';
   if (/(wake|唤醒|kws)/i.test(normalized)) return 'wakeWord';
   if (/(stop|终止|停止|打断)/i.test(normalized)) return 'stopWord';
   if (/(path|路径|目录)/i.test(normalized)) return 'localPath';
@@ -668,6 +692,7 @@ function propertyLabel(propertyKey: string) {
     models: '相关模型',
     ownerNote: '负责人说明',
     derivedFrom: '来源/基于项目',
+    openSourceStatus: '开源状态',
   };
   return labels[propertyKey] ?? propertyKey;
 }
@@ -709,6 +734,11 @@ function extractPropertyValue(propertyKey: string, text: string, matchedTerms: s
     }
   }
 
+  if (propertyKey === 'openSourceStatus') {
+    if (/(不开源|非开源|闭源|closed\s*source|not\s+open\s+source)/i.test(text)) return '非开源';
+    if (/(开源项目|开源|open\s*source)/i.test(text)) return '开源项目';
+  }
+
   if (propertyKey === 'models') {
     const models = matchedTerms.filter((term) => /[A-Za-z0-9]/.test(term));
     return models.length > 0 ? uniqueStrings(models).join('、') : undefined;
@@ -734,7 +764,7 @@ function scoreCompileSuggestion(propertyKey: string, propertyValue: string, hit:
   return Math.round(Math.min(score, 0.95) * 100) / 100;
 }
 
-function validateCompileSuggestionByRule(suggestion: WikiCompileSuggestion) {
+function validateCompileSuggestionByRule(suggestion: CompileSuggestionDraft) {
   if (!suggestion.propertyValue.trim() || !suggestion.evidenceSnippet.trim()) return false;
 
   const hasValue = compileEvidenceContainsValue(suggestion.evidenceSnippet, suggestion.propertyValue);
@@ -751,6 +781,13 @@ function validateCompileSuggestionByRule(suggestion: WikiCompileSuggestion) {
     return /(Windows|macOS|Linux)/i.test(suggestion.evidenceSnippet);
   }
 
+  if (suggestion.propertyKey === 'openSourceStatus') {
+    return (
+      compileEvidenceHasTrigger(suggestion.propertyKey, suggestion.evidenceSnippet) &&
+      compileEvidenceMentionsEntity(suggestion.evidenceSnippet, suggestion.entityTitle)
+    );
+  }
+
   if (['wakeWord', 'stopWord', 'localPath'].includes(suggestion.propertyKey)) {
     return compileEvidenceHasTrigger(suggestion.propertyKey, suggestion.evidenceSnippet);
   }
@@ -758,8 +795,8 @@ function validateCompileSuggestionByRule(suggestion: WikiCompileSuggestion) {
   return true;
 }
 
-function dedupeCompileSuggestions(suggestions: WikiCompileSuggestion[]) {
-  const byKey = new Map<string, WikiCompileSuggestion>();
+function dedupeCompileSuggestions(suggestions: CompileSuggestionDraft[]) {
+  const byKey = new Map<string, CompileSuggestionDraft>();
 
   for (const suggestion of suggestions) {
     const key = [
@@ -777,7 +814,7 @@ function dedupeCompileSuggestions(suggestions: WikiCompileSuggestion[]) {
   return Array.from(byKey.values()).sort((a, b) => compileSuggestionRank(b) - compileSuggestionRank(a));
 }
 
-function compileSuggestionRank(suggestion: WikiCompileSuggestion) {
+function compileSuggestionRank(suggestion: CompileSuggestionDraft) {
   return suggestion.confidence + (suggestion.evidenceScope === 'entity-source' ? 0.05 : 0);
 }
 
@@ -798,6 +835,7 @@ function compileEvidenceMentionsEntity(text: string, entityTitle: string) {
 function compileEvidenceHasTrigger(propertyKey: string, text: string) {
   const triggerPatterns: Record<string, RegExp> = {
     derivedFrom: /(基于|来源于|源自|衍生自|二次开发|fork\s*自|derived\s+from)/i,
+    openSourceStatus: /(开源项目|开源|open\s*source|闭源|closed\s*source)/i,
     wakeWord: /(唤醒词|叫醒|KWS|wake)/i,
     stopWord: /(终止词|停止词|打断词|终止|停止|打断|stop)/i,
     localPath: /[A-Z]:\\/i,
@@ -811,7 +849,11 @@ function compileValueCandidates(value: string) {
     .replace(/开源项目|项目|平台|方案|路线|方向|近音组/g, '')
     .trim();
   const splitValues = base.split(/[、/，,；;\s]+/).map((item) => item.trim());
-  return uniqueStrings([base, descriptorFree, ...splitValues].filter(Boolean));
+  const semanticAliases = [
+    /开源/.test(base) ? '开源' : '',
+    /非开源|闭源/.test(base) ? '闭源' : '',
+  ];
+  return uniqueStrings([base, descriptorFree, ...splitValues, ...semanticAliases].filter(Boolean));
 }
 
 function normalizeCompileKey(value: string) {
@@ -895,6 +937,7 @@ function cleanupSearchText(value: string) {
       '',
     )
     .replace(/(能否|是否|能不能|可不可以|可以不|可以吗|在|环境|运行|平台|支持|windows|Windows)/g, '')
+    .replace(/(是不是|是否|是|不是|开源项目|开源|opensource|open source)/gi, '')
     .replace(/\s+/g, '')
     .trim();
 }
@@ -915,7 +958,10 @@ function buildEvidenceTerms(question: string, entity: Entity, plan?: QueryPlan) 
 
   return Array.from(terms)
     .map((term) => term.trim())
-    .filter((term) => term.length >= 2);
+    .filter((term) => term.length >= 2)
+    .flatMap((term) => [term, ...cjkBigrams(term)])
+    .filter((term, index, list) => list.findIndex((item) => normalize(item) === normalize(term)) === index)
+    .slice(0, 24);
 }
 
 function buildAttributeTerms(question: string) {
@@ -925,7 +971,8 @@ function buildAttributeTerms(question: string) {
     { test: /(API\s*key|apikey|密钥|token)/i, terms: ['API key', 'apikey', '密钥', 'token'] },
     { test: /(模型|LLM|ASR|TTS)/i, terms: ['模型', 'LLM', 'ASR', 'TTS'] },
     { test: /(Windows|windows|运行环境|桌面环境|操作系统|平台|能否.*运行|是否.*运行|运行在)/i, terms: ['Windows', 'Windows 桌面', '运行在 Windows', '运行环境', '桌面', '平台'] },
-    { test: /(开源项目|开源|基于|来源|源自|二次开发|derived|fork)/i, terms: ['基于', '开源项目', '二次开发', '来源', '源自'] },
+    { test: /(基于|来源|源自|衍生|二次开发|derived|fork)/i, terms: ['基于', '二次开发', '来源', '源自'] },
+    { test: /(开源项目|开源|open\s*source)/i, terms: ['开源', '开源项目', 'open source'] },
     { test: /(路径|目录|文件夹|本地项目)/, terms: ['路径', '目录', '文件夹', '本地项目路径'] },
     { test: /(负责人|owner|谁负责|归谁)/i, terms: ['负责人', 'owner', '负责'] },
     { test: /(角色名|名字|名称|叫什么|叫啥)/, terms: ['角色名', '名字', '名称'] },
@@ -944,7 +991,8 @@ function inferAttribute(question: string) {
   if (/(终止词|停止词|结束词|打断词|miki|mi ki|米基|米奇)/i.test(question)) return 'stopWord';
   if (/(API\s*key|apikey|密钥|token)/i.test(question)) return 'apiKey';
   if (/(路径|目录|文件夹|本地项目)/.test(question)) return 'localPath';
-  if (/(开源项目|开源|基于|来源|源自|二次开发|derived|fork)/i.test(question)) return 'derivedFrom';
+  if (/(基于|来源|源自|衍生|二次开发|derived|fork)/i.test(question)) return 'derivedFrom';
+  if (/(开源项目|开源|open\s*source)/i.test(question)) return 'openSourceStatus';
   if (/(负责人|owner|谁负责|归谁)/i.test(question)) return 'owner';
   return undefined;
 }
@@ -1009,6 +1057,17 @@ function evidenceTextMatches(text: string, term: string) {
   return normalizedText.includes(normalizedTerm) || isSubsequence(normalizedTerm, normalizedText);
 }
 
+function cjkBigrams(value: string) {
+  const cjkText = value.replace(/[^\u4e00-\u9fa5]/g, '');
+  if (cjkText.length < 4) return [];
+
+  const grams: string[] = [];
+  for (let index = 0; index < cjkText.length - 1; index += 1) {
+    grams.push(cjkText.slice(index, index + 2));
+  }
+  return grams;
+}
+
 function formatEvidenceHitLines(hits: EvidenceHit[]) {
   const lines = hits.slice(0, 3).map((hit, index) => {
     const scopeLabel = hit.scope === 'global-fallback' ? '全库原始材料兜底' : '关联原始材料';
@@ -1065,6 +1124,14 @@ function extractRoleName(entries: Entry[]) {
 
 function getEntityStatus(entity: Entity) {
   if (entity.type === 'project') return entity.properties.status;
+  return undefined;
+}
+
+function getEntityPropertyDisplayValue(entity: Entity, propertyKey: string) {
+  const value = (entity.properties as Record<string, unknown>)[propertyKey];
+  if (Array.isArray(value)) return value.filter(Boolean).join('、');
+  if (typeof value === 'string') return value.trim() || undefined;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
   return undefined;
 }
 

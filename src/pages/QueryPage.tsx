@@ -1,19 +1,17 @@
-import { Check, Loader2, Search } from 'lucide-react';
+import { Check, Loader2, Search, X } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router';
 import { type StructuredQueryResult, runStructuredQuery } from '@/lib/graph';
-import { getEntity, updateEntity } from '@/lib/db';
+import { applyCompileSuggestion, dismissCompileSuggestion } from '@/lib/db';
 
 export function QueryPage() {
   const [question, setQuestion] = useState('桌面生命体叫什么');
   const [result, setResult] = useState<StructuredQueryResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [appliedSuggestionIds, setAppliedSuggestionIds] = useState<string[]>([]);
 
   async function handleAsk() {
     if (!question.trim()) return;
     setIsLoading(true);
-    setAppliedSuggestionIds([]);
     setResult(await runStructuredQuery(question, { composeWithLlm: true, planWithAgent: true }));
     setIsLoading(false);
   }
@@ -21,16 +19,19 @@ export function QueryPage() {
   async function handleApplyCompileSuggestion(
     suggestion: NonNullable<StructuredQueryResult['compileSuggestions']>[number],
   ) {
-    const entity = await getEntity(suggestion.entityId);
-    if (!entity) return;
+    const updated = await applyCompileSuggestion(suggestion.id);
+    if (!updated) return;
 
-    await updateEntity(entity.id, {
-      properties: {
-        ...(entity.properties as Record<string, unknown>),
-        [suggestion.propertyKey]: suggestion.propertyValue,
-      } as typeof entity.properties,
-    });
-    setAppliedSuggestionIds((ids) => [...ids, suggestion.id]);
+    setResult((current) => replaceCompileSuggestion(current, updated));
+  }
+
+  async function handleDismissCompileSuggestion(
+    suggestion: NonNullable<StructuredQueryResult['compileSuggestions']>[number],
+  ) {
+    const updated = await dismissCompileSuggestion(suggestion.id);
+    if (!updated) return;
+
+    setResult((current) => replaceCompileSuggestion(current, updated));
   }
 
   return (
@@ -81,7 +82,7 @@ export function QueryPage() {
                   <h3 className="text-sm font-semibold text-[#1f2937]">待编译回 Wiki</h3>
                   <div className="mt-2 grid gap-2">
                     {result.compileSuggestions.map((suggestion) => {
-                      const applied = appliedSuggestionIds.includes(suggestion.id);
+                      const settled = suggestion.status !== 'pending';
                       return (
                         <div
                           key={suggestion.id}
@@ -100,6 +101,10 @@ export function QueryPage() {
                             </div>
                             <div className="flex flex-wrap gap-2 text-[#626965]">
                               <span>
+                                状态：
+                                <span className="text-[#1f2937]">{compileSuggestionStatusLabel[suggestion.status]}</span>
+                              </span>
+                              <span>
                                 证据范围：
                                 <span className="text-[#1f2937]">{evidenceScopeLabel[suggestion.evidenceScope]}</span>
                               </span>
@@ -112,15 +117,26 @@ export function QueryPage() {
                               证据：{suggestion.evidenceSnippet}
                             </div>
                           </div>
-                          <button
-                            type="button"
-                            onClick={() => handleApplyCompileSuggestion(suggestion)}
-                            disabled={applied}
-                            className="mt-2 inline-flex items-center gap-1 rounded-full border border-[#155eef] px-3 py-1 text-xs font-medium text-[#155eef] disabled:border-[#a8b7d8] disabled:text-[#7b8794]"
-                          >
-                            <Check size={13} />
-                            {applied ? '已写回' : '确认写回'}
-                          </button>
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={() => handleApplyCompileSuggestion(suggestion)}
+                              disabled={settled}
+                              className="inline-flex items-center gap-1 rounded-full border border-[#155eef] px-3 py-1 text-xs font-medium text-[#155eef] disabled:border-[#a8b7d8] disabled:text-[#7b8794]"
+                            >
+                              <Check size={13} />
+                              {suggestion.status === 'applied' ? '已写回' : '确认写回'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDismissCompileSuggestion(suggestion)}
+                              disabled={settled}
+                              className="inline-flex items-center gap-1 rounded-full border border-[#d9d9d6] px-3 py-1 text-xs font-medium text-[#4b5563] disabled:text-[#9ca3af]"
+                            >
+                              <X size={13} />
+                              忽略
+                            </button>
+                          </div>
                         </div>
                       );
                     })}
@@ -211,6 +227,27 @@ const evidenceScopeLabel: Record<NonNullable<StructuredQueryResult['compileSugge
   'entity-source': '关联原始材料',
   'global-fallback': '全库兜底',
 };
+
+const compileSuggestionStatusLabel: Record<NonNullable<StructuredQueryResult['compileSuggestions']>[number]['status'], string> = {
+  pending: '待确认',
+  applied: '已写回',
+  dismissed: '已忽略',
+  superseded: '已自动消解',
+};
+
+function replaceCompileSuggestion(
+  result: StructuredQueryResult | null,
+  suggestion: NonNullable<StructuredQueryResult['compileSuggestions']>[number],
+) {
+  if (!result?.compileSuggestions) return result;
+
+  return {
+    ...result,
+    compileSuggestions: result.compileSuggestions.map((item) =>
+      item.id === suggestion.id ? suggestion : item,
+    ),
+  };
+}
 
 function confidenceLabel(confidence: number) {
   if (confidence >= 0.8) return '高';

@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createEntity, createEntry, createRelationship, createTask, resetDatabase } from '@/lib/db';
+import {
+  applyCompileSuggestion,
+  createEntity,
+  createEntry,
+  createRelationship,
+  createTask,
+  getEntity,
+  resetDatabase,
+} from '@/lib/db';
 import { runStructuredQuery } from '@/lib/graph';
 
 describe('structured query', () => {
@@ -309,6 +317,60 @@ describe('structured query', () => {
     const result = await runStructuredQuery('企业 AI 培训课程市集基于什么开源项目？', { planWithAgent: true });
 
     expect(result.compileSuggestions ?? []).toEqual([]);
+  });
+
+  it('classifies open source questions as openSourceStatus and does not repeat after apply', async () => {
+    const entry = await createEntry({
+      content: 'OpenMaic 是开源项目，企业 AI 培训课程市集基于 OpenMaic 开源项目二次开发。',
+      source: 'text',
+    });
+    const openMaic = await createEntity({
+      type: 'topic',
+      title: 'OpenMaic',
+      summary: '企业 AI 培训课程市集的上游项目。',
+      sourceEntries: [entry.id],
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(
+        JSON.stringify({
+          intent: 'attribute_lookup',
+          selectedEntityIds: [openMaic.id],
+          entityCandidates: ['OpenMaic'],
+          attribute: 'derivedFrom',
+          evidenceTerms: ['开源', '开源项目'],
+          needsRawEvidence: true,
+          needsGlobalSearch: false,
+          answerType: 'yes_no_with_evidence',
+          confidence: 0.8,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )),
+    );
+
+    const firstResult = await runStructuredQuery('OpenMaic是开源的吗？', { planWithAgent: true });
+
+    expect(firstResult.compileSuggestions).toHaveLength(1);
+    expect(firstResult.compileSuggestions?.[0]).toEqual(
+      expect.objectContaining({
+        entityId: openMaic.id,
+        propertyKey: 'openSourceStatus',
+        propertyLabel: '开源状态',
+        propertyValue: '开源项目',
+        status: 'pending',
+      }),
+    );
+
+    await applyCompileSuggestion(firstResult.compileSuggestions![0]!.id);
+
+    const updatedEntity = await getEntity(openMaic.id);
+    expect((updatedEntity?.properties as Record<string, unknown>).openSourceStatus).toBe('开源项目');
+
+    const secondResult = await runStructuredQuery('OpenMaic是开源的吗？', { planWithAgent: true });
+
+    expect(secondResult.answer).toContain('开源状态：开源项目');
+    expect(secondResult.compileSuggestions ?? []).toEqual([]);
   });
 
   it('uses the LLM expression layer when requested', async () => {

@@ -1,4 +1,4 @@
-import type { Entity } from '@/types';
+import type { CompileSuggestionRecord, Entity } from '@/types';
 
 export type QuerySource = {
   type: 'entity' | 'task' | 'entry';
@@ -13,18 +13,7 @@ export type QueryTraceStep = {
   detail: string;
 };
 
-export type WikiCompileSuggestion = {
-  id: string;
-  entityId: string;
-  entityTitle: string;
-  propertyKey: string;
-  propertyLabel: string;
-  propertyValue: string;
-  evidenceEntryId: string;
-  evidenceSnippet: string;
-  evidenceScope: 'entity-source' | 'global-fallback';
-  confidence: number;
-};
+export type WikiCompileSuggestion = CompileSuggestionRecord;
 
 export type StructuredQueryResult = {
   answer: string;

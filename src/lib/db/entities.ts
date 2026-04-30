@@ -75,9 +75,10 @@ export async function updateEntity(id: string, patch: UpdateEntityInput) {
 }
 
 export async function deleteEntity(id: string) {
-  await db.transaction('rw', db.entities, db.relationships, db.tasks, db.entries, async () => {
+  await db.transaction('rw', [db.entities, db.relationships, db.tasks, db.entries, db.compileSuggestions], async () => {
     await db.relationships.where('from').equals(id).or('to').equals(id).delete();
     await db.tasks.where('owner').equals(id).delete();
+    await db.compileSuggestions.where('entityId').equals(id).delete();
 
     await db.tasks.toCollection().modify((task) => {
       task.linkedTo = task.linkedTo.filter((linkedId) => linkedId !== id);

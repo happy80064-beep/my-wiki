@@ -64,7 +64,7 @@ ${JSON.stringify(request.index, null, 2)}
   "intent": "attribute_lookup | entity_profile | task_lookup | relationship_lookup | time_lookup | evidence_search",
   "selectedEntityIds": ["从 EntityIndex 中选择的相关 entity id，最多 3 个"],
   "entityCandidates": ["用户可能指代的实体名或别名，最多 5 个"],
-  "attribute": "用户想查的属性，如 runtimeEnvironment / wakeWord / stopWord / model / owner，可省略",
+  "attribute": "用户想查的属性，如 runtimeEnvironment / wakeWord / stopWord / model / owner / openSourceStatus / derivedFrom，可省略",
   "evidenceTerms": ["用于搜索实体文档和原始材料的证据词，最多 8 个"],
   "needsRawEvidence": true,
   "needsGlobalSearch": false,
@@ -80,7 +80,9 @@ ${JSON.stringify(request.index, null, 2)}
 - 对“唤醒词/叫醒词/KWS”类问题，attribute 用 wakeWord。
 - 对“终止词/停止词/打断词/miki”类问题，attribute 用 stopWord。
 - 对“路径/目录/文件夹/本地项目路径”类问题，attribute 用 localPath。
+- 对“是否开源/是不是开源/Open Source”类问题，attribute 用 openSourceStatus，evidenceTerms 包含 开源、开源项目、open source。
 - 对“基于什么开源项目/来源于什么/二次开发自什么”类问题，attribute 用 derivedFrom，evidenceTerms 包含 基于、开源项目、二次开发、来源、项目名。
+- 注意区分 openSourceStatus 和 derivedFrom：“A 是开源的吗？”不是问来源；“A 基于什么开源项目？”才是问来源/基于项目。
 - 如果目录中没有足够确定的页面，但问题看起来可能在原始材料里，needsGlobalSearch 设为 true。
 - 不要编造 EntityIndex 中不存在的 entity id。`;
 }

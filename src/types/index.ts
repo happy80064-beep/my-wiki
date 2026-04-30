@@ -129,3 +129,30 @@ export type Task = {
   source: ID;
   createdAt: number;
 };
+
+export type CompileSuggestionStatus = 'pending' | 'applied' | 'dismissed' | 'superseded';
+export type CompileSuggestionEvidenceScope = 'entity-source' | 'global-fallback';
+
+export type CompileSuggestionDraft = {
+  entityId: ID;
+  entityTitle: string;
+  propertyKey: string;
+  propertyLabel: string;
+  propertyValue: string;
+  evidenceEntryId: ID;
+  evidenceSnippet: string;
+  evidenceScope: CompileSuggestionEvidenceScope;
+  confidence: number;
+};
+
+export type CompileSuggestionRecord = CompileSuggestionDraft & {
+  id: ID;
+  fingerprint: string;
+  status: CompileSuggestionStatus;
+  sourceQuestion?: string;
+  createdAt: number;
+  updatedAt: number;
+  appliedAt?: number;
+  dismissedAt?: number;
+  supersededAt?: number;
+};
