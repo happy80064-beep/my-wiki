@@ -76,6 +76,7 @@ ${JSON.stringify(request.index, null, 2)}
 规则：
 - 必须先从 EntityIndex 中判断相关页面。用户说“数字生命体”时，可能指“桌面数字生命体”。
 - 对“能否/是否/可不可以/能不能”类问题，通常是 attribute_lookup，answerType 用 yes_no_with_evidence。
+- 对“A 和 B 有什么关系/有什么关联”类问题，intent 用 relationship_lookup；selectedEntityIds 放目录里能确定的 A/B 页面。如果 B 不是独立页面，不要编造 id，evidenceTerms 放 B 的短语、同义词和属性词。
 - 对“Windows 环境运行/运行在 Windows/桌面运行”类问题，attribute 用 runtimeEnvironment，evidenceTerms 包含 Windows、Windows 桌面、运行在 Windows、运行环境、桌面。
 - 对“唤醒词/叫醒词/KWS”类问题，attribute 用 wakeWord。
 - 对“终止词/停止词/打断词/miki”类问题，attribute 用 stopWord。
@@ -84,6 +85,7 @@ ${JSON.stringify(request.index, null, 2)}
 - 对“基于什么开源项目/来源于什么/二次开发自什么”类问题，attribute 用 derivedFrom，evidenceTerms 包含 基于、开源项目、二次开发、来源、项目名。
 - 注意区分 openSourceStatus 和 derivedFrom：“A 是开源的吗？”不是问来源；“A 基于什么开源项目？”才是问来源/基于项目。
 - 如果目录中没有足够确定的页面，但问题看起来可能在原始材料里，needsGlobalSearch 设为 true。
+- selectedEntityIds 也会作为后续证据读取范围；如果一个问题需要读多个页面，请把这些页面都放进去，最多 3 个。
 - 不要编造 EntityIndex 中不存在的 entity id。`;
 }
 

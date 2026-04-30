@@ -235,6 +235,12 @@ describe('structured query', () => {
     expect(result.answer).toContain('唤醒方案');
     expect(result.sources.some((source) => source.id === entry.id)).toBe(true);
     expect(result.trace?.some((step) => step.label === '原始材料兜底扫描')).toBe(true);
+    expect(result.compileSuggestions?.[0]).toEqual(
+      expect.objectContaining({
+        propertyKey: 'wakeWord',
+        propertyValue: '小林',
+      }),
+    );
   });
 
   it('does not resolve both sides of a relationship question to the same entity', async () => {
@@ -254,6 +260,57 @@ describe('structured query', () => {
     expect(result.answer).toContain('没有找到独立实体「唤醒方案」');
     expect(result.answer).not.toContain('桌面数字生命体 和 桌面数字生命体');
     expect(result.trace?.some((step) => step.detail.includes('改为扫描'))).toBe(true);
+  });
+
+  it('uses Query Agent planning for relationship path questions', async () => {
+    const entry = await createEntry({
+      content: '桌面数字生命体通过语音交互链路连接唤醒词，小林是主唤醒词。',
+      source: 'text',
+    });
+    const project = await createEntity({
+      type: 'project',
+      title: '桌面数字生命体',
+      summary: '桌面智能体原型。',
+      sourceEntries: [entry.id],
+    });
+    const voice = await createEntity({
+      type: 'topic',
+      title: '语音交互',
+      summary: '语音输入输出链路。',
+      sourceEntries: [entry.id],
+    });
+    const wake = await createEntity({
+      type: 'topic',
+      title: '唤醒词',
+      summary: '小林唤醒和 KWS 稳定性方案。',
+      sourceEntries: [entry.id],
+    });
+
+    await createRelationship({ from: project.id, to: voice.id, type: 'relevant-to', evidence: [entry.id] });
+    await createRelationship({ from: voice.id, to: wake.id, type: 'related-to', evidence: [entry.id] });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(
+        JSON.stringify({
+          intent: 'relationship_lookup',
+          selectedEntityIds: [project.id, wake.id],
+          entityCandidates: ['桌面数字生命体', '唤醒词'],
+          attribute: 'wakeWord',
+          evidenceTerms: ['唤醒词', '小林', 'KWS'],
+          needsRawEvidence: true,
+          needsGlobalSearch: false,
+          answerType: 'direct',
+          confidence: 0.9,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )),
+    );
+
+    const result = await runStructuredQuery('桌面生命体和唤醒方案有什么关系', { planWithAgent: true });
+
+    expect(result.answer).toContain('桌面数字生命体 和 唤醒词');
+    expect(result.trace?.some((step) => step.layer === 'agent' && step.label === 'Query Agent')).toBe(true);
   });
 
   it('scans linked raw entries for attribute questions when the entity profile is incomplete', async () => {
@@ -342,6 +399,53 @@ describe('structured query', () => {
         propertyValue: 'Windows',
       }),
     );
+  });
+
+  it('reads extra evidence pages selected by Query Agent', async () => {
+    const projectEntry = await createEntry({
+      content: '桌面数字生命体是一个运行在 Windows 桌面的 AI 生命体原型。',
+      source: 'text',
+    });
+    const voiceEntry = await createEntry({
+      content: '语音链路补充：桌面生命体终止词使用 miki / mi ki / 米基 / 米奇 近音组。',
+      source: 'text',
+    });
+    const project = await createEntity({
+      type: 'project',
+      title: '桌面数字生命体',
+      summary: '桌面智能体原型。',
+      sourceEntries: [projectEntry.id],
+    });
+    const voice = await createEntity({
+      type: 'topic',
+      title: '语音链路',
+      summary: '唤醒、聆听、终止词和播报组成的语音交互主链。',
+      sourceEntries: [voiceEntry.id],
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(
+        JSON.stringify({
+          intent: 'attribute_lookup',
+          selectedEntityIds: [project.id, voice.id],
+          entityCandidates: ['桌面数字生命体', '语音链路'],
+          attribute: 'stopWord',
+          evidenceTerms: ['终止词', 'miki', 'mi ki', '米基', '米奇'],
+          needsRawEvidence: true,
+          needsGlobalSearch: false,
+          answerType: 'direct',
+          confidence: 0.9,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )),
+    );
+
+    const result = await runStructuredQuery('桌面生命体的终止词是什么', { planWithAgent: true });
+
+    expect(result.answer).toContain('miki / mi ki / 米基 / 米奇');
+    expect(result.sources.some((source) => source.id === voiceEntry.id)).toBe(true);
+    expect(result.trace?.some((step) => step.label === 'Agent 证据范围')).toBe(true);
   });
 
   it('builds readable compile suggestions with precise derivedFrom values', async () => {

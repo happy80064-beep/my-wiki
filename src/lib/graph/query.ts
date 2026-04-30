@@ -12,6 +12,7 @@ import {
   taskSource,
 } from './answer';
 import {
+  type EntityCandidate,
   findEntityCandidates,
   getEntriesByIds,
   getPendingTasksByOwner,
@@ -169,10 +170,14 @@ async function answerEntityRelationshipPath(
     return emptyResult('我还不能确定你问的是哪两个实体之间的关系。');
   }
 
-  const [fromCandidates, rawToCandidates] = await Promise.all([
+  const relationshipPlan = await resolveRelationshipQueryPlan(question, fromName, toName, options);
+  const selectedEntities = relationshipPlan.plan ? await getPlanSelectedEntities(relationshipPlan.plan) : [];
+  const [baseFromCandidates, baseToCandidates] = await Promise.all([
     findEntityCandidates(fromName),
     findEntityCandidates(toName),
   ]);
+  const fromCandidates = mergeSelectedEntityCandidates(baseFromCandidates, selectedEntities, fromName);
+  const rawToCandidates = mergeSelectedEntityCandidates(baseToCandidates, selectedEntities, toName);
   const resolvedFrom = fromCandidates[0]?.entity;
   const toCandidates = resolvedFrom
     ? rawToCandidates.filter((candidate) => candidate.entity.id !== resolvedFrom.id)
@@ -180,7 +185,14 @@ async function answerEntityRelationshipPath(
 
   if (fromCandidates.length === 0 || toCandidates.length === 0) {
     if (fromCandidates.length > 0 && toCandidates.length === 0 && toName) {
-      const fallback = await answerRelationshipEvidenceFallback(fromCandidates[0].entity, toName, question, options);
+      const fallback = await answerRelationshipEvidenceFallback(
+        fromCandidates[0].entity,
+        toName,
+        question,
+        options,
+        relationshipPlan.plan,
+        relationshipPlan.trace,
+      );
       if (fallback) return fallback;
     }
 
@@ -192,6 +204,7 @@ async function answerEntityRelationshipPath(
     return {
       ...emptyResult(`没有找到 ${missing.join('、')} 对应的实体。可以先捕获包含它的材料，或换一个知识库里已有的实体名。`),
       trace: [
+        ...optionalTrace(relationshipPlan.trace),
         {
           layer: 'intent',
           label: '关系问题解析',
@@ -215,6 +228,7 @@ async function answerEntityRelationshipPath(
   const pathEntities = (await db.entities.bulkGet(pathEntityIds)).filter((entity): entity is Entity => Boolean(entity));
 
   const trace: QueryTraceStep[] = [
+    ...optionalTrace(relationshipPlan.trace),
     {
       layer: 'intent',
       label: '关系问题解析',
@@ -279,12 +293,15 @@ async function answerRelationshipEvidenceFallback(
   missingName: string,
   question: string,
   options: RunStructuredQueryOptions,
+  agentPlan?: QueryPlan,
+  agentTrace?: QueryTraceStep,
 ): Promise<StructuredQueryResult | undefined> {
   const linkedEntries = await getEntriesByIds(from.sourceEntries);
   const plan: QueryPlan = {
-    ...buildFallbackQueryPlan(question, from.title),
+    ...mergeQueryPlans(agentPlan ?? buildFallbackQueryPlan(question, from.title), buildFallbackQueryPlan(question, from.title)),
     evidenceTerms: uniqueStrings([
       missingName,
+      ...(agentPlan?.evidenceTerms ?? []),
       ...buildAttributeTerms(`${question} ${missingName}`),
       ...cjkBigrams(missingName),
     ]).slice(0, 16),
@@ -293,6 +310,21 @@ async function answerRelationshipEvidenceFallback(
   };
   const evidenceHits = await findRawEvidenceHits(question, from, linkedEntries, plan);
   if (evidenceHits.length === 0) return undefined;
+  const compileSuggestions = await materializeCompileSuggestions(
+    buildCompileSuggestions(
+      {
+        entity: from,
+        tasks: [],
+        relationships: [],
+        relatedEntities: [],
+        agentSelectedEntities: [],
+        entries: linkedEntries,
+        evidenceHits,
+      },
+      plan,
+    ),
+    question,
+  );
 
   const answer = [
     `没有找到独立实体「${missingName}」，但在「${from.title}」的来源材料里找到了相关线索：`,
@@ -304,6 +336,7 @@ async function answerRelationshipEvidenceFallback(
     sources: dedupeSources([entitySource(from), ...evidenceHits.map((hit) => entrySource(hit.entry))]),
     suggestions: [`把「${missingName}」编译成独立实体或属性`, `查看${from.title}的实体页`],
     trace: [
+      ...optionalTrace(agentTrace),
       {
         layer: 'intent',
         label: '关系问题解析',
@@ -320,6 +353,7 @@ async function answerRelationshipEvidenceFallback(
         detail: `定位到 ${evidenceHits.length} 个可能说明二者关系的片段。`,
       },
     ],
+    compileSuggestions,
   };
 
   return composeResultIfRequested(
@@ -408,6 +442,15 @@ async function answerWikiRead(
           : '当前实体还没有可回读的原始捕获。',
     },
   );
+  if (document.agentSelectedEntities.length > 0) {
+    trace.push({
+      layer: 'agent',
+      label: 'Agent 证据范围',
+      detail: `额外读取 Query Agent 选中的页面来源：${document.agentSelectedEntities
+        .map((entity) => entity.title)
+        .join('、')}。`,
+    });
+  }
   if (document.evidenceHits.length > 0) {
     const linkedCount = document.evidenceHits.filter((hit) => hit.scope === 'entity-source').length;
     const globalCount = document.evidenceHits.filter((hit) => hit.scope === 'global-fallback').length;
@@ -441,6 +484,7 @@ type EntityDocument = {
   tasks: Task[];
   relationships: Relationship[];
   relatedEntities: Entity[];
+  agentSelectedEntities: Entity[];
   entries: Entry[];
   evidenceHits: EvidenceHit[];
 };
@@ -511,6 +555,28 @@ async function resolveQueryPlan(
   }
 }
 
+async function resolveRelationshipQueryPlan(
+  question: string,
+  fromName: string,
+  toName: string,
+  options: RunStructuredQueryOptions,
+): Promise<{ plan: QueryPlan; trace?: QueryTraceStep }> {
+  if (!options.planWithAgent) {
+    return { plan: buildFallbackQueryPlan(question, `${fromName} ${toName}`) };
+  }
+
+  const index = await buildEntityIndex();
+  const { plan, trace } = await resolveQueryPlan(question, `${fromName} ${toName}`, index, options);
+  return {
+    plan,
+    trace: {
+      layer: 'agent',
+      label: 'Query Agent',
+      detail: trace,
+    },
+  };
+}
+
 function buildFallbackQueryPlan(question: string, entityName: string | undefined): QueryPlan {
   const attributeTerms = buildAttributeTerms(question);
   const cleanedQuestion = cleanupSearchText(question);
@@ -552,6 +618,52 @@ function correctQueryPlanAttribute(question: string, plan: QueryPlan): QueryPlan
   return plan;
 }
 
+async function getPlanSelectedEntities(plan: QueryPlan, excludeEntityId?: string) {
+  const selectedIds = plan.selectedEntityIds.filter((id) => id !== excludeEntityId);
+  if (selectedIds.length === 0) return [];
+
+  const entities = await db.entities.bulkGet(selectedIds);
+  const byId = new Map(entities.filter((entity): entity is Entity => Boolean(entity)).map((entity) => [entity.id, entity]));
+
+  return selectedIds
+    .map((id) => byId.get(id))
+    .filter((entity): entity is Entity => Boolean(entity));
+}
+
+function mergeSelectedEntityCandidates(
+  candidates: EntityCandidate[],
+  selectedEntities: Entity[],
+  name: string | undefined,
+): EntityCandidate[] {
+  const byId = new Map(candidates.map((candidate) => [candidate.entity.id, candidate]));
+  const terms = expandQuerySearchTerms([name ?? '', ...buildAttributeTerms(name ?? '')]);
+
+  for (const entity of selectedEntities) {
+    const score = terms.length > 0 ? Math.max(...terms.map((term) => scoreEntityForTerm(entity, term))) : 0;
+    if (score < 30) continue;
+
+    const current = byId.get(entity.id);
+    const boostedScore = Math.max(score + 40, current?.score ?? 0);
+    byId.set(entity.id, { entity, score: boostedScore });
+  }
+
+  return [...byId.values()]
+    .sort((a, b) => b.score - a.score || b.entity.updatedAt - a.entity.updatedAt)
+    .slice(0, 5);
+}
+
+function mergeUniqueEntities(entities: Entity[]) {
+  const byId = new Map<string, Entity>();
+  for (const entity of entities) {
+    if (!byId.has(entity.id)) byId.set(entity.id, entity);
+  }
+  return [...byId.values()];
+}
+
+function optionalTrace(trace: QueryTraceStep | undefined) {
+  return trace ? [trace] : [];
+}
+
 async function findWikiEntityCandidates(
   terms: string[],
   selectedEntityIds: string[] = [],
@@ -580,6 +692,7 @@ async function findWikiEntityCandidates(
 }
 
 async function readEntityDocument(entity: Entity, question: string, plan: QueryPlan): Promise<EntityDocument> {
+  const agentSelectedEntities = await getPlanSelectedEntities(plan, entity.id);
   const [tasks, subgraph] = await Promise.all([
     db.tasks
       .filter((task) => task.owner === entity.id || task.linkedTo.includes(entity.id))
@@ -588,22 +701,24 @@ async function readEntityDocument(entity: Entity, question: string, plan: QueryP
   ]);
 
   const relationships = subgraph.edges;
-  const relatedEntities = rankRelatedEntities(
+  const graphRelatedEntities = rankRelatedEntities(
     entity,
     subgraph.nodes.filter((node) => node.id !== entity.id),
     relationships,
   )
     .slice(0, 12)
     .map((ranked) => ranked.entity);
+  const relatedEntities = mergeUniqueEntities([...agentSelectedEntities, ...graphRelatedEntities]).slice(0, 12);
   const entryIds = [
     ...entity.sourceEntries,
+    ...agentSelectedEntities.flatMap((selectedEntity) => selectedEntity.sourceEntries),
     ...tasks.map((task) => task.source),
     ...relationships.flatMap((relationship) => relationship.evidence),
   ];
   const entries = await getEntriesByIds(entryIds);
   const evidenceHits = await findRawEvidenceHits(question, entity, entries, plan);
 
-  return { entity, tasks, relationships, relatedEntities, entries, evidenceHits };
+  return { entity, tasks, relationships, relatedEntities, agentSelectedEntities, entries, evidenceHits };
 }
 
 async function answerEvidenceFallback(
