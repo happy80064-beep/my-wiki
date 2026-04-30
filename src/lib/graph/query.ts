@@ -967,7 +967,8 @@ function buildQueryComposePayload(question: string, draftAnswer: string, documen
 
 function extractEvidencePropertyValue(propertyKey: string, evidenceHits: EvidenceHit[]) {
   for (const hit of evidenceHits) {
-    const value = extractPropertyValue(propertyKey, hit.snippet, hit.matchedTerms);
+    const evidenceText = hit.entry.content || hit.snippet;
+    const value = extractPropertyValue(propertyKey, evidenceText, hit.matchedTerms);
     if (value && validateCompileSuggestionByRule({
       entityId: 'preview',
       entityTitle: '',
@@ -975,7 +976,7 @@ function extractEvidencePropertyValue(propertyKey: string, evidenceHits: Evidenc
       propertyLabel: propertyLabel(propertyKey),
       propertyValue: value,
       evidenceEntryId: hit.entry.id,
-      evidenceSnippet: hit.snippet,
+      evidenceSnippet: evidenceText,
       evidenceScope: hit.scope,
       confidence: 1,
     })) {
@@ -1017,8 +1018,10 @@ function buildCompileSuggestions(document: EntityDocument, plan: QueryPlan): Com
 
   const suggestions = document.evidenceHits
     .map((hit, index) => {
-      const propertyValue = extractPropertyValue(propertyKey, hit.snippet, hit.matchedTerms);
+      const evidenceText = hit.entry.content || hit.snippet;
+      const propertyValue = extractPropertyValue(propertyKey, evidenceText, hit.matchedTerms);
       if (!propertyValue) return undefined;
+      const evidenceSnippet = buildPropertyEvidenceSnippet(evidenceText, propertyValue, hit);
       const suggestion = {
         entityId: document.entity.id,
         entityTitle: document.entity.title,
@@ -1026,7 +1029,7 @@ function buildCompileSuggestions(document: EntityDocument, plan: QueryPlan): Com
         propertyLabel: propertyLabel(propertyKey),
         propertyValue,
         evidenceEntryId: hit.entry.id,
-        evidenceSnippet: hit.snippet,
+        evidenceSnippet,
         evidenceScope: hit.scope,
         confidence: scoreCompileSuggestion(propertyKey, propertyValue, hit),
       } satisfies CompileSuggestionDraft;
@@ -1035,6 +1038,12 @@ function buildCompileSuggestions(document: EntityDocument, plan: QueryPlan): Com
     .filter((suggestion): suggestion is CompileSuggestionDraft => Boolean(suggestion));
 
   return dedupeCompileSuggestions(suggestions).slice(0, 3);
+}
+
+function buildPropertyEvidenceSnippet(evidenceText: string, propertyValue: string, hit: EvidenceHit) {
+  const valueIndex = findFirstTermIndex(evidenceText, compileValueCandidates(propertyValue));
+  if (valueIndex >= 0) return snippetAround(evidenceText, valueIndex, 150);
+  return hit.snippet;
 }
 
 function normalizePropertyKey(attribute: string | undefined) {
@@ -1296,7 +1305,10 @@ async function composeResultIfRequested(
 
 function composedContradictsConcreteDraft(draftAnswer: string, composedAnswer: string) {
   if (!hasConcretePropertyLine(draftAnswer)) return false;
-  return /(没有|未|暂未|尚未).{0,12}(找到|记录|明确|确认)|无法确认|不能确认|不确定/.test(composedAnswer);
+  return (
+    /(没有|未|暂未|尚未).{0,18}(找到|记录|明确|确认|披露|解析|提取|编译)|无法确认|不能确认|不确定/.test(composedAnswer) ||
+    /未被完整披露|未完整披露|未能解析|未解析出来|没有完整披露/.test(composedAnswer)
+  );
 }
 
 function hasConcretePropertyLine(answer: string) {

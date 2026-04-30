@@ -340,7 +340,7 @@ describe('structured query', () => {
       'fetch',
       vi.fn(async () => new Response(
         JSON.stringify({
-          answer: '桌面数字生命体的唤醒词目前没有找到明确记录。',
+          answer: '桌面数字生命体的唤醒词在当前已召回材料中未被完整披露。',
           provider: 'minimax',
           model: 'MiniMax-M2.7',
         }),
@@ -362,9 +362,37 @@ describe('structured query', () => {
     const result = await runStructuredQuery('桌面生命体的唤醒词是什么', { composeWithLlm: true });
 
     expect(result.answer).toContain('唤醒词：小林');
-    expect(result.answer).not.toContain('没有找到明确记录');
+    expect(result.answer).not.toContain('未被完整披露');
     expect(result.llm).toBeUndefined();
     expect(result.trace?.some((step) => step.detail.includes('结构化属性结论冲突'))).toBe(true);
+  });
+
+  it('extracts property values from the full source entry when the matched snippet is too narrow', async () => {
+    const entry = await createEntry({
+      content: [
+        '唤醒词目前走本地 PowerShell / Windows System.Speech 方案。',
+        '中间实现细节。'.repeat(80),
+        '主唤醒词是“小林”，并围绕中文近音做了多轮优化。',
+      ].join(''),
+      source: 'text',
+    });
+    await createEntity({
+      type: 'project',
+      title: '桌面数字生命体',
+      summary: '一个本地桌面智能体原型。',
+      sourceEntries: [entry.id],
+    });
+
+    const result = await runStructuredQuery('桌面生命体的唤醒词是什么');
+
+    expect(result.answer).toContain('唤醒词：小林');
+    expect(result.compileSuggestions?.[0]).toEqual(
+      expect.objectContaining({
+        propertyKey: 'wakeWord',
+        propertyValue: '小林',
+      }),
+    );
+    expect(result.compileSuggestions?.[0]?.evidenceSnippet).toContain('小林');
   });
 
   it('falls back to global raw entries when linked entries miss the requested attribute', async () => {
