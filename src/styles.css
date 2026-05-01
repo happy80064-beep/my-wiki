@@ -72,6 +72,12 @@ body {
 
 .mywiki-tech-graph {
   display: block;
+  cursor: grab;
+  touch-action: none;
+}
+
+.mywiki-tech-graph:active {
+  cursor: grabbing;
 }
 
 .mywiki-tech-link {
@@ -82,7 +88,7 @@ body {
 }
 
 .mywiki-tech-node {
-  cursor: pointer;
+  cursor: grab;
   transition: opacity 160ms ease, transform 160ms ease;
   transform-box: fill-box;
   transform-origin: center;
@@ -90,6 +96,10 @@ body {
 
 .mywiki-tech-node:hover {
   transform: scale(1.08);
+}
+
+.mywiki-tech-node:active {
+  cursor: grabbing;
 }
 
 .mywiki-tech-node-ring {

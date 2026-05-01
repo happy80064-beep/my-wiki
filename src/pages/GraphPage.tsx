@@ -1,5 +1,5 @@
 import { Activity, AlertTriangle, GitBranch, Network, Radar, RotateCcw, Sparkles } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { type PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { Link } from 'react-router';
 import { buildGraphOverview, relationshipTypeLabel } from '@/lib/graph';
@@ -10,7 +10,10 @@ type SceneNode = {
   entity: Entity;
   x: number;
   y: number;
+  z: number;
   degree: number;
+  phase: number;
+  drift: number;
 };
 
 type SceneLink = {
@@ -23,6 +26,54 @@ type GraphScene = {
   nodes: SceneNode[];
   links: SceneLink[];
 };
+
+type ProjectedNode = {
+  node: SceneNode;
+  x: number;
+  y: number;
+  radius: number;
+  scale: number;
+  depth: number;
+  opacity: number;
+};
+
+type ProjectedLink = {
+  relationship: Relationship;
+  from: ProjectedNode;
+  to: ProjectedNode;
+  opacity: number;
+};
+
+type ProjectedScene = {
+  nodes: ProjectedNode[];
+  links: ProjectedLink[];
+};
+
+type NodeOverride = {
+  x: number;
+  y: number;
+  z: number;
+};
+
+type Rotation = {
+  x: number;
+  y: number;
+};
+
+type DragState =
+  | {
+      mode: 'rotate';
+      pointerId: number;
+      startX: number;
+      startY: number;
+      rotation: Rotation;
+    }
+  | {
+      mode: 'node';
+      pointerId: number;
+      nodeId: string;
+      lastPoint: { x: number; y: number };
+    };
 
 const entityTypeLabels: Record<EntityType, string> = {
   person: '人员',
@@ -45,12 +96,136 @@ const insightTypeLabels = {
   'dense-hub': '高密',
 } as const;
 
+const defaultRotation: Rotation = { x: -0.38, y: 0.44 };
+
 export function GraphPage() {
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const nodeWasDraggedRef = useRef(false);
   const [layoutSalt, setLayoutSalt] = useState(0);
+  const [rotation, setRotation] = useState<Rotation>(defaultRotation);
+  const [nodeOverrides, setNodeOverrides] = useState<Record<string, NodeOverride>>({});
+  const [dragState, setDragState] = useState<DragState | null>(null);
+  const [floatTime, setFloatTime] = useState(0);
   const entities = useLiveQuery(() => db.entities.toArray(), [], []);
   const relationships = useLiveQuery(() => db.relationships.toArray(), [], []);
   const overview = useMemo(() => buildGraphOverview(entities, relationships), [entities, relationships]);
-  const scene = useMemo(() => buildGraphScene(entities, relationships, layoutSalt), [entities, relationships, layoutSalt]);
+  const scene = useMemo(
+    () => buildGraphScene(entities, relationships, layoutSalt, nodeOverrides),
+    [entities, relationships, layoutSalt, nodeOverrides],
+  );
+  const projectedScene = useMemo(
+    () => projectGraphScene(scene, rotation, floatTime),
+    [scene, rotation, floatTime],
+  );
+
+  useEffect(() => {
+    let frame = 0;
+    let mounted = true;
+    let lastPaintedAt = 0;
+    const startedAt = performance.now();
+
+    const tick = (now: number) => {
+      if (!mounted) return;
+      if (now - lastPaintedAt > 66) {
+        setFloatTime((now - startedAt) / 1000);
+        lastPaintedAt = now;
+      }
+      frame = requestAnimationFrame(tick);
+    };
+
+    frame = requestAnimationFrame(tick);
+    return () => {
+      mounted = false;
+      cancelAnimationFrame(frame);
+    };
+  }, []);
+
+  function handleResetLayout() {
+    setLayoutSalt((value) => value + 1);
+    setNodeOverrides({});
+    setRotation(defaultRotation);
+  }
+
+  function handleCanvasPointerDown(event: ReactPointerEvent<SVGSVGElement>) {
+    if (event.button !== 0) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDragState({
+      mode: 'rotate',
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      rotation,
+    });
+  }
+
+  function handleNodePointerDown(event: ReactPointerEvent<SVGGElement>, node: SceneNode) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    nodeWasDraggedRef.current = false;
+    svgRef.current?.setPointerCapture(event.pointerId);
+    setDragState({
+      mode: 'node',
+      pointerId: event.pointerId,
+      nodeId: node.entity.id,
+      lastPoint: getSvgPoint(event),
+    });
+  }
+
+  function handlePointerMove(event: ReactPointerEvent<SVGSVGElement>) {
+    if (!dragState || event.pointerId !== dragState.pointerId) return;
+
+    if (dragState.mode === 'rotate') {
+      const dx = event.clientX - dragState.startX;
+      const dy = event.clientY - dragState.startY;
+      setRotation({
+        x: clamp(dragState.rotation.x + dy * 0.006, -1.15, 1.15),
+        y: dragState.rotation.y + dx * 0.006,
+      });
+      return;
+    }
+
+    const point = getSvgPoint(event);
+    const dx = point.x - dragState.lastPoint.x;
+    const dy = point.y - dragState.lastPoint.y;
+    if (Math.abs(dx) + Math.abs(dy) > 1.5) {
+      nodeWasDraggedRef.current = true;
+    }
+    const currentNode = scene.nodes.find((node) => node.entity.id === dragState.nodeId);
+    if (!currentNode) return;
+
+    setNodeOverrides((current) => {
+      const base = current[dragState.nodeId] ?? {
+        x: currentNode.x,
+        y: currentNode.y,
+        z: currentNode.z,
+      };
+      return {
+        ...current,
+        [dragState.nodeId]: {
+          x: clamp(base.x + dx, 40, 960),
+          y: clamp(base.y + dy, 40, 580),
+          z: clamp(base.z + dy * 0.18 * Math.sin(rotation.x), -260, 260),
+        },
+      };
+    });
+    setDragState({ ...dragState, lastPoint: point });
+  }
+
+  function handlePointerUp(event: ReactPointerEvent<SVGSVGElement>) {
+    if (!dragState || event.pointerId !== dragState.pointerId) return;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+    setDragState(null);
+  }
+
+  function getSvgPoint(event: ReactPointerEvent) {
+    const rect = svgRef.current?.getBoundingClientRect();
+    if (!rect) return { x: 0, y: 0 };
+    return {
+      x: ((event.clientX - rect.left) / Math.max(rect.width, 1)) * 1000,
+      y: ((event.clientY - rect.top) / Math.max(rect.height, 1)) * 620,
+    };
+  }
 
   return (
     <section className="mx-auto max-w-6xl px-5 py-8">
@@ -61,7 +236,7 @@ export function GraphPage() {
         </div>
         <button
           type="button"
-          onClick={() => setLayoutSalt((value) => value + 1)}
+          onClick={handleResetLayout}
           className="inline-flex items-center gap-2 rounded-full border border-[#d9d9d6] bg-white px-4 py-2 text-sm font-medium text-[#4b5563] transition hover:border-[#155eef] hover:text-[#155eef]"
         >
           <RotateCcw size={16} />
@@ -95,7 +270,17 @@ export function GraphPage() {
                 暂无实体。先捕获一条材料后，图谱会在这里生成。
               </div>
             ) : (
-              <svg viewBox="0 0 1000 620" className="mywiki-tech-graph h-[520px] w-full" role="img" aria-label="MyWiki 关系图谱">
+              <svg
+                ref={svgRef}
+                viewBox="0 0 1000 620"
+                className="mywiki-tech-graph h-[520px] w-full"
+                role="img"
+                aria-label="MyWiki 关系图谱"
+                onPointerDown={handleCanvasPointerDown}
+                onPointerMove={handlePointerMove}
+                onPointerUp={handlePointerUp}
+                onPointerCancel={handlePointerUp}
+              >
                 <defs>
                   <pattern id="graph-grid" width="42" height="42" patternUnits="userSpaceOnUse">
                     <path d="M 42 0 L 0 0 0 42" fill="none" stroke="rgba(148, 163, 184, 0.11)" strokeWidth="1" />
@@ -104,7 +289,7 @@ export function GraphPage() {
                 <rect width="1000" height="620" fill="#fbfbfa" />
                 <rect width="1000" height="620" fill="url(#graph-grid)" />
 
-                {scene.links.map((link) => (
+                {projectedScene.links.map((link) => (
                   <g key={link.relationship.id}>
                     <line
                       x1={link.from.x}
@@ -112,22 +297,62 @@ export function GraphPage() {
                       x2={link.to.x}
                       y2={link.to.y}
                       className="mywiki-tech-link"
+                      style={{ opacity: link.opacity }}
                     />
                     <title>
-                      {link.from.entity.title} · {relationshipTypeLabel(link.relationship.type)} · {link.to.entity.title}
+                      {link.from.node.entity.title} · {relationshipTypeLabel(link.relationship.type)} · {link.to.node.entity.title}
                     </title>
                   </g>
                 ))}
 
-                {scene.nodes.map((node) => {
+                {projectedScene.nodes.map((projected) => {
+                  const node = projected.node;
                   const color = nodeColors[node.entity.type];
-                  const radius = nodeRadius(node.degree);
                   return (
-                    <a key={node.entity.id} href={`/wiki/${node.entity.type}/${node.entity.id}`}>
-                      <g className="mywiki-tech-node">
-                        <circle cx={node.x} cy={node.y} r={radius + 6} stroke={color} className="mywiki-tech-node-ring" />
-                        <circle cx={node.x} cy={node.y} r={radius} fill={color} stroke="#ffffff" strokeWidth="2" />
-                        <text x={node.x} y={node.y + radius + 18} textAnchor="middle" className="mywiki-tech-label">
+                    <a
+                      key={node.entity.id}
+                      href={`/wiki/${node.entity.type}/${node.entity.id}`}
+                      onClick={(event) => {
+                        if (nodeWasDraggedRef.current) {
+                          event.preventDefault();
+                          nodeWasDraggedRef.current = false;
+                        }
+                      }}
+                    >
+                      <g
+                        className="mywiki-tech-node"
+                        style={{ opacity: projected.opacity }}
+                        onPointerDown={(event) => handleNodePointerDown(event, node)}
+                      >
+                        <circle
+                          cx={projected.x}
+                          cy={projected.y}
+                          r={projected.radius + 6}
+                          stroke={color}
+                          className="mywiki-tech-node-ring"
+                        />
+                        <circle
+                          cx={projected.x}
+                          cy={projected.y}
+                          r={projected.radius}
+                          fill={color}
+                          stroke="#ffffff"
+                          strokeWidth="2"
+                        />
+                        <circle
+                          cx={projected.x - projected.radius * 0.32}
+                          cy={projected.y - projected.radius * 0.34}
+                          r={Math.max(2.2, projected.radius * 0.23)}
+                          fill="#ffffff"
+                          opacity="0.42"
+                          pointerEvents="none"
+                        />
+                        <text
+                          x={projected.x}
+                          y={projected.y + projected.radius + 18}
+                          textAnchor="middle"
+                          className="mywiki-tech-label"
+                        >
                           {shortTitle(node.entity.title)}
                         </text>
                         <title>
@@ -234,7 +459,12 @@ function InsightIcon({ type }: { type: keyof typeof insightTypeLabels }) {
   return <Radar size={16} className={className} />;
 }
 
-function buildGraphScene(entities: Entity[], relationships: Relationship[], salt: number): GraphScene {
+function buildGraphScene(
+  entities: Entity[],
+  relationships: Relationship[],
+  salt: number,
+  nodeOverrides: Record<string, NodeOverride>,
+): GraphScene {
   if (entities.length === 0) return { nodes: [], links: [] };
 
   const validEntityIds = new Set(entities.map((entity) => entity.id));
@@ -259,7 +489,7 @@ function buildGraphScene(entities: Entity[], relationships: Relationship[], salt
     .filter((relationship) => selectedIds.has(relationship.from) && selectedIds.has(relationship.to))
     .slice(0, 140);
 
-  const nodes = runForceLayout(selectedEntities, selectedRelationships, degreeById, salt);
+  const nodes = runForceLayout(selectedEntities, selectedRelationships, degreeById, salt, nodeOverrides);
   const nodeById = new Map(nodes.map((node) => [node.entity.id, node]));
   const links = selectedRelationships
     .map((relationship) => {
@@ -277,6 +507,7 @@ function runForceLayout(
   relationships: Relationship[],
   degreeById: Map<string, number>,
   salt: number,
+  nodeOverrides: Record<string, NodeOverride>,
 ): SceneNode[] {
   const width = 1000;
   const height = 620;
@@ -295,9 +526,12 @@ function runForceLayout(
       entity,
       x: centerX + Math.cos(angle) * radius + (hashCode(entity.title) % 80) - 40,
       y: centerY + Math.sin(angle) * radius + (hashCode(entity.id + entity.title) % 70) - 35,
+      z: ((hashCode(`${entity.id}:z:${salt}`) % 360) - 180) * 0.9,
       vx: 0,
       vy: 0,
       degree: degreeById.get(entity.id) ?? 0,
+      phase: (hashCode(`${entity.id}:phase`) % 628) / 100,
+      drift: 2.4 + (hashCode(`${entity.id}:drift`) % 34) / 10,
     };
   });
   const nodeById = new Map(nodes.map((node) => [node.entity.id, node]));
@@ -353,7 +587,24 @@ function runForceLayout(
     }
   }
 
-  return fitLayoutToViewport(nodes.map(({ entity, x, y, degree }) => ({ entity, x, y, degree })), width, height);
+  const fittedNodes = fitLayoutToViewport(
+    nodes.map(({ entity, x, y, z, degree, phase, drift }) => ({
+      entity,
+      x,
+      y,
+      z,
+      degree,
+      phase,
+      drift,
+    })),
+    width,
+    height,
+  );
+
+  return fittedNodes.map((node) => {
+    const override = nodeOverrides[node.entity.id];
+    return override ? { ...node, ...override } : node;
+  });
 }
 
 function fitLayoutToViewport(nodes: SceneNode[], width: number, height: number) {
@@ -379,7 +630,65 @@ function fitLayoutToViewport(nodes: SceneNode[], width: number, height: number) 
     ...node,
     x: width / 2 + (node.x - graphCenterX) * scale,
     y: height * 0.45 + (node.y - graphCenterY) * scale,
+    z: node.z * 1.08,
   }));
+}
+
+function projectGraphScene(scene: GraphScene, rotation: Rotation, time: number): ProjectedScene {
+  const projectedNodes = scene.nodes
+    .map((node) => projectNode(node, rotation, time))
+    .sort((a, b) => a.depth - b.depth);
+  const projectedById = new Map(projectedNodes.map((node) => [node.node.entity.id, node]));
+  const links = scene.links
+    .map((link) => {
+      const from = projectedById.get(link.from.entity.id);
+      const to = projectedById.get(link.to.entity.id);
+      if (!from || !to) return undefined;
+      return {
+        relationship: link.relationship,
+        from,
+        to,
+        opacity: clamp(0.36 + (from.scale + to.scale) * 0.17, 0.38, 0.78),
+      };
+    })
+    .filter((link): link is ProjectedLink => Boolean(link));
+
+  return { nodes: projectedNodes, links };
+}
+
+function projectNode(node: SceneNode, rotation: Rotation, time: number): ProjectedNode {
+  const width = 1000;
+  const height = 620;
+  const floatX = Math.sin(time * 0.75 + node.phase) * node.drift;
+  const floatY = Math.cos(time * 0.64 + node.phase * 0.8) * node.drift * 0.72;
+  const floatZ = Math.sin(time * 0.52 + node.phase * 1.4) * node.drift * 2.2;
+  const centeredX = node.x - width / 2 + floatX;
+  const centeredY = node.y - height / 2 + floatY;
+  const centeredZ = node.z + floatZ;
+
+  const cosY = Math.cos(rotation.y);
+  const sinY = Math.sin(rotation.y);
+  const x1 = centeredX * cosY + centeredZ * sinY;
+  const z1 = -centeredX * sinY + centeredZ * cosY;
+
+  const cosX = Math.cos(rotation.x);
+  const sinX = Math.sin(rotation.x);
+  const y2 = centeredY * cosX - z1 * sinX;
+  const z2 = centeredY * sinX + z1 * cosX;
+
+  const perspective = 1080;
+  const scale = clamp(perspective / (perspective - z2), 0.62, 1.42);
+  const radius = nodeRadius(node.degree) * scale;
+
+  return {
+    node,
+    x: width / 2 + x1 * scale,
+    y: height / 2 + y2 * scale,
+    radius,
+    scale,
+    depth: z2,
+    opacity: clamp(0.5 + scale * 0.42, 0.62, 1),
+  };
 }
 
 function nodeRadius(degree: number) {
