@@ -32,10 +32,10 @@ const entityTypeLabels: Record<EntityType, string> = {
 };
 
 const nodeColors: Record<EntityType, string> = {
-  person: '#19d27f',
-  project: '#42a5ff',
-  event: '#a6acb8',
-  topic: '#f2c94c',
+  person: '#16a34a',
+  project: '#2563eb',
+  event: '#64748b',
+  topic: '#d9a400',
 };
 
 const insightTypeLabels = {
@@ -70,15 +70,15 @@ export function GraphPage() {
       </div>
 
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1.55fr)_minmax(320px,0.75fr)]">
-        <section className="overflow-hidden rounded-[12px] border border-[#101a34] bg-[#07101f] shadow-[0_22px_70px_rgba(12,24,48,0.22)]">
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 px-5 py-4">
-            <div className="flex items-center gap-3 text-white">
-              <span className="flex size-9 items-center justify-center rounded-[10px] border border-cyan-300/25 bg-cyan-300/10 text-cyan-200">
+        <section className="overflow-hidden rounded-[12px] border border-[#d9d9d6] bg-white">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#e5e5e4] px-5 py-4">
+            <div className="flex items-center gap-3 text-[#1f2937]">
+              <span className="flex size-9 items-center justify-center rounded-[10px] border border-[#d9d9d6] bg-[#f4f8ff] text-[#155eef]">
                 <Network size={18} />
               </span>
               <div>
                 <h3 className="text-sm font-semibold">Knowledge Network</h3>
-                <p className="text-xs text-slate-400">{overview.entityCount} nodes · {overview.relationshipCount} links</p>
+                <p className="text-xs text-[#626965]">{overview.entityCount} nodes · {overview.relationshipCount} links</p>
               </div>
             </div>
             <div className="flex flex-wrap gap-2 text-xs">
@@ -89,34 +89,22 @@ export function GraphPage() {
             </div>
           </div>
 
-          <div className="relative min-h-[520px]">
-            <div className="mywiki-tech-scanline" />
+          <div className="relative min-h-[520px] bg-[#fbfbfa]">
             {scene.nodes.length === 0 ? (
-              <div className="flex min-h-[520px] items-center justify-center px-6 text-center text-sm text-slate-300">
+              <div className="flex min-h-[520px] items-center justify-center px-6 text-center text-sm text-[#626965]">
                 暂无实体。先捕获一条材料后，图谱会在这里生成。
               </div>
             ) : (
               <svg viewBox="0 0 1000 620" className="mywiki-tech-graph h-[520px] w-full" role="img" aria-label="MyWiki 关系图谱">
                 <defs>
-                  <pattern id="tech-grid" width="44" height="44" patternUnits="userSpaceOnUse">
-                    <path d="M 44 0 L 0 0 0 44" fill="none" stroke="rgba(148, 163, 184, 0.16)" strokeWidth="1" />
+                  <pattern id="graph-grid" width="42" height="42" patternUnits="userSpaceOnUse">
+                    <path d="M 42 0 L 0 0 0 42" fill="none" stroke="rgba(148, 163, 184, 0.11)" strokeWidth="1" />
                   </pattern>
-                  <radialGradient id="graph-core-glow" cx="50%" cy="48%" r="55%">
-                    <stop offset="0%" stopColor="#164e63" stopOpacity="0.42" />
-                    <stop offset="55%" stopColor="#0f172a" stopOpacity="0.12" />
-                    <stop offset="100%" stopColor="#020617" stopOpacity="0" />
-                  </radialGradient>
-                  <linearGradient id="link-gradient" x1="0%" y1="0%" x2="100%" y2="0%">
-                    <stop offset="0%" stopColor="#38bdf8" stopOpacity="0.16" />
-                    <stop offset="50%" stopColor="#a7f3d0" stopOpacity="0.58" />
-                    <stop offset="100%" stopColor="#facc15" stopOpacity="0.16" />
-                  </linearGradient>
                 </defs>
-                <rect width="1000" height="620" fill="#07101f" />
-                <rect width="1000" height="620" fill="url(#tech-grid)" />
-                <rect width="1000" height="620" fill="url(#graph-core-glow)" />
+                <rect width="1000" height="620" fill="#fbfbfa" />
+                <rect width="1000" height="620" fill="url(#graph-grid)" />
 
-                {scene.links.map((link, index) => (
+                {scene.links.map((link) => (
                   <g key={link.relationship.id}>
                     <line
                       x1={link.from.x}
@@ -125,22 +113,6 @@ export function GraphPage() {
                       y2={link.to.y}
                       className="mywiki-tech-link"
                     />
-                    <circle r="2.4" className="mywiki-tech-particle">
-                      <animate
-                        attributeName="cx"
-                        values={`${link.from.x};${link.to.x}`}
-                        dur={`${3.4 + (index % 5) * 0.45}s`}
-                        begin={`${index * 0.13}s`}
-                        repeatCount="indefinite"
-                      />
-                      <animate
-                        attributeName="cy"
-                        values={`${link.from.y};${link.to.y}`}
-                        dur={`${3.4 + (index % 5) * 0.45}s`}
-                        begin={`${index * 0.13}s`}
-                        repeatCount="indefinite"
-                      />
-                    </circle>
                     <title>
                       {link.from.entity.title} · {relationshipTypeLabel(link.relationship.type)} · {link.to.entity.title}
                     </title>
@@ -153,8 +125,8 @@ export function GraphPage() {
                   return (
                     <a key={node.entity.id} href={`/wiki/${node.entity.type}/${node.entity.id}`}>
                       <g className="mywiki-tech-node">
-                        <circle cx={node.x} cy={node.y} r={radius + 8} fill={color} className="mywiki-tech-node-halo" />
-                        <circle cx={node.x} cy={node.y} r={radius} fill={color} stroke="rgba(255,255,255,0.88)" strokeWidth="1.8" />
+                        <circle cx={node.x} cy={node.y} r={radius + 6} stroke={color} className="mywiki-tech-node-ring" />
+                        <circle cx={node.x} cy={node.y} r={radius} fill={color} stroke="#ffffff" strokeWidth="2" />
                         <text x={node.x} y={node.y + radius + 18} textAnchor="middle" className="mywiki-tech-label">
                           {shortTitle(node.entity.title)}
                         </text>
@@ -238,7 +210,7 @@ export function GraphPage() {
 
 function TypeLegend({ type }: { type: EntityType }) {
   return (
-    <span className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-slate-300">
+    <span className="inline-flex items-center gap-1.5 rounded-full border border-[#d9d9d6] bg-[#fbfbfa] px-2.5 py-1 text-[#4b5563]">
       <span className="size-2 rounded-full" style={{ backgroundColor: nodeColors[type] }} />
       {entityTypeLabels[type]}
     </span>
