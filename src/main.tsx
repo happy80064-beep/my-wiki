@@ -6,6 +6,7 @@ import { CapturePage } from './pages/CapturePage';
 import { DashboardPage } from './pages/DashboardPage';
 import { EntityPage } from './pages/EntityPage';
 import { EntryPage } from './pages/EntryPage';
+import { GraphPage } from './pages/GraphPage';
 import { QueryPage } from './pages/QueryPage';
 import { WikiPage } from './pages/WikiPage';
 import './styles.css';
@@ -20,6 +21,7 @@ const router = createBrowserRouter([
       { path: 'entries/:id', element: <EntryPage /> },
       { path: 'wiki', element: <WikiPage /> },
       { path: 'wiki/:type/:id', element: <EntityPage /> },
+      { path: 'graph', element: <GraphPage /> },
       { path: 'query', element: <QueryPage /> },
     ],
   },

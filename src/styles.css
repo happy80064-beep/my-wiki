@@ -69,3 +69,103 @@ body {
     stroke-dashoffset: 0;
   }
 }
+
+.mywiki-tech-graph {
+  display: block;
+}
+
+.mywiki-tech-link {
+  stroke: url(#link-gradient);
+  stroke-width: 1.25;
+  stroke-dasharray: 7 10;
+  animation: mywiki-tech-link-flow 5s linear infinite;
+  filter: drop-shadow(0 0 5px rgb(56 189 248 / 0.24));
+}
+
+.mywiki-tech-particle {
+  fill: #a7f3d0;
+  opacity: 0.85;
+  filter: drop-shadow(0 0 7px rgb(125 211 252 / 0.95));
+}
+
+.mywiki-tech-node {
+  cursor: pointer;
+  transition: opacity 160ms ease, transform 160ms ease;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.mywiki-tech-node:hover {
+  transform: scale(1.1);
+}
+
+.mywiki-tech-node-halo {
+  opacity: 0.2;
+  animation: mywiki-tech-node-pulse 2.8s ease-in-out infinite;
+  filter: blur(1px);
+}
+
+.mywiki-tech-label {
+  fill: #dbeafe;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0;
+  paint-order: stroke;
+  pointer-events: none;
+  stroke: #07101f;
+  stroke-width: 4;
+}
+
+.mywiki-tech-scanline {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    transparent 46%,
+    rgb(103 232 249 / 0.11) 50%,
+    transparent 54%,
+    transparent 100%
+  );
+  mix-blend-mode: screen;
+  animation: mywiki-tech-scan 6s ease-in-out infinite;
+}
+
+@keyframes mywiki-tech-link-flow {
+  from {
+    stroke-dashoffset: 36;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes mywiki-tech-node-pulse {
+  0%,
+  100% {
+    transform: scale(0.95);
+    opacity: 0.16;
+  }
+  50% {
+    transform: scale(1.28);
+    opacity: 0.32;
+  }
+}
+
+@keyframes mywiki-tech-scan {
+  0% {
+    transform: translateY(-42%);
+    opacity: 0;
+  }
+  18% {
+    opacity: 1;
+  }
+  82% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(42%);
+    opacity: 0;
+  }
+}

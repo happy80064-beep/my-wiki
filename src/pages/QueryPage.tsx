@@ -1,17 +1,25 @@
-import { Check, Loader2, Search, X } from 'lucide-react';
+import { BookPlus, Check, CheckCircle2, Loader2, Search, X } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router';
 import { type StructuredQueryResult, runStructuredQuery } from '@/lib/graph';
 import { applyCompileSuggestion, dismissCompileSuggestion } from '@/lib/db';
+import { saveQueryInsight } from '@/lib/query/saveInsight';
 
 export function QueryPage() {
   const [question, setQuestion] = useState('桌面生命体叫什么');
   const [result, setResult] = useState<StructuredQueryResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [saveState, setSaveState] = useState<
+    | { status: 'idle' }
+    | { status: 'saving' }
+    | { status: 'saved'; message: string; href: string }
+    | { status: 'error'; message: string }
+  >({ status: 'idle' });
 
   async function handleAsk() {
     if (!question.trim()) return;
     setIsLoading(true);
+    setSaveState({ status: 'idle' });
     setResult(await runStructuredQuery(question, { composeWithLlm: true, planWithAgent: true }));
     setIsLoading(false);
   }
@@ -32,6 +40,24 @@ export function QueryPage() {
     if (!updated) return;
 
     setResult((current) => replaceCompileSuggestion(current, updated));
+  }
+
+  async function handleSaveInsight() {
+    if (!result) return;
+    setSaveState({ status: 'saving' });
+    try {
+      const saved = await saveQueryInsight(question, result);
+      setSaveState({
+        status: 'saved',
+        message: saved.reused ? '已更新已有查询洞察。' : '已保存为查询洞察。',
+        href: `/wiki/${saved.entity.type}/${saved.entity.id}`,
+      });
+    } catch (error) {
+      setSaveState({
+        status: 'error',
+        message: error instanceof Error ? error.message : '保存失败。',
+      });
+    }
   }
 
   return (
@@ -76,6 +102,26 @@ export function QueryPage() {
                   已由 {providerTypeLabel[result.llm.provider]} · {result.llm.model} 优化表达
                 </p>
               ) : null}
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleSaveInsight}
+                  disabled={saveState.status === 'saving'}
+                  className="inline-flex items-center gap-2 rounded-full border border-[#155eef] px-3 py-1.5 text-xs font-medium text-[#155eef] disabled:border-[#a8b7d8] disabled:text-[#7b8794]"
+                >
+                  {saveState.status === 'saving' ? <Loader2 size={14} className="animate-spin" /> : <BookPlus size={14} />}
+                  保存到 Wiki
+                </button>
+                {saveState.status === 'saved' ? (
+                  <Link to={saveState.href} className="inline-flex items-center gap-1 text-xs text-[#276749]">
+                    <CheckCircle2 size={14} />
+                    {saveState.message}
+                  </Link>
+                ) : null}
+                {saveState.status === 'error' ? (
+                  <span className="text-xs text-[#b42318]">{saveState.message}</span>
+                ) : null}
+              </div>
 
               {result.compileSuggestions && result.compileSuggestions.length > 0 ? (
                 <div>

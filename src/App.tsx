@@ -5,6 +5,7 @@ const navItems = [
   { to: '/', label: '总览' },
   { to: '/capture', label: '捕获' },
   { to: '/wiki', label: '知识库' },
+  { to: '/graph', label: '图谱' },
   { to: '/query', label: '查询' },
 ];
 
