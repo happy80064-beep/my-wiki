@@ -1,5 +1,14 @@
 import Dexie, { type Table } from 'dexie';
-import type { CompileSuggestionRecord, Entity, Entry, Relationship, Task } from '@/types';
+import type {
+  CompileSuggestionRecord,
+  Entity,
+  Entry,
+  GraphInsightDismissal,
+  IngestCacheRecord,
+  IngestJob,
+  Relationship,
+  Task,
+} from '@/types';
 
 export class MyWikiDatabase extends Dexie {
   entries!: Table<Entry, string>;
@@ -7,6 +16,9 @@ export class MyWikiDatabase extends Dexie {
   relationships!: Table<Relationship, string>;
   tasks!: Table<Task, string>;
   compileSuggestions!: Table<CompileSuggestionRecord, string>;
+  ingestJobs!: Table<IngestJob, string>;
+  ingestCache!: Table<IngestCacheRecord, string>;
+  graphInsightDismissals!: Table<GraphInsightDismissal, string>;
 
   constructor() {
     super('mywiki');
@@ -24,6 +36,17 @@ export class MyWikiDatabase extends Dexie {
       relationships: 'id, from, to, type, createdAt, *evidence',
       tasks: 'id, owner, status, createdAt, dueDate, source, *linkedTo',
       compileSuggestions: 'id, &fingerprint, status, entityId, propertyKey, evidenceEntryId, createdAt, updatedAt',
+    });
+
+    this.version(3).stores({
+      entries: 'id, capturedAt, processed, source',
+      entities: 'id, type, title, *tags, *scenes, createdAt, updatedAt',
+      relationships: 'id, from, to, type, createdAt, *evidence',
+      tasks: 'id, owner, status, createdAt, dueDate, source, *linkedTo',
+      compileSuggestions: 'id, &fingerprint, status, entityId, propertyKey, evidenceEntryId, createdAt, updatedAt',
+      ingestJobs: 'id, status, contentHash, createdAt, updatedAt',
+      ingestCache: '&contentHash, updatedAt, *entryIds',
+      graphInsightDismissals: 'id, type, dismissedAt',
     });
   }
 }

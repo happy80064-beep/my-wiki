@@ -1,10 +1,21 @@
-import { Activity, AlertTriangle, GitBranch, Network, Radar, RotateCcw, Sparkles } from 'lucide-react';
+import {
+  Activity,
+  AlertTriangle,
+  GitBranch,
+  Minus,
+  Network,
+  Plus,
+  Radar,
+  RotateCcw,
+  Sparkles,
+  X,
+} from 'lucide-react';
 import { type PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { Link } from 'react-router';
-import { buildGraphOverview, relationshipTypeLabel } from '@/lib/graph';
+import { buildGraphOverview, relationshipTypeLabel, type GraphInsight } from '@/lib/graph';
 import { db } from '@/lib/db';
-import type { Entity, EntityType, Relationship } from '@/types';
+import type { Entity, EntityType, Relationship, Scene } from '@/types';
 
 type SceneNode = {
   entity: Entity;
@@ -60,6 +71,14 @@ type Rotation = {
   y: number;
 };
 
+type TimeScope = 'all' | '30d' | '90d' | '365d';
+
+type GraphFilters = {
+  activeTypes: Set<EntityType>;
+  activeScenes: Set<Scene>;
+  changedAfter?: number;
+};
+
 type DragState =
   | {
       mode: 'rotate';
@@ -75,11 +94,28 @@ type DragState =
       lastPoint: { x: number; y: number };
     };
 
+const entityTypes: EntityType[] = ['project', 'topic', 'person', 'event'];
+const sceneTypes: Scene[] = ['work', 'life', 'social', 'personal'];
+
 const entityTypeLabels: Record<EntityType, string> = {
-  person: '人员',
+  person: '人物',
   project: '事项',
   event: '互动',
   topic: '主题',
+};
+
+const sceneLabels: Record<Scene, string> = {
+  work: '工作',
+  life: '生活',
+  social: '社交',
+  personal: '个人',
+};
+
+const timeScopeLabels: Record<TimeScope, string> = {
+  all: '全部时间',
+  '30d': '30 天',
+  '90d': '90 天',
+  '365d': '一年',
 };
 
 const nodeColors: Record<EntityType, string> = {
@@ -106,16 +142,54 @@ export function GraphPage() {
   const [nodeOverrides, setNodeOverrides] = useState<Record<string, NodeOverride>>({});
   const [dragState, setDragState] = useState<DragState | null>(null);
   const [floatTime, setFloatTime] = useState(0);
+  const [zoom, setZoom] = useState(1);
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
+  const [activeTypes, setActiveTypes] = useState<Set<EntityType>>(() => new Set(entityTypes));
+  const [activeScenes, setActiveScenes] = useState<Set<Scene>>(() => new Set(sceneTypes));
+  const [timeScope, setTimeScope] = useState<TimeScope>('all');
   const entities = useLiveQuery(() => db.entities.toArray(), [], []);
   const relationships = useLiveQuery(() => db.relationships.toArray(), [], []);
-  const overview = useMemo(() => buildGraphOverview(entities, relationships), [entities, relationships]);
+  const dismissals = useLiveQuery(() => db.graphInsightDismissals.toArray(), [], []);
+  const filters = useMemo<GraphFilters>(
+    () => ({
+      activeTypes,
+      activeScenes,
+      changedAfter: changedAfterForScope(timeScope),
+    }),
+    [activeTypes, activeScenes, timeScope],
+  );
+  const filteredEntities = useMemo(() => filterGraphEntities(entities, filters), [entities, filters]);
+  const filteredEntityIds = useMemo(
+    () => new Set(filteredEntities.map((entity) => entity.id)),
+    [filteredEntities],
+  );
+  const filteredRelationships = useMemo(
+    () =>
+      relationships.filter(
+        (relationship) => filteredEntityIds.has(relationship.from) && filteredEntityIds.has(relationship.to),
+      ),
+    [relationships, filteredEntityIds],
+  );
+  const overview = useMemo(
+    () => buildGraphOverview(filteredEntities, filteredRelationships),
+    [filteredEntities, filteredRelationships],
+  );
+  const dismissedInsightIds = useMemo(() => new Set(dismissals.map((item) => item.id)), [dismissals]);
+  const visibleInsights = useMemo(
+    () => overview.insights.filter((insight) => !dismissedInsightIds.has(insight.id)),
+    [overview.insights, dismissedInsightIds],
+  );
   const scene = useMemo(
-    () => buildGraphScene(entities, relationships, layoutSalt, nodeOverrides),
-    [entities, relationships, layoutSalt, nodeOverrides],
+    () => buildGraphScene(filteredEntities, filteredRelationships, layoutSalt, nodeOverrides),
+    [filteredEntities, filteredRelationships, layoutSalt, nodeOverrides],
   );
   const projectedScene = useMemo(
-    () => projectGraphScene(scene, rotation, floatTime),
-    [scene, rotation, floatTime],
+    () => projectGraphScene(scene, rotation, floatTime, zoom),
+    [scene, rotation, floatTime, zoom],
+  );
+  const highlightedNodeIds = useMemo(
+    () => buildHighlightedNodeIds(scene, hoveredNodeId),
+    [scene, hoveredNodeId],
   );
 
   useEffect(() => {
@@ -144,6 +218,31 @@ export function GraphPage() {
     setLayoutSalt((value) => value + 1);
     setNodeOverrides({});
     setRotation(defaultRotation);
+    setZoom(1);
+  }
+
+  function toggleType(type: EntityType) {
+    setActiveTypes((current) => {
+      const next = new Set(current);
+      if (next.has(type) && next.size > 1) {
+        next.delete(type);
+      } else {
+        next.add(type);
+      }
+      return next;
+    });
+  }
+
+  function toggleScene(scene: Scene) {
+    setActiveScenes((current) => {
+      const next = new Set(current);
+      if (next.has(scene) && next.size > 1) {
+        next.delete(scene);
+      } else {
+        next.add(scene);
+      }
+      return next;
+    });
   }
 
   function handleCanvasPointerDown(event: ReactPointerEvent<SVGSVGElement>) {
@@ -203,9 +302,9 @@ export function GraphPage() {
       return {
         ...current,
         [dragState.nodeId]: {
-          x: clamp(base.x + dx, 40, 960),
-          y: clamp(base.y + dy, 40, 580),
-          z: clamp(base.z + dy * 0.18 * Math.sin(rotation.x), -260, 260),
+          x: clamp(base.x + dx / zoom, 40, 960),
+          y: clamp(base.y + dy / zoom, 40, 580),
+          z: clamp(base.z + (dy / zoom) * 0.18 * Math.sin(rotation.x), -260, 260),
         },
       };
     });
@@ -227,6 +326,14 @@ export function GraphPage() {
     };
   }
 
+  async function dismissInsight(insight: GraphInsight) {
+    await db.graphInsightDismissals.put({
+      id: insight.id,
+      type: insight.type,
+      dismissedAt: Date.now(),
+    });
+  }
+
   return (
     <section className="mx-auto max-w-6xl px-5 py-8">
       <div className="mb-5 flex flex-wrap items-end justify-between gap-4">
@@ -234,14 +341,32 @@ export function GraphPage() {
           <p className="text-xs font-medium text-[#155eef]">Graph</p>
           <h2 className="mt-2 text-2xl font-semibold text-[#1f2937]">关系图谱</h2>
         </div>
-        <button
-          type="button"
-          onClick={handleResetLayout}
-          className="inline-flex items-center gap-2 rounded-full border border-[#d9d9d6] bg-white px-4 py-2 text-sm font-medium text-[#4b5563] transition hover:border-[#155eef] hover:text-[#155eef]"
-        >
-          <RotateCcw size={16} />
-          重排
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setZoom((value) => clamp(value - 0.12, 0.62, 1.75))}
+            className="inline-flex size-9 items-center justify-center rounded-full border border-[#d9d9d6] bg-white text-[#4b5563] transition hover:border-[#155eef] hover:text-[#155eef]"
+            title="缩小"
+          >
+            <Minus size={15} />
+          </button>
+          <button
+            type="button"
+            onClick={() => setZoom((value) => clamp(value + 0.12, 0.62, 1.75))}
+            className="inline-flex size-9 items-center justify-center rounded-full border border-[#d9d9d6] bg-white text-[#4b5563] transition hover:border-[#155eef] hover:text-[#155eef]"
+            title="放大"
+          >
+            <Plus size={15} />
+          </button>
+          <button
+            type="button"
+            onClick={handleResetLayout}
+            className="inline-flex items-center gap-2 rounded-full border border-[#d9d9d6] bg-white px-4 py-2 text-sm font-medium text-[#4b5563] transition hover:border-[#155eef] hover:text-[#155eef]"
+          >
+            <RotateCcw size={16} />
+            重排
+          </button>
+        </div>
       </div>
 
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1.55fr)_minmax(320px,0.75fr)]">
@@ -253,27 +378,71 @@ export function GraphPage() {
               </span>
               <div>
                 <h3 className="text-sm font-semibold">Knowledge Network</h3>
-                <p className="text-xs text-[#626965]">{overview.entityCount} nodes · {overview.relationshipCount} links</p>
+                <p className="text-xs text-[#626965]">
+                  {overview.entityCount} nodes / {overview.relationshipCount} links / {Math.round(zoom * 100)}%
+                </p>
               </div>
             </div>
             <div className="flex flex-wrap gap-2 text-xs">
-              <TypeLegend type="project" />
-              <TypeLegend type="topic" />
-              <TypeLegend type="person" />
-              <TypeLegend type="event" />
+              {entityTypes.map((type) => (
+                <FilterPill
+                  key={type}
+                  active={activeTypes.has(type)}
+                  color={nodeColors[type]}
+                  label={entityTypeLabels[type]}
+                  onClick={() => toggleType(type)}
+                />
+              ))}
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#eeeeed] px-5 py-3">
+            <div className="flex flex-wrap gap-2 text-xs">
+              {sceneTypes.map((scene) => (
+                <button
+                  key={scene}
+                  type="button"
+                  onClick={() => toggleScene(scene)}
+                  className={[
+                    'rounded-full border px-2.5 py-1 transition',
+                    activeScenes.has(scene)
+                      ? 'border-[#155eef] bg-[#f4f8ff] text-[#155eef]'
+                      : 'border-[#d9d9d6] bg-white text-[#626965]',
+                  ].join(' ')}
+                >
+                  {sceneLabels[scene]}
+                </button>
+              ))}
+            </div>
+            <div className="flex flex-wrap gap-2 text-xs">
+              {(Object.keys(timeScopeLabels) as TimeScope[]).map((scope) => (
+                <button
+                  key={scope}
+                  type="button"
+                  onClick={() => setTimeScope(scope)}
+                  className={[
+                    'rounded-full border px-2.5 py-1 transition',
+                    timeScope === scope
+                      ? 'border-[#155eef] bg-[#f4f8ff] text-[#155eef]'
+                      : 'border-[#d9d9d6] bg-white text-[#626965]',
+                  ].join(' ')}
+                >
+                  {timeScopeLabels[scope]}
+                </button>
+              ))}
             </div>
           </div>
 
           <div className="relative min-h-[520px] bg-[#fbfbfa]">
             {scene.nodes.length === 0 ? (
               <div className="flex min-h-[520px] items-center justify-center px-6 text-center text-sm text-[#626965]">
-                暂无实体。先捕获一条材料后，图谱会在这里生成。
+                当前筛选范围内没有可展示实体。可以放宽类型、场景或时间条件。
               </div>
             ) : (
               <svg
                 ref={svgRef}
                 viewBox="0 0 1000 620"
-                className="mywiki-tech-graph h-[520px] w-full"
+                className="mywiki-tech-graph h-[520px] w-full cursor-grab active:cursor-grabbing"
                 role="img"
                 aria-label="MyWiki 关系图谱"
                 onPointerDown={handleCanvasPointerDown}
@@ -289,25 +458,32 @@ export function GraphPage() {
                 <rect width="1000" height="620" fill="#fbfbfa" />
                 <rect width="1000" height="620" fill="url(#graph-grid)" />
 
-                {projectedScene.links.map((link) => (
-                  <g key={link.relationship.id}>
-                    <line
-                      x1={link.from.x}
-                      y1={link.from.y}
-                      x2={link.to.x}
-                      y2={link.to.y}
-                      className="mywiki-tech-link"
-                      style={{ opacity: link.opacity }}
-                    />
-                    <title>
-                      {link.from.node.entity.title} · {relationshipTypeLabel(link.relationship.type)} · {link.to.node.entity.title}
-                    </title>
-                  </g>
-                ))}
+                {projectedScene.links.map((link) => {
+                  const focused =
+                    !highlightedNodeIds ||
+                    link.from.node.entity.id === hoveredNodeId ||
+                    link.to.node.entity.id === hoveredNodeId;
+                  return (
+                    <g key={link.relationship.id}>
+                      <line
+                        x1={link.from.x}
+                        y1={link.from.y}
+                        x2={link.to.x}
+                        y2={link.to.y}
+                        className="mywiki-tech-link"
+                        style={{ opacity: focused ? link.opacity : 0.08 }}
+                      />
+                      <title>
+                        {link.from.node.entity.title} / {relationshipTypeLabel(link.relationship.type)} / {link.to.node.entity.title}
+                      </title>
+                    </g>
+                  );
+                })}
 
                 {projectedScene.nodes.map((projected) => {
                   const node = projected.node;
                   const color = nodeColors[node.entity.type];
+                  const focused = !highlightedNodeIds || highlightedNodeIds.has(node.entity.id);
                   return (
                     <a
                       key={node.entity.id}
@@ -321,8 +497,10 @@ export function GraphPage() {
                     >
                       <g
                         className="mywiki-tech-node"
-                        style={{ opacity: projected.opacity }}
+                        style={{ opacity: focused ? projected.opacity : 0.18 }}
                         onPointerDown={(event) => handleNodePointerDown(event, node)}
+                        onPointerEnter={() => setHoveredNodeId(node.entity.id)}
+                        onPointerLeave={() => setHoveredNodeId(null)}
                       >
                         <circle
                           cx={projected.x}
@@ -356,7 +534,7 @@ export function GraphPage() {
                           {shortTitle(node.entity.title)}
                         </text>
                         <title>
-                          {entityTypeLabels[node.entity.type]} · {node.entity.title} · {node.degree} links
+                          {entityTypeLabels[node.entity.type]} / {node.entity.title} / {node.degree} links
                         </title>
                       </g>
                     </a>
@@ -386,18 +564,18 @@ export function GraphPage() {
               <Radar size={17} className="text-[#155eef]" />
               <h3 className="text-sm font-semibold text-[#1f2937]">图谱洞察</h3>
             </div>
-            {overview.insights.length === 0 ? (
+            {visibleInsights.length === 0 ? (
               <div className="mt-4 flex items-center gap-2 rounded-[10px] border border-[#d9d9d6] bg-[#fbfbfa] px-3 py-3 text-sm text-[#626965]">
                 <Sparkles size={16} />
                 暂无需要处理的洞察。
               </div>
             ) : (
               <div className="mt-4 grid gap-3">
-                {overview.insights.map((insight) => (
+                {visibleInsights.map((insight) => (
                   <article key={insight.id} className="rounded-[10px] border border-[#e5e5e4] bg-[#fbfbfa] p-3">
                     <div className="flex items-start gap-2">
                       <InsightIcon type={insight.type} />
-                      <div className="min-w-0">
+                      <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="rounded-full border border-[#d9d9d6] bg-white px-2 py-0.5 text-[11px] text-[#155eef]">
                             {insightTypeLabels[insight.type]}
@@ -421,6 +599,14 @@ export function GraphPage() {
                           })}
                         </div>
                       </div>
+                      <button
+                        type="button"
+                        onClick={() => void dismissInsight(insight)}
+                        className="inline-flex size-7 shrink-0 items-center justify-center rounded-full border border-[#d9d9d6] bg-white text-[#626965] transition hover:border-[#155eef] hover:text-[#155eef]"
+                        title="隐藏这条洞察"
+                      >
+                        <X size={13} />
+                      </button>
                     </div>
                   </article>
                 ))}
@@ -433,12 +619,29 @@ export function GraphPage() {
   );
 }
 
-function TypeLegend({ type }: { type: EntityType }) {
+function FilterPill({
+  active,
+  color,
+  label,
+  onClick,
+}: {
+  active: boolean;
+  color: string;
+  label: string;
+  onClick: () => void;
+}) {
   return (
-    <span className="inline-flex items-center gap-1.5 rounded-full border border-[#d9d9d6] bg-[#fbfbfa] px-2.5 py-1 text-[#4b5563]">
-      <span className="size-2 rounded-full" style={{ backgroundColor: nodeColors[type] }} />
-      {entityTypeLabels[type]}
-    </span>
+    <button
+      type="button"
+      onClick={onClick}
+      className={[
+        'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 transition',
+        active ? 'border-[#155eef] bg-[#f4f8ff] text-[#155eef]' : 'border-[#d9d9d6] bg-[#fbfbfa] text-[#4b5563]',
+      ].join(' ')}
+    >
+      <span className="size-2 rounded-full" style={{ backgroundColor: active ? color : '#c8c8c5' }} />
+      {label}
+    </button>
   );
 }
 
@@ -457,6 +660,32 @@ function InsightIcon({ type }: { type: keyof typeof insightTypeLabels }) {
   if (type === 'bridge-node') return <GitBranch size={16} className={className} />;
   if (type === 'dense-hub') return <Network size={16} className={className} />;
   return <Radar size={16} className={className} />;
+}
+
+function filterGraphEntities(entities: Entity[], filters: GraphFilters) {
+  return entities.filter((entity) => {
+    if (!filters.activeTypes.has(entity.type)) return false;
+    if (filters.changedAfter && entity.updatedAt < filters.changedAfter) return false;
+    if (filters.activeScenes.size === sceneTypes.length) return true;
+    if (entity.scenes.length === 0) return filters.activeScenes.has('work');
+    return entity.scenes.some((scene) => filters.activeScenes.has(scene));
+  });
+}
+
+function changedAfterForScope(scope: TimeScope) {
+  if (scope === 'all') return undefined;
+  const days = scope === '30d' ? 30 : scope === '90d' ? 90 : 365;
+  return Date.now() - days * 24 * 60 * 60 * 1000;
+}
+
+function buildHighlightedNodeIds(scene: GraphScene, hoveredNodeId: string | null) {
+  if (!hoveredNodeId) return undefined;
+  const ids = new Set<string>([hoveredNodeId]);
+  for (const link of scene.links) {
+    if (link.from.entity.id === hoveredNodeId) ids.add(link.to.entity.id);
+    if (link.to.entity.id === hoveredNodeId) ids.add(link.from.entity.id);
+  }
+  return ids;
 }
 
 function buildGraphScene(
@@ -634,9 +863,9 @@ function fitLayoutToViewport(nodes: SceneNode[], width: number, height: number) 
   }));
 }
 
-function projectGraphScene(scene: GraphScene, rotation: Rotation, time: number): ProjectedScene {
+function projectGraphScene(scene: GraphScene, rotation: Rotation, time: number, zoom: number): ProjectedScene {
   const projectedNodes = scene.nodes
-    .map((node) => projectNode(node, rotation, time))
+    .map((node) => projectNode(node, rotation, time, zoom))
     .sort((a, b) => a.depth - b.depth);
   const projectedById = new Map(projectedNodes.map((node) => [node.node.entity.id, node]));
   const links = scene.links
@@ -656,7 +885,7 @@ function projectGraphScene(scene: GraphScene, rotation: Rotation, time: number):
   return { nodes: projectedNodes, links };
 }
 
-function projectNode(node: SceneNode, rotation: Rotation, time: number): ProjectedNode {
+function projectNode(node: SceneNode, rotation: Rotation, time: number, zoom: number): ProjectedNode {
   const width = 1000;
   const height = 620;
   const floatX = Math.sin(time * 0.75 + node.phase) * node.drift;
@@ -678,12 +907,12 @@ function projectNode(node: SceneNode, rotation: Rotation, time: number): Project
 
   const perspective = 1080;
   const scale = clamp(perspective / (perspective - z2), 0.62, 1.42);
-  const radius = nodeRadius(node.degree) * scale;
+  const radius = nodeRadius(node.degree) * scale * clamp(Math.sqrt(zoom), 0.78, 1.2);
 
   return {
     node,
-    x: width / 2 + x1 * scale,
-    y: height / 2 + y2 * scale,
+    x: width / 2 + x1 * scale * zoom,
+    y: height / 2 + y2 * scale * zoom,
     radius,
     scale,
     depth: z2,

@@ -49,7 +49,9 @@ export function QueryPage() {
       const saved = await saveQueryInsight(question, result);
       setSaveState({
         status: 'saved',
-        message: saved.reused ? '已更新已有查询洞察。' : '已保存为查询洞察。',
+        message: saved.reused
+          ? '已更新已有查询洞察，并加入再编译队列。'
+          : '已保存为查询洞察，并加入再编译队列。',
         href: `/wiki/${saved.entity.type}/${saved.entity.id}`,
       });
     } catch (error) {

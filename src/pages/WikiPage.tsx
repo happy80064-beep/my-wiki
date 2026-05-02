@@ -1,10 +1,12 @@
+import { Download } from 'lucide-react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { Link } from 'react-router';
 import { db } from '@/lib/db';
+import { buildMarkdownExportFiles, buildMarkdownZipBlob } from '@/lib/export/markdown';
 import type { Entity, EntityType } from '@/types';
 
 const entityTypeLabels: Record<EntityType, string> = {
-  person: '人员',
+  person: '人物',
   project: '事项',
   event: '互动',
   topic: '主题',
@@ -16,6 +18,17 @@ export function WikiPage() {
   const entities = useLiveQuery(() => db.entities.orderBy('updatedAt').reverse().toArray(), [], []);
   const tasks = useLiveQuery(() => db.tasks.toArray(), [], []);
   const relationships = useLiveQuery(() => db.relationships.toArray(), [], []);
+
+  async function handleExportMarkdown() {
+    const files = await buildMarkdownExportFiles();
+    const blob = buildMarkdownZipBlob(files);
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `mywiki-export-${new Date().toISOString().slice(0, 10)}.zip`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
 
   return (
     <section className="mx-auto max-w-6xl px-5 py-8">
@@ -32,6 +45,14 @@ export function WikiPage() {
           <p className="mt-3 text-sm leading-6 text-[#626965]">
             这里按四类实体浏览本地知识图谱。实体保存后仍可进入详情页继续编辑。
           </p>
+          <button
+            type="button"
+            onClick={() => void handleExportMarkdown()}
+            className="mt-4 inline-flex items-center gap-2 rounded-full border border-[#155eef] px-3 py-1.5 text-xs font-medium text-[#155eef] transition hover:bg-[#f4f8ff]"
+          >
+            <Download size={14} />
+            导出 Markdown
+          </button>
         </aside>
 
         <div className="space-y-5">

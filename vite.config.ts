@@ -77,7 +77,36 @@ export default defineConfig(({ mode }) => {
 
               let deepseekFailure = '';
               for (const deepseekApiKey of deepseekApiKeys) {
-                const deepseekResult = await requestOpenAiCompatibleCapture({
+                const deepseekTwoStepResult = await requestOpenAiCompatibleTwoStepCapture({
+                  apiKey: deepseekApiKey,
+                  baseUrl: deepseekBaseUrl,
+                  model: deepseekModel,
+                  providerName: 'DeepSeek',
+                  content,
+                  entityIndex: body.entityIndex ?? [],
+                  extraBody: {
+                    thinking: { type: 'disabled' },
+                    response_format: { type: 'json_object' },
+                  },
+                });
+
+                if (deepseekTwoStepResult.ok) {
+                  try {
+                    sendJson(res, 200, {
+                      draft: assertUsableDraft(deepseekTwoStepResult.draft, 'DeepSeek'),
+                      provider: 'deepseek',
+                      model: deepseekModel,
+                      fallbackFrom: minimaxFailure,
+                      mode: 'two-step',
+                    });
+                    return;
+                  } catch (error) {
+                    deepseekFailure = error instanceof Error ? error.message : 'DeepSeek returned invalid JSON.';
+                    continue;
+                  }
+                }
+
+                const deepseekSingleStepResult = await requestOpenAiCompatibleCapture({
                   apiKey: deepseekApiKey,
                   baseUrl: deepseekBaseUrl,
                   model: deepseekModel,
@@ -89,10 +118,10 @@ export default defineConfig(({ mode }) => {
                   },
                 });
 
-                if (deepseekResult.ok) {
+                if (deepseekSingleStepResult.ok) {
                   try {
                     sendJson(res, 200, {
-                      draft: assertUsableDraft(normalizeMiniMaxCaptureResponse(deepseekResult.text), 'DeepSeek'),
+                      draft: assertUsableDraft(normalizeMiniMaxCaptureResponse(deepseekSingleStepResult.text), 'DeepSeek'),
                       provider: 'deepseek',
                       model: deepseekModel,
                       fallbackFrom: minimaxFailure,
@@ -105,7 +134,7 @@ export default defineConfig(({ mode }) => {
                   }
                 }
 
-                deepseekFailure = deepseekResult.error;
+                deepseekFailure = `${deepseekTwoStepResult.error}; single-step: ${deepseekSingleStepResult.error}`;
               }
 
               sendJson(res, 502, {

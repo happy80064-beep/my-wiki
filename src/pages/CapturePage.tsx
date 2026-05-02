@@ -1,5 +1,6 @@
 import { Loader2, Plus, Save, Trash2, WandSparkles } from 'lucide-react';
 import { type ReactNode, useMemo, useState } from 'react';
+import { useLiveQuery } from 'dexie-react-hooks';
 import {
   type CaptureDraft,
   type DraftEntity,
@@ -11,6 +12,8 @@ import {
   persistCaptureDraft,
 } from '@/lib/capture';
 import { extractCaptureDraft } from '@/lib/ai/captureClient';
+import { createIngestJob, processNextIngestJob } from '@/lib/ingest';
+import { db } from '@/lib/db';
 import type { EntityType, RelationshipType, Scene, TaskStatus } from '@/types';
 
 const entityTypes: EntityType[] = ['person', 'project', 'event', 'topic'];
@@ -69,6 +72,9 @@ export function CapturePage() {
   const [lastSave, setLastSave] = useState<SaveResult | null>(null);
   const [extractError, setExtractError] = useState<string | null>(null);
   const [providerLabel, setProviderLabel] = useState<string | null>(null);
+  const [isQueueProcessing, setIsQueueProcessing] = useState(false);
+  const [queueMessage, setQueueMessage] = useState<string | null>(null);
+  const ingestJobs = useLiveQuery(() => db.ingestJobs.orderBy('createdAt').reverse().limit(8).toArray(), [], []);
 
   const draftEntities = useMemo(() => (draft ? getDraftEntities(draft) : []), [draft]);
 
@@ -99,6 +105,43 @@ export function CapturePage() {
     setDraft(createLocalCaptureDraft(trimmed));
     setProviderLabel('local mock');
     setExtractError(null);
+  }
+
+  async function handleQueueCurrent() {
+    const trimmed = content.trim();
+    if (!trimmed) return;
+    await createIngestJob({ content: trimmed, source: 'text' });
+    setQueueMessage('已加入摄入队列。');
+  }
+
+  async function handleImportFiles(files: FileList | null) {
+    if (!files || files.length === 0) return;
+
+    let count = 0;
+    for (const file of Array.from(files)) {
+      if (!/\.(txt|md|markdown)$/i.test(file.name)) continue;
+      const text = await file.text();
+      if (!text.trim()) continue;
+      await createIngestJob({ content: text, source: 'file', filename: file.name });
+      count += 1;
+    }
+    setQueueMessage(count > 0 ? `已加入 ${count} 个文件到摄入队列。` : '没有可导入的 txt/md 文件。');
+  }
+
+  async function handleProcessQueue() {
+    setIsQueueProcessing(true);
+    setQueueMessage(null);
+    let processed = 0;
+    try {
+      for (let index = 0; index < 10; index += 1) {
+        const result = await processNextIngestJob();
+        if (!result) break;
+        processed += 1;
+      }
+      setQueueMessage(processed > 0 ? `已处理 ${processed} 个队列项。` : '当前没有待处理队列项。');
+    } finally {
+      setIsQueueProcessing(false);
+    }
   }
 
   async function handleSave() {
@@ -202,6 +245,25 @@ export function CapturePage() {
               {isSaving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
               保存到知识库
             </button>
+            <button
+              type="button"
+              onClick={handleQueueCurrent}
+              disabled={!content.trim()}
+              className="inline-flex items-center gap-2 rounded-full border border-[#d9d9d6] bg-white px-4 py-2 text-sm font-medium text-[#1f2937] disabled:cursor-not-allowed disabled:text-[#a0a0a0]"
+            >
+              <Plus size={16} />
+              加入摄入队列
+            </button>
+            <label className="inline-flex cursor-pointer items-center gap-2 rounded-full border border-[#d9d9d6] bg-white px-4 py-2 text-sm font-medium text-[#1f2937]">
+              <input
+                type="file"
+                multiple
+                accept=".txt,.md,.markdown,text/plain,text/markdown"
+                className="hidden"
+                onChange={(event) => handleImportFiles(event.target.files)}
+              />
+              批量导入文本
+            </label>
           </div>
           {lastSave ? (
             <div className="mt-4 rounded-[10px] border border-[#b7e4c7] bg-[#f0fff4] px-3 py-2 text-sm leading-6 text-[#276749]">
@@ -224,6 +286,39 @@ export function CapturePage() {
               </button>
             </div>
           ) : null}
+          <section className="mt-5 rounded-[12px] border border-[#e5e5e4] bg-[#fbfbfa] p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold text-[#1f2937]">摄入队列</h3>
+                <p className="mt-1 text-xs text-[#626965]">支持重复内容哈希缓存；同一原文已入库时会跳过。</p>
+              </div>
+              <button
+                type="button"
+                onClick={handleProcessQueue}
+                disabled={isQueueProcessing}
+                className="inline-flex items-center gap-2 rounded-full bg-[#155eef] px-3 py-1.5 text-xs font-medium text-white disabled:bg-[#a8b7d8]"
+              >
+                {isQueueProcessing ? <Loader2 size={14} className="animate-spin" /> : <WandSparkles size={14} />}
+                处理队列
+              </button>
+            </div>
+            {queueMessage ? <p className="mt-2 text-xs text-[#626965]">{queueMessage}</p> : null}
+            <div className="mt-3 grid gap-2">
+              {ingestJobs.length === 0 ? (
+                <p className="text-xs text-[#626965]">暂无队列项。</p>
+              ) : (
+                ingestJobs.map((job) => (
+                  <div key={job.id} className="rounded-[10px] border border-[#e5e5e4] bg-white px-3 py-2 text-xs">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="font-medium text-[#1f2937]">{job.filename ?? job.content.slice(0, 24)}</span>
+                      <span className="rounded-full border border-[#d9d9d6] px-2 py-0.5 text-[#626965]">{job.status}</span>
+                    </div>
+                    {job.error ? <p className="mt-1 text-[#b42318]">{job.error}</p> : null}
+                  </div>
+                ))
+              )}
+            </div>
+          </section>
         </section>
 
         <section className="rounded-[12px] border border-[#e5e5e4] bg-white p-5">

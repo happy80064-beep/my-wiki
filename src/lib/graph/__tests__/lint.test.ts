@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createEntity, createEntry, createTask, db, materializeCompileSuggestions, resetDatabase } from '@/lib/db';
 import { buildWikiLintReport, runWikiLint } from '@/lib/graph/lint';
+import type { Entity } from '@/types';
 
 describe('wiki lint', () => {
   beforeEach(async () => {
@@ -71,6 +72,49 @@ describe('wiki lint', () => {
     );
   });
 
+  it('detects duplicate entities, contradictory properties, and compile backlog', () => {
+    const now = Date.now();
+    const duplicated: Entity[] = [
+      createTestEntity('topic_1', 'topic', 'OpenMaic', now),
+      createTestEntity('topic_2', 'topic', 'Open Maic', now),
+      ({
+        ...createTestEntity('topic_3', 'topic', '开源判断', now),
+        properties: {
+          isPersonal: false,
+          autoCollectedSnippets: [],
+          openSourceStatus: ['开源项目', '闭源项目'],
+        } as unknown as Entity['properties'],
+      } as unknown as Entity),
+    ];
+    const compileSuggestions = Array.from({ length: 5 }, (_, index) => ({
+      id: `compile_${index}`,
+      fingerprint: `topic_1:ownerNote:${index}`,
+      entityId: 'topic_1',
+      entityTitle: 'OpenMaic',
+      propertyKey: 'ownerNote',
+      propertyLabel: '备注',
+      propertyValue: `建议 ${index}`,
+      evidenceEntryId: 'entry_1',
+      evidenceSnippet: '证据',
+      evidenceScope: 'entity-source' as const,
+      confidence: 0.7,
+      status: 'pending' as const,
+      createdAt: now,
+      updatedAt: now,
+    }));
+
+    const report = buildWikiLintReport({
+      entities: duplicated,
+      relationships: [],
+      tasks: [],
+      compileSuggestions,
+    });
+
+    expect(report.issues.map((issue) => issue.type)).toEqual(
+      expect.arrayContaining(['duplicate-entity', 'contradictory-property', 'compile-suggestion-backlog']),
+    );
+  });
+
   it('builds a report from in-memory records for pure tests', () => {
     const report = buildWikiLintReport({
       entities: [],
@@ -83,3 +127,18 @@ describe('wiki lint', () => {
     expect(report.issues).toEqual([]);
   });
 });
+
+function createTestEntity(id: string, type: Entity['type'], title: string, now: number): Entity {
+  return {
+    id,
+    type,
+    title,
+    summary: '',
+    tags: [],
+    scenes: ['work'],
+    properties: type === 'topic' ? { isPersonal: false, autoCollectedSnippets: [] } : { status: 'active' },
+    sourceEntries: ['entry_1'],
+    createdAt: now,
+    updatedAt: now,
+  } as Entity;
+}

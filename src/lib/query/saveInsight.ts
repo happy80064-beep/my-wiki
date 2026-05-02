@@ -1,6 +1,7 @@
 import { db } from '@/lib/db';
 import { createId } from '@/lib/db/ids';
 import type { StructuredQueryResult } from '@/lib/graph';
+import { createIngestJob } from '@/lib/ingest';
 import type { Entity, Entry, Relationship } from '@/types';
 
 export type SavedQueryInsight = {
@@ -8,6 +9,7 @@ export type SavedQueryInsight = {
   entity: Entity;
   relationships: Relationship[];
   reused: boolean;
+  recompileJobId?: string;
 };
 
 export async function saveQueryInsight(question: string, result: StructuredQueryResult): Promise<SavedQueryInsight> {
@@ -19,7 +21,7 @@ export async function saveQueryInsight(question: string, result: StructuredQuery
     throw new Error('answer is required.');
   }
 
-  return db.transaction('rw', [db.entries, db.entities, db.relationships], async () => {
+  const saved = await db.transaction('rw', [db.entries, db.entities, db.relationships], async () => {
     const now = Date.now();
     const relatedEntityIds = getRelatedEntityIds(result);
     const title = buildInsightTitle(trimmedQuestion);
@@ -120,6 +122,17 @@ export async function saveQueryInsight(question: string, result: StructuredQuery
       reused: Boolean(existing),
     };
   });
+
+  try {
+    const job = await createIngestJob({
+      content: saved.entry.content,
+      source: 'text',
+      filename: `query-insight-${saved.entry.id}.md`,
+    });
+    return { ...saved, recompileJobId: job.id };
+  } catch {
+    return saved;
+  }
 }
 
 function getRelatedEntityIds(result: StructuredQueryResult) {

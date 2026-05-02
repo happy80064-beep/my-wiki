@@ -10,7 +10,10 @@ export type WikiLintIssue = {
     | 'missing-source'
     | 'broken-relationship'
     | 'pending-compile-suggestion'
-    | 'stale-task';
+    | 'stale-task'
+    | 'duplicate-entity'
+    | 'contradictory-property'
+    | 'compile-suggestion-backlog';
   severity: WikiLintSeverity;
   title: string;
   detail: string;
@@ -95,6 +98,29 @@ export function buildWikiLintReport({
         entityId: entity.id,
       });
     }
+
+    const contradiction = findContradictoryProperty(entity);
+    if (contradiction) {
+      issues.push({
+        id: `contradictory-property:${entity.id}:${contradiction.key}`,
+        type: 'contradictory-property',
+        severity: 'warning',
+        title: '属性可能矛盾',
+        detail: `「${entity.title}」的 ${contradiction.key} 同时包含正反判断：${contradiction.value}`,
+        entityId: entity.id,
+      });
+    }
+  }
+
+  for (const duplicate of findDuplicateEntities(entities)) {
+    issues.push({
+      id: `duplicate-entity:${duplicate.key}`,
+      type: 'duplicate-entity',
+      severity: 'warning',
+      title: '疑似重复实体',
+      detail: `同类型实体标题过于接近：${duplicate.titles.join('、')}。`,
+      entityId: duplicate.entityIds[0],
+    });
   }
 
   for (const task of tasks) {
@@ -110,7 +136,18 @@ export function buildWikiLintReport({
     }
   }
 
-  for (const suggestion of compileSuggestions.filter((item) => item.status === 'pending')) {
+  const pendingSuggestions = compileSuggestions.filter((item) => item.status === 'pending');
+  if (pendingSuggestions.length >= 5) {
+    issues.push({
+      id: 'compile-suggestion-backlog',
+      type: 'compile-suggestion-backlog',
+      severity: 'warning',
+      title: '待编译项堆积',
+      detail: `当前有 ${pendingSuggestions.length} 条待编译项未处理，建议进入审核页批量确认或忽略。`,
+    });
+  }
+
+  for (const suggestion of pendingSuggestions) {
     issues.push({
       id: `pending-compile-suggestion:${suggestion.id}`,
       type: 'pending-compile-suggestion',
@@ -133,6 +170,65 @@ export function buildWikiLintReport({
     summary,
     issues: issues.sort((a, b) => severityRank(b.severity) - severityRank(a.severity)),
   };
+}
+
+function findDuplicateEntities(entities: Entity[]) {
+  const groups = new Map<string, Entity[]>();
+  for (const entity of entities) {
+    const normalized = normalizeTitle(entity.title);
+    if (!normalized) continue;
+    const key = `${entity.type}:${normalized}`;
+    groups.set(key, [...(groups.get(key) ?? []), entity]);
+  }
+
+  return [...groups.entries()]
+    .filter(([, group]) => group.length > 1)
+    .map(([key, group]) => ({
+      key,
+      entityIds: group.map((entity) => entity.id),
+      titles: group.map((entity) => entity.title),
+    }));
+}
+
+function findContradictoryProperty(entity: Entity) {
+  const properties = entity.properties as Record<string, unknown>;
+  for (const [key, value] of Object.entries(properties)) {
+    const values = flattenPropertyValues(value).map((item) => item.toLowerCase());
+    if (values.length === 0) continue;
+    if (hasOpenSourceContradiction(values)) {
+      return {
+        key,
+        value: flattenPropertyValues(value).join(' / '),
+      };
+    }
+  }
+  return undefined;
+}
+
+function hasOpenSourceContradiction(values: string[]) {
+  const hasPositive = values.some(
+    (value) =>
+      /(open\s*source|opensource|开源)/i.test(value) &&
+      !/(not\s*open\s*source|closed\s*source|非开源|不开源|闭源)/i.test(value),
+  );
+  const hasNegative = values.some((value) =>
+    /(not\s*open\s*source|closed\s*source|非开源|不开源|闭源)/i.test(value),
+  );
+  return hasPositive && hasNegative;
+}
+
+function flattenPropertyValues(value: unknown): string[] {
+  if (value === undefined || value === null || value === '') return [];
+  if (Array.isArray(value)) return value.flatMap(flattenPropertyValues);
+  if (typeof value === 'object') return Object.values(value).flatMap(flattenPropertyValues);
+  return [String(value)];
+}
+
+function normalizeTitle(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/[^\u4e00-\u9fa5a-z0-9]/g, '')
+    .trim();
 }
 
 function severityRank(severity: WikiLintSeverity) {

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { createEntity, resetDatabase } from '@/lib/db';
+import { createEntity, db, resetDatabase } from '@/lib/db';
 import { saveQueryInsight } from '@/lib/query/saveInsight';
 import type { StructuredQueryResult } from '@/lib/graph';
 
@@ -32,6 +32,8 @@ describe('save query insight', () => {
       type: 'about',
     });
     expect(saved.entry.derivedEntities).toEqual(expect.arrayContaining([saved.entity.id, entity.id]));
+    expect(saved.recompileJobId).toBeTruthy();
+    expect(await db.ingestJobs.count()).toBe(1);
   });
 
   it('reuses the same query insight topic for the same question', async () => {
@@ -46,5 +48,6 @@ describe('save query insight', () => {
 
     expect(second.reused).toBe(true);
     expect(second.entity.id).toBe(first.entity.id);
+    expect(await db.ingestJobs.count()).toBe(1);
   });
 });

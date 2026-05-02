@@ -156,3 +156,33 @@ export type CompileSuggestionRecord = CompileSuggestionDraft & {
   dismissedAt?: number;
   supersededAt?: number;
 };
+
+export type IngestJobStatus = 'pending' | 'processing' | 'done' | 'failed' | 'skipped';
+
+export type IngestJob = {
+  id: ID;
+  content: string;
+  source: EntrySource;
+  filename?: string;
+  contentHash: string;
+  status: IngestJobStatus;
+  retryCount: number;
+  error?: string;
+  entryId?: ID;
+  createdAt: number;
+  updatedAt: number;
+  completedAt?: number;
+};
+
+export type IngestCacheRecord = {
+  contentHash: string;
+  entryIds: ID[];
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type GraphInsightDismissal = {
+  id: ID;
+  type: string;
+  dismissedAt: number;
+};
