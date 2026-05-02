@@ -8,7 +8,7 @@ export type QuerySource = {
 };
 
 export type QueryTraceStep = {
-  layer: 'intent' | 'agent' | 'directory' | 'entity' | 'graph' | 'evidence' | 'answer';
+  layer: 'intent' | 'agent' | 'directory' | 'entity' | 'graph' | 'evidence' | 'answer' | 'cache';
   label: string;
   detail: string;
 };

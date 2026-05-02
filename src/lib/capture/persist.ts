@@ -11,6 +11,7 @@ import {
   updateRelationship,
 } from '@/lib/db';
 import { defaultEntityProperties } from '@/lib/db/entities';
+import { refreshCompiledProfiles } from '@/lib/wikiIndex';
 import type { CaptureDraft, DraftEntity } from './draft';
 import { getDraftEntities } from './draft';
 
@@ -143,6 +144,7 @@ export async function persistCaptureDraft(
     derivedRelationships: relationships.map((relationship) => relationship.id),
     derivedTasks: tasks.map((task) => task.id),
   });
+  await refreshCompiledProfiles(entities.map((entity) => entity.id));
 
   return {
     entry: (await updateEntry(entry.id, {}))!,

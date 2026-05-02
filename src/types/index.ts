@@ -73,6 +73,7 @@ export type BaseEntity<TType extends EntityType, TProps extends EntityProperties
   tags: string[];
   scenes: Scene[];
   properties: TProps;
+  compiledProfile?: CompiledEntityProfile;
   sourceEntries: ID[];
   createdAt: number;
   updatedAt: number;
@@ -83,6 +84,15 @@ export type ProjectEntity = BaseEntity<'project', ProjectProps>;
 export type EventEntity = BaseEntity<'event', EventProps>;
 export type TopicEntity = BaseEntity<'topic', TopicProps>;
 export type Entity = PersonEntity | ProjectEntity | EventEntity | TopicEntity;
+
+export type CompiledEntityProfile = {
+  overview: string;
+  keyFacts: string[];
+  openTasks: string[];
+  relationshipSummary: string[];
+  sourceSummary: string;
+  updatedAt: number;
+};
 
 export type RelationshipType =
   | 'owner'
@@ -209,4 +219,13 @@ export type RawAsset = {
   createdAt: number;
   updatedAt: number;
   compiledAt?: number;
+};
+
+export type QueryCacheRecord = {
+  key: string;
+  question: string;
+  result: unknown;
+  createdAt: number;
+  updatedAt: number;
+  dataUpdatedAt: number;
 };

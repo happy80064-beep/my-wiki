@@ -1,5 +1,5 @@
 import { BookPlus, Check, CheckCircle2, Loader2, Search, X } from 'lucide-react';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { type StructuredQueryResult, runStructuredQuery } from '@/lib/graph';
 import { applyCompileSuggestion, dismissCompileSuggestion } from '@/lib/db';
@@ -9,6 +9,8 @@ export function QueryPage() {
   const [question, setQuestion] = useState('桌面生命体叫什么');
   const [result, setResult] = useState<StructuredQueryResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isRefining, setIsRefining] = useState(false);
+  const requestIdRef = useRef(0);
   const [saveState, setSaveState] = useState<
     | { status: 'idle' }
     | { status: 'saving' }
@@ -18,10 +20,30 @@ export function QueryPage() {
 
   async function handleAsk() {
     if (!question.trim()) return;
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
     setIsLoading(true);
+    setIsRefining(false);
     setSaveState({ status: 'idle' });
-    setResult(await runStructuredQuery(question, { composeWithLlm: true, planWithAgent: true }));
+    const currentQuestion = question.trim();
+    const fastResult = await runStructuredQuery(currentQuestion, {
+      composeWithLlm: false,
+      planWithAgent: false,
+      useCache: false,
+    });
+    if (requestIdRef.current !== requestId) return;
+    setResult(fastResult);
     setIsLoading(false);
+    setIsRefining(true);
+
+    const refinedResult = await runStructuredQuery(currentQuestion, {
+      composeWithLlm: true,
+      planWithAgent: true,
+      useCache: true,
+    });
+    if (requestIdRef.current !== requestId) return;
+    setResult(refinedResult);
+    setIsRefining(false);
   }
 
   async function handleApplyCompileSuggestion(
@@ -83,7 +105,7 @@ export function QueryPage() {
             查询
           </button>
           <p className="mt-4 text-sm leading-6 text-[#626965]">
-            当前版本按 Wiki 阅读式查询执行：先扫知识目录，再读实体文档、关系子图和来源证据，最后组织回答。
+            当前版本会先给出快速结构化答案，再后台读取 Wiki Index、实体预编译资料和来源证据优化表达。
           </p>
         </section>
 
@@ -102,6 +124,12 @@ export function QueryPage() {
               {result.llm ? (
                 <p className="text-xs text-[#626965]">
                   已由 {providerTypeLabel[result.llm.provider]} · {result.llm.model} 优化表达
+                </p>
+              ) : null}
+              {isRefining ? (
+                <p className="inline-flex items-center gap-2 text-xs text-[#626965]">
+                  <Loader2 size={13} className="animate-spin" />
+                  已先显示快速答案，正在后台读取 Query Agent 和 LLM 优化表达...
                 </p>
               ) : null}
               <div className="flex flex-wrap items-center gap-2">

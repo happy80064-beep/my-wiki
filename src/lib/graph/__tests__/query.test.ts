@@ -5,6 +5,7 @@ import {
   createEntry,
   createRelationship,
   createTask,
+  db,
   getEntity,
   resetDatabase,
 } from '@/lib/db';
@@ -145,6 +146,30 @@ describe('structured query', () => {
     expect(result.answer).toContain('桌面智能体原型');
     expect(result.answer).toContain('OpenCLI');
     expect(result.sources.some((source) => source.id === entry.id)).toBe(true);
+  });
+
+  it('uses compiled profiles as prebuilt wiki context', async () => {
+    const project = await createEntity({
+      type: 'project',
+      title: '桌面数字生命体',
+      summary: '桌面智能体原型。',
+    });
+    await db.entities.update(project.id, {
+      compiledProfile: {
+        overview: '桌面数字生命体已经预编译为桌面智能体项目综述。',
+        keyFacts: ['运行环境：Windows 桌面', '唤醒词：小林'],
+        openTasks: ['稳住语音交互主链'],
+        relationshipSummary: ['依赖：SenseVoice-Small'],
+        sourceSummary: '1 条来源。',
+        updatedAt: Date.now(),
+      },
+    });
+
+    const result = await runStructuredQuery('桌面生命体的唤醒词是什么');
+
+    expect(result.answer).toContain('预编译事实');
+    expect(result.answer).toContain('唤醒词：小林');
+    expect(result.sources.some((source) => source.id === project.id)).toBe(true);
   });
 
   it('expands wiki reads through two-hop graph relevance', async () => {
@@ -740,6 +765,37 @@ describe('structured query', () => {
     expect(result.answer).toContain('赛琳娜是桌面数字生命体项目里的角色名');
     expect(result.llm?.provider).toBe('deepseek');
     expect(result.trace?.some((step) => step.layer === 'answer' && step.label === 'LLM 表达')).toBe(true);
+  });
+
+  it('caches repeated composed query answers while knowledge is unchanged', async () => {
+    const fetchMock = vi.fn(async () => new Response(
+      JSON.stringify({
+        answer: '缓存后的优化回答。',
+        provider: 'deepseek',
+        model: 'deepseek-v4-pro',
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const entry = await createEntry({
+      content: '桌面数字生命体是一个运行在 Windows 桌面的 AI 生命体原型。',
+      source: 'text',
+    });
+    await createEntity({
+      type: 'project',
+      title: '桌面数字生命体',
+      summary: '运行在 Windows 桌面的 AI 生命体原型。',
+      sourceEntries: [entry.id],
+    });
+
+    const first = await runStructuredQuery('桌面生命体是什么', { composeWithLlm: true });
+    const second = await runStructuredQuery('桌面生命体是什么', { composeWithLlm: true });
+
+    expect(first.answer).toBe('缓存后的优化回答。');
+    expect(second.answer).toBe('缓存后的优化回答。');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(second.trace?.some((step) => step.layer === 'cache')).toBe(true);
   });
 
   it('falls back to the structured answer when LLM expression fails', async () => {

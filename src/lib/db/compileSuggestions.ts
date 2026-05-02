@@ -1,6 +1,7 @@
 import type { CompileSuggestionDraft, CompileSuggestionRecord, Entity } from '@/types';
 import { createId } from './ids';
 import { db } from './schema';
+import { refreshCompiledProfile } from '@/lib/wikiIndex';
 
 const allowedCompilePropertyKeys = new Set([
   'runtimeEnvironment',
@@ -139,6 +140,7 @@ export async function applyCompileSuggestion(id: string) {
       updatedAt: now,
     });
   });
+  await refreshCompiledProfile(entity.id);
 
   return db.compileSuggestions.get(id);
 }

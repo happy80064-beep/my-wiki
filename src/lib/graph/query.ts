@@ -30,6 +30,14 @@ import type { QueryComposePayload } from '@/lib/ai/queryComposer';
 import { planQueryWithAgent } from '@/lib/ai/queryPlannerClient';
 import type { QueryIndexEntity, QueryPlan } from '@/lib/ai/queryPlanner';
 import { db, materializeCompileSuggestions } from '@/lib/db';
+import {
+  buildWikiIndex,
+  findCachedInsight,
+  getFreshQueryCache,
+  putQueryCache,
+  queryCacheKey,
+  refreshCompiledProfile,
+} from '@/lib/wikiIndex';
 
 export type { QuerySource, StructuredQueryResult } from './types';
 
@@ -37,6 +45,7 @@ export type RunStructuredQueryOptions = {
   composeWithLlm?: boolean;
   planWithAgent?: boolean;
   maxContextChars?: number;
+  useCache?: boolean;
 };
 
 export async function runStructuredQuery(
@@ -48,41 +57,93 @@ export async function runStructuredQuery(
     return emptyResult('请输入一个问题。');
   }
 
+  if (options.useCache !== false) {
+    const cacheKey = queryCacheKey(trimmed);
+    const cached = cacheKey ? await getFreshQueryCache<StructuredQueryResult>(cacheKey) : undefined;
+    if (cached) {
+      return {
+        ...cached,
+        trace: [
+          ...(cached.trace ?? []),
+          {
+            layer: 'cache',
+            label: '查询缓存',
+            detail: '命中同一问题的已缓存答案，跳过本次重新检索和模型表达。',
+          },
+        ],
+      };
+    }
+
+    const cachedInsight = await findCachedInsight(trimmed);
+    if (cachedInsight) {
+      const insightAnswer = getEntityPropertyDisplayValue(cachedInsight, 'myView') || cachedInsight.summary;
+      const result: StructuredQueryResult = {
+        answer: insightAnswer,
+        candidates: [cachedInsight],
+        sources: [entitySource(cachedInsight)],
+        suggestions: [`查看${cachedInsight.title}`, '继续追问相关实体'],
+        trace: [
+          {
+            layer: 'cache',
+            label: '查询洞察',
+            detail: '命中此前保存到 Wiki 的查询洞察页面，直接返回预编译答案。',
+          },
+        ],
+      };
+      if (cacheKey) await putQueryCache({ key: cacheKey, question: trimmed, result });
+      return result;
+    }
+  }
+
   const intent = parseQueryIntent(trimmed);
 
   if (intent.type === 'my_pending_tasks') {
-    return answerOwnerTasks(intent.entityName ?? '我', true);
+    return cacheQueryResult(trimmed, await answerOwnerTasks(intent.entityName ?? '我', true), options);
   }
 
   if (intent.type === 'person_pending_tasks') {
-    return answerOwnerTasks(intent.entityName, false);
+    return cacheQueryResult(trimmed, await answerOwnerTasks(intent.entityName, false), options);
   }
 
   if (intent.type === 'project_tasks') {
-    return answerProjectTasks(intent.entityName, 'tasks');
+    return cacheQueryResult(trimmed, await answerProjectTasks(intent.entityName, 'tasks'), options);
   }
 
   if (intent.type === 'project_improvements') {
-    return answerProjectTasks(intent.entityName, 'improvements');
+    return cacheQueryResult(trimmed, await answerProjectTasks(intent.entityName, 'improvements'), options);
   }
 
   if (intent.type === 'project_status') {
-    return answerProjectStatus(intent.entityName);
+    return cacheQueryResult(trimmed, await answerProjectStatus(intent.entityName), options);
   }
 
   if (intent.type === 'project_related_entities') {
-    return answerProjectRelatedEntities(intent.entityName);
+    return cacheQueryResult(trimmed, await answerProjectRelatedEntities(intent.entityName), options);
   }
 
   if (intent.type === 'entity_relationship_path') {
-    return answerEntityRelationshipPath(intent.entityName, intent.targetEntityName, trimmed, options);
+    return cacheQueryResult(trimmed, await answerEntityRelationshipPath(intent.entityName, intent.targetEntityName, trimmed, options), options);
   }
 
   if (intent.type === 'entity_profile') {
-    return answerWikiRead(trimmed, intent.entityName, options);
+    return cacheQueryResult(trimmed, await answerWikiRead(trimmed, intent.entityName, options), options);
   }
 
-  return answerWikiRead(trimmed, intent.entityName, options);
+  return cacheQueryResult(trimmed, await answerWikiRead(trimmed, intent.entityName, options), options);
+}
+
+async function cacheQueryResult(
+  question: string,
+  result: StructuredQueryResult,
+  options: RunStructuredQueryOptions,
+) {
+  if (options.useCache === false) return result;
+
+  const key = queryCacheKey(question);
+  if (!key) return result;
+
+  await putQueryCache({ key, question, result });
+  return result;
 }
 
 async function answerOwnerTasks(personName: string | undefined, isSelf: boolean): Promise<StructuredQueryResult> {
@@ -532,28 +593,19 @@ const DECAY_HOP2 = 0.25;
 const DEFAULT_QUERY_CONTEXT_CHARS = 24000;
 
 async function buildEntityIndex(): Promise<QueryIndexEntity[]> {
-  const [entities, relationships] = await Promise.all([db.entities.toArray(), db.relationships.toArray()]);
-  const relationshipCountByEntity = new Map<string, number>();
-  for (const relationship of relationships) {
-    relationshipCountByEntity.set(relationship.from, (relationshipCountByEntity.get(relationship.from) ?? 0) + 1);
-    relationshipCountByEntity.set(relationship.to, (relationshipCountByEntity.get(relationship.to) ?? 0) + 1);
-  }
-
-  return entities
-    .sort((a, b) => b.updatedAt - a.updatedAt)
-    .slice(0, 120)
-    .map((entity) => ({
-      id: entity.id,
-      type: entity.type,
-      title: entity.title,
-      aliases: buildEntityAliases(entity),
-      summary: entity.summary,
-      tags: entity.tags,
-      scenes: entity.scenes,
-      sourceCount: entity.sourceEntries.length,
-      relationshipCount: relationshipCountByEntity.get(entity.id) ?? 0,
-      updatedAt: entity.updatedAt,
-    }));
+  const index = await buildWikiIndex(120);
+  return index.map((item) => ({
+    id: item.entityId,
+    type: item.type,
+    title: item.title,
+    aliases: item.aliases,
+    summary: item.shortSummary,
+    tags: [],
+    scenes: [],
+    sourceCount: item.sourceCount,
+    relationshipCount: item.relationshipCount,
+    updatedAt: item.updatedAt,
+  }));
 }
 
 async function resolveQueryPlan(
@@ -775,6 +827,7 @@ async function readEntityDocument(
   plan: QueryPlan,
   retrievalEntities: Entity[] = [],
 ): Promise<EntityDocument> {
+  const compiledEntity = entity.compiledProfile ? entity : (await refreshCompiledProfile(entity.id)) ?? entity;
   const agentSelectedEntities = await getPlanSelectedEntities(plan, entity.id);
   const [tasks, subgraph] = await Promise.all([
     db.tasks
@@ -798,7 +851,7 @@ async function readEntityDocument(
     ...graphRelatedEntities,
   ]).slice(0, 12);
   const entryIds = [
-    ...entity.sourceEntries,
+    ...compiledEntity.sourceEntries,
     ...agentSelectedEntities.flatMap((selectedEntity) => selectedEntity.sourceEntries),
     ...normalizedRetrievalEntities.flatMap((retrievalEntity) => retrievalEntity.sourceEntries),
     ...tasks.map((task) => task.source),
@@ -808,7 +861,7 @@ async function readEntityDocument(
   const evidenceHits = await findRawEvidenceHits(question, entity, entries, plan);
 
   return {
-    entity,
+    entity: compiledEntity,
     tasks,
     relationships,
     relatedEntities,
@@ -928,6 +981,7 @@ function findEvidenceHitsInEntries(
 function formatWikiReadAnswer(question: string, document: EntityDocument) {
   const { entity, tasks, relationships, relatedEntities, entries, evidenceHits } = document;
   const lines: string[] = [];
+  const profile = entity.compiledProfile;
 
   if (isNameQuestion(question)) {
     lines.push(`它在知识库里的正式名称是「${entity.title}」。`);
@@ -948,6 +1002,18 @@ function formatWikiReadAnswer(question: string, document: EntityDocument) {
 
   if (entity.summary) {
     lines.push(`摘要：${entity.summary}`);
+  }
+
+  if (profile) {
+    if (profile.keyFacts.length > 0) {
+      lines.push(`预编译事实：\n${profile.keyFacts.slice(0, 6).map((fact, index) => `${index + 1}. ${fact}`).join('\n')}`);
+    }
+    if (profile.openTasks.length > 0 && !/(任务|待办|优化|推进|下一阶段)/.test(question)) {
+      lines.push(`预编译待办：\n${profile.openTasks.slice(0, 4).map((task, index) => `${index + 1}. ${task}`).join('\n')}`);
+    }
+    if (profile.relationshipSummary.length > 0 && relatedEntities.length === 0) {
+      lines.push(`预编译关系：${profile.relationshipSummary.slice(0, 6).join('；')}`);
+    }
   }
 
   const status = getEntityStatus(entity);
@@ -1066,7 +1132,9 @@ function buildQueryComposePayload(
       id: entity.id,
       type: entity.type,
       title: entity.title,
-      summary: entity.summary,
+      summary: entity.compiledProfile?.overview
+        ? `${entity.compiledProfile.overview}\n${entity.compiledProfile.keyFacts.slice(0, 5).join('\n')}`
+        : entity.summary,
     })),
     tasks: document.tasks.slice(0, 8).map((task) => ({
       id: task.id,
@@ -1594,6 +1662,11 @@ function scoreEntityForTerm(entity: Entity, term: string) {
 
   const title = normalize(entity.title);
   const summary = normalize(entity.summary);
+  const compiledProfile = normalize([
+    entity.compiledProfile?.overview,
+    ...(entity.compiledProfile?.keyFacts ?? []),
+    ...(entity.compiledProfile?.relationshipSummary ?? []),
+  ].filter(Boolean).join(' '));
   const tags = normalize(entity.tags.join(''));
   const scenes = normalize(entity.scenes.join(''));
 
@@ -1602,6 +1675,7 @@ function scoreEntityForTerm(entity: Entity, term: string) {
   if (isSubsequence(normalizedTerm, title)) return 72;
   if (isSubsequence(title, normalizedTerm)) return 58;
   if (summary.includes(normalizedTerm) || tags.includes(normalizedTerm) || scenes.includes(normalizedTerm)) return 42;
+  if (compiledProfile.includes(normalizedTerm)) return 48;
 
   const overlap = overlapRatio(normalizedTerm, title);
   if (overlap >= 0.75) return 56;

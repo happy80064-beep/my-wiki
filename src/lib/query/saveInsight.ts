@@ -2,6 +2,7 @@ import { db } from '@/lib/db';
 import { createId } from '@/lib/db/ids';
 import type { StructuredQueryResult } from '@/lib/graph';
 import { createIngestJob } from '@/lib/ingest';
+import { refreshCompiledProfiles } from '@/lib/wikiIndex';
 import type { Entity, Entry, Relationship } from '@/types';
 
 export type SavedQueryInsight = {
@@ -122,6 +123,7 @@ export async function saveQueryInsight(question: string, result: StructuredQuery
       reused: Boolean(existing),
     };
   });
+  await refreshCompiledProfiles([saved.entity.id, ...getRelatedEntityIds(result)]);
 
   try {
     const job = await createIngestJob({

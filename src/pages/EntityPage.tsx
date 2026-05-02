@@ -5,6 +5,7 @@ import { Link, useParams } from 'react-router';
 import { RelationshipGraph } from '@/components/wiki/RelationshipGraph';
 import { getSubgraph, relationshipTypeLabel } from '@/lib/graph';
 import { deleteRelationship, deleteTask, updateEntity, updateRelationship, updateTask, db } from '@/lib/db';
+import { refreshCompiledProfile, refreshCompiledProfiles } from '@/lib/wikiIndex';
 import type {
   Entity,
   EntityType,
@@ -214,6 +215,7 @@ function ProjectPanel({ entity, tasks, relatedEntities }: { entity: Entity; task
           status,
         },
       });
+      await refreshCompiledProfile(entity.id);
       setSaveState('saved');
     } catch {
       setSaveState('error');
@@ -277,6 +279,7 @@ function TopicPanel({ entity }: { entity: Entity }) {
             : props.viewHistory,
         },
       });
+      await refreshCompiledProfile(entity.id);
       setSaveState('saved');
     } catch {
       setSaveState('error');
@@ -376,6 +379,7 @@ function RelationshipEditor({ relationship, entities }: { relationship: Relation
     setSaveState('saving');
     try {
       await updateRelationship(relationship.id, { from, to, type });
+      await refreshCompiledProfiles([from, to]);
       setSaveState('saved');
     } catch {
       setSaveState('error');
@@ -487,6 +491,7 @@ function TaskEditor({
         status,
         completedAt: status === 'done' ? task.completedAt ?? Date.now() : undefined,
       });
+      await refreshCompiledProfiles([owner, ...new Set(linkedTo ? [linkedTo] : [])]);
       setSaveState('saved');
     } catch {
       setSaveState('error');
@@ -599,6 +604,7 @@ function EntityEditor({ entity }: { entity: Entity }) {
           .map((tag) => tag.trim())
           .filter(Boolean),
       });
+      await refreshCompiledProfile(entity.id);
       setSaveState('saved');
     } catch {
       setSaveState('error');
