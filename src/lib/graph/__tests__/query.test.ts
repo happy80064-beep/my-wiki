@@ -167,9 +167,35 @@ describe('structured query', () => {
 
     const result = await runStructuredQuery('桌面生命体的唤醒词是什么');
 
-    expect(result.answer).toContain('预编译事实');
+    expect(result.answer).toContain('关键信息');
     expect(result.answer).toContain('唤醒词：小林');
     expect(result.sources.some((source) => source.id === project.id)).toBe(true);
+  });
+
+  it('keeps fast wiki-read answers readable instead of dumping raw OCR evidence', async () => {
+    const noisyEntry = await createEntry({
+      content: [
+        '# 导入文件：image.png 来源格式：图片解析',
+        '中国 长 寿 诊 疗 机 构 六 型 谱 包 括 老 年 医 学 /CGA 延 伸 型、MDT 抗 衰 专 病 门 诊 型、功 能 医 学 综 合 管 理 型。',
+        '>>> 数据来源：数字生命卡兹克公众号文章数据统计',
+        '短视频爆款元素汇总：成本元素、金钱相关、情绪强度。',
+      ].join('\n'),
+      source: 'image',
+    });
+    await createEntity({
+      type: 'topic',
+      title: '中国长寿诊疗机构六型谱',
+      summary: '中国长寿诊疗机构主要包括老年医学/CGA延伸型、MDT抗衰专病门诊型、功能医学综合管理型等六种类型。',
+      sourceEntries: [noisyEntry.id],
+    });
+
+    const result = await runStructuredQuery('中国长寿行业都有哪些类型的机构？');
+
+    expect(result.answer).toContain('中国长寿诊疗机构主要包括');
+    expect(result.answer).toContain('原始材料命中');
+    expect(result.answer).not.toContain('短视频爆款元素');
+    expect(result.answer).not.toContain('>>>');
+    expect(result.sources.some((source) => source.id === noisyEntry.id)).toBe(true);
   });
 
   it('expands wiki reads through two-hop graph relevance', async () => {
@@ -390,6 +416,38 @@ describe('structured query', () => {
     expect(result.answer).not.toContain('未被完整披露');
     expect(result.llm).toBeUndefined();
     expect(result.trace?.some((step) => step.detail.includes('结构化属性结论冲突'))).toBe(true);
+  });
+
+  it('keeps the fast answer when the LLM expression drifts from its factual skeleton', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(
+        JSON.stringify({
+          answer: '桌面数字生命体的唤醒词是“小李”，后续应该继续优化。',
+          provider: 'minimax',
+          model: 'MiniMax-M2.7',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )),
+    );
+
+    const entry = await createEntry({
+      content: '语音输入部分持续优化，主唤醒词是“小林”，终止词使用 miki / mi ki。',
+      source: 'text',
+    });
+    await createEntity({
+      type: 'project',
+      title: '桌面数字生命体',
+      summary: '一个本地桌面智能体原型。',
+      sourceEntries: [entry.id],
+    });
+
+    const result = await runStructuredQuery('桌面生命体的唤醒词是什么', { composeWithLlm: true });
+
+    expect(result.answer).toContain('唤醒词：小林');
+    expect(result.answer).not.toContain('小李');
+    expect(result.llm).toBeUndefined();
+    expect(result.trace?.some((step) => step.detail.includes('偏离快速答案骨架'))).toBe(true);
   });
 
   it('extracts property values from the full source entry when the matched snippet is too narrow', async () => {
@@ -770,7 +828,7 @@ describe('structured query', () => {
   it('caches repeated composed query answers while knowledge is unchanged', async () => {
     const fetchMock = vi.fn(async () => new Response(
       JSON.stringify({
-        answer: '缓存后的优化回答。',
+        answer: '桌面数字生命体是运行在 Windows 桌面的 AI 生命体原型，这是缓存后的优化回答。',
         provider: 'deepseek',
         model: 'deepseek-v4-pro',
       }),
@@ -792,8 +850,8 @@ describe('structured query', () => {
     const first = await runStructuredQuery('桌面生命体是什么', { composeWithLlm: true });
     const second = await runStructuredQuery('桌面生命体是什么', { composeWithLlm: true });
 
-    expect(first.answer).toBe('缓存后的优化回答。');
-    expect(second.answer).toBe('缓存后的优化回答。');
+    expect(first.answer).toBe('桌面数字生命体是运行在 Windows 桌面的 AI 生命体原型，这是缓存后的优化回答。');
+    expect(second.answer).toBe('桌面数字生命体是运行在 Windows 桌面的 AI 生命体原型，这是缓存后的优化回答。');
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(second.trace?.some((step) => step.layer === 'cache')).toBe(true);
   });

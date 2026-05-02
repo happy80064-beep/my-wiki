@@ -17,6 +17,7 @@ export function QueryPage() {
     | { status: 'saved'; message: string; href: string }
     | { status: 'error'; message: string }
   >({ status: 'idle' });
+  const answerPhase = result?.llm ? 'optimized' : isRefining ? 'refining' : result ? 'fast' : 'idle';
 
   async function handleAsk() {
     if (!question.trim()) return;
@@ -105,13 +106,16 @@ export function QueryPage() {
             查询
           </button>
           <p className="mt-4 text-sm leading-6 text-[#626965]">
-            当前版本会先给出快速结构化答案，再后台读取 Wiki Index、实体预编译资料和来源证据优化表达。
+            当前版本会先给出快速可读答案，再后台读取 Wiki Index、实体预编译资料和来源证据优化表达。
           </p>
         </section>
 
         <section className="rounded-[12px] border border-[#e5e5e4] bg-white p-5">
           <p className="text-xs font-medium text-[#155eef]">Answer</p>
-          <h2 className="mt-2 text-xl font-semibold text-[#1f2937]">回答</h2>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <h2 className="text-xl font-semibold text-[#1f2937]">回答</h2>
+            {answerPhase !== 'idle' ? <AnswerPhaseBadge phase={answerPhase} /> : null}
+          </div>
           {!result ? (
             <div className="mt-5 rounded-[12px] border border-dashed border-[#d9d9d6] bg-[#fbfbfa] p-6 text-sm leading-6 text-[#626965]">
               输入问题后，这里会展示结构化过滤后的答案和来源。
@@ -127,7 +131,7 @@ export function QueryPage() {
                 </p>
               ) : null}
               {isRefining ? (
-                <p className="inline-flex items-center gap-2 text-xs text-[#626965]">
+                <p className="inline-flex items-center gap-2 rounded-full border border-[#d9e5ff] bg-[#f4f8ff] px-3 py-1.5 text-xs text-[#155eef]">
                   <Loader2 size={13} className="animate-spin" />
                   已先显示快速答案，正在后台读取 Query Agent 和 LLM 优化表达...
                 </p>
@@ -285,6 +289,31 @@ export function QueryPage() {
         </section>
       </div>
     </section>
+  );
+}
+
+function AnswerPhaseBadge({ phase }: { phase: 'fast' | 'refining' | 'optimized' }) {
+  const config = {
+    fast: {
+      label: '快速答案',
+      className: 'border-[#d9d9d6] bg-[#fbfbfa] text-[#626965]',
+    },
+    refining: {
+      label: '优化中',
+      className: 'border-[#d9e5ff] bg-[#f4f8ff] text-[#155eef]',
+    },
+    optimized: {
+      label: '已优化',
+      className: 'border-[#cce8d8] bg-[#f3faf5] text-[#276749]',
+    },
+  }[phase];
+
+  return (
+    <span className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs font-medium ${config.className}`}>
+      {phase === 'refining' ? <Loader2 size={12} className="animate-spin" /> : null}
+      {phase === 'optimized' ? <CheckCircle2 size={12} /> : null}
+      {config.label}
+    </span>
   );
 }
 

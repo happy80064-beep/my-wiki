@@ -993,26 +993,37 @@ function formatWikiReadAnswer(question: string, document: EntityDocument) {
       lines.push(`摘要：${entity.summary}`);
     }
     if (evidenceHits.length > 0) {
-      lines.push(formatEvidenceHitLines(evidenceHits));
+      lines.push(formatEvidenceHitLines(evidenceHits, { includeSnippet: true }));
     }
     return lines.join('\n');
   }
 
-  lines.push(`${entity.title}（${entityTypeLabel(entity.type)}）`);
+  const queriedPropertyKey = normalizePropertyKey(inferAttribute(question));
+  const compiledPropertyValue = queriedPropertyKey ? getEntityPropertyDisplayValue(entity, queriedPropertyKey) : undefined;
+  const evidencePropertyValue = queriedPropertyKey ? extractEvidencePropertyValue(queriedPropertyKey, evidenceHits) : undefined;
+  const propertyValue = compiledPropertyValue ?? evidencePropertyValue;
 
-  if (entity.summary) {
-    lines.push(`摘要：${entity.summary}`);
+  if (queriedPropertyKey && propertyValue) {
+    lines.push(`${entity.title}的${propertyLabel(queriedPropertyKey)}是${propertyValue}。`);
+  } else {
+    lines.push(`${entity.title}（${entityTypeLabel(entity.type)}）`);
+  }
+
+  const overview = profile?.overview && profile.overview !== `${entity.title} 相关记录。` ? profile.overview : entity.summary;
+  if (overview) {
+    lines.push(`摘要：${overview}`);
   }
 
   if (profile) {
-    if (profile.keyFacts.length > 0) {
-      lines.push(`预编译事实：\n${profile.keyFacts.slice(0, 6).map((fact, index) => `${index + 1}. ${fact}`).join('\n')}`);
+    const keyFacts = rankReadableFacts(profile.keyFacts, question, queriedPropertyKey).slice(0, 6);
+    if (keyFacts.length > 0) {
+      lines.push(`关键信息：\n${keyFacts.map((fact, index) => `${index + 1}. ${fact}`).join('\n')}`);
     }
-    if (profile.openTasks.length > 0 && !/(任务|待办|优化|推进|下一阶段)/.test(question)) {
-      lines.push(`预编译待办：\n${profile.openTasks.slice(0, 4).map((task, index) => `${index + 1}. ${task}`).join('\n')}`);
+    if (profile.openTasks.length > 0 && /(任务|待办|优化|推进|下一阶段|后续|优先级)/.test(question)) {
+      lines.push(`待推进事项：\n${profile.openTasks.slice(0, 5).map((task, index) => `${index + 1}. ${task}`).join('\n')}`);
     }
-    if (profile.relationshipSummary.length > 0 && relatedEntities.length === 0) {
-      lines.push(`预编译关系：${profile.relationshipSummary.slice(0, 6).join('；')}`);
+    if (profile.relationshipSummary.length > 0 && relatedEntities.length === 0 && isRelationshipOrToolQuestion(question)) {
+      lines.push(`关系摘要：${profile.relationshipSummary.slice(0, 6).join('；')}`);
     }
   }
 
@@ -1021,37 +1032,30 @@ function formatWikiReadAnswer(question: string, document: EntityDocument) {
     lines.push(`当前状态：${status}`);
   }
 
-  const queriedPropertyKey = normalizePropertyKey(inferAttribute(question));
-  const compiledPropertyValue = queriedPropertyKey ? getEntityPropertyDisplayValue(entity, queriedPropertyKey) : undefined;
-  if (queriedPropertyKey && compiledPropertyValue) {
-    lines.push(`${propertyLabel(queriedPropertyKey)}：${compiledPropertyValue}`);
-  } else if (queriedPropertyKey) {
-    const evidencePropertyValue = extractEvidencePropertyValue(queriedPropertyKey, evidenceHits);
-    if (evidencePropertyValue) {
-      lines.push(`${propertyLabel(queriedPropertyKey)}：${evidencePropertyValue}（来源材料命中，待编译回 Wiki）`);
-    }
+  if (queriedPropertyKey && propertyValue) {
+    const sourceHint = compiledPropertyValue ? '已写入 Wiki' : '来源材料命中，待编译回 Wiki';
+    lines.push(`${propertyLabel(queriedPropertyKey)}：${propertyValue}（${sourceHint}）`);
   }
 
   const openTasks = tasks.filter((task) => task.status !== 'done' && task.status !== 'cancelled');
-  if (openTasks.length > 0) {
+  if (openTasks.length > 0 && /(任务|待办|优化|推进|下一阶段|后续|优先级)/.test(question)) {
     lines.push(`未完成任务：\n${openTasks.slice(0, 5).map((task, index) => `${index + 1}. ${task.description}`).join('\n')}`);
   }
 
-  if (relatedEntities.length > 0) {
-    lines.push(
-      `直接关联：${relatedEntities
-        .slice(0, 8)
-        .map((related) => related.title)
-        .join('、')}`,
-    );
+  const relatedTitles = readableRelatedTitles(relatedEntities);
+  if (relatedTitles.length > 0) {
+    lines.push(`${isRelationshipOrToolQuestion(question) ? '直接关联' : '相关实体'}：${relatedTitles.slice(0, 8).join('、')}`);
   }
 
-  if (relationships.length > 0) {
+  if (relationships.length > 0 && isRelationshipOrToolQuestion(question)) {
     lines.push(`关系证据：已读取 ${relationships.length} 条一跳关系。`);
   }
 
   if (evidenceHits.length > 0) {
-    lines.push(formatEvidenceHitLines(evidenceHits));
+    lines.push(formatEvidenceHitLines(evidenceHits, {
+      includeSnippet: Boolean(queriedPropertyKey && propertyValue),
+      maxSnippets: 1,
+    }));
   }
 
   if (entries.length > 0) {
@@ -1475,6 +1479,19 @@ async function composeResultIfRequested(
         ],
       };
     }
+    if (composedDriftsFromFastAnswer(payload.draftAnswer, composed.answer)) {
+      return {
+        ...result,
+        trace: [
+          ...(result.trace ?? []),
+          {
+            layer: 'answer',
+            label: 'LLM 表达',
+            detail: '模型表达偏离快速答案骨架，已保留快速答案，避免两段答案事实不一致。',
+          },
+        ],
+      };
+    }
     return {
       ...result,
       answer: composed.answer.trim() || result.answer,
@@ -1513,6 +1530,46 @@ function composedContradictsConcreteDraft(draftAnswer: string, composedAnswer: s
     /(没有|未|暂未|尚未).{0,18}(找到|记录|明确|确认|披露|解析|提取|编译)|无法确认|不能确认|不确定/.test(composedAnswer) ||
     /未被完整披露|未完整披露|未能解析|未解析出来|没有完整披露/.test(composedAnswer)
   );
+}
+
+function composedDriftsFromFastAnswer(draftAnswer: string, composedAnswer: string) {
+  const anchors = extractFastAnswerAnchors(draftAnswer);
+  if (anchors.length === 0) return false;
+
+  const normalizedAnswer = normalize(composedAnswer);
+  const missingRequired = anchors.filter((anchor) => anchor.required && !normalizedAnswer.includes(anchor.normalized));
+  if (missingRequired.length > 0) return true;
+
+  const flexibleAnchors = anchors.filter((anchor) => !anchor.required);
+  if (flexibleAnchors.length < 2) return false;
+  const matched = flexibleAnchors.filter((anchor) => normalizedAnswer.includes(anchor.normalized)).length;
+  return matched / flexibleAnchors.length < 0.45;
+}
+
+function extractFastAnswerAnchors(answer: string) {
+  const anchors: Array<{ text: string; normalized: string; required: boolean }> = [];
+  const add = (text: string, required = false) => {
+    const cleaned = text.replace(/[（）()，。；;：:、]/g, ' ').replace(/\s+/g, ' ').trim();
+    const normalized = normalize(cleaned);
+    if (normalized.length < 2) return;
+    if (anchors.some((anchor) => anchor.normalized === normalized)) return;
+    anchors.push({ text: cleaned, normalized, required });
+  };
+
+  for (const match of answer.matchAll(/的[^。\n]{1,12}是([^。\n]+)。/g)) {
+    add(match[1] ?? '', true);
+  }
+  for (const match of answer.matchAll(/(?:运行环境|唤醒词|终止词|本地路径|相关模型|负责人说明|来源\/基于项目|开源状态)：([^（。\n]+)/g)) {
+    add(match[1] ?? '', true);
+  }
+  for (const match of answer.matchAll(/^\d+\.\s*([^。\n]+)/gm)) {
+    add(match[1] ?? '', false);
+  }
+  for (const match of answer.matchAll(/「([^」]{2,40})」|“([^”]{2,40})”|([A-Za-z][A-Za-z0-9._/-]{2,})/g)) {
+    add(match[1] ?? match[2] ?? match[3] ?? '', false);
+  }
+
+  return anchors.slice(0, 16);
 }
 
 function hasConcretePropertyLine(answer: string) {
@@ -1739,13 +1796,64 @@ function isWeakQueryTerm(term: string) {
   ]).has(term);
 }
 
-function formatEvidenceHitLines(hits: EvidenceHit[]) {
-  const lines = hits.slice(0, 3).map((hit, index) => {
+function rankReadableFacts(facts: string[], question: string, propertyKey: string | undefined) {
+  const terms = uniqueStrings([
+    propertyKey ? propertyLabel(propertyKey) : '',
+    ...buildAttributeTerms(question),
+    ...cjkBigrams(question),
+  ].filter(Boolean));
+
+  return [...facts].sort((a, b) => factScore(b, terms) - factScore(a, terms));
+}
+
+function factScore(fact: string, terms: string[]) {
+  const normalizedFact = normalize(fact);
+  return terms.reduce((score, term) => score + (normalizedFact.includes(normalize(term)) ? 1 : 0), 0);
+}
+
+function isRelationshipOrToolQuestion(question: string) {
+  return /(关系|关联|相关|依赖|基于|来源|源自|工具|模型|组件|用了哪些|使用哪些|和.+什么关系)/.test(question);
+}
+
+function readableRelatedTitles(entities: Entity[]) {
+  return uniqueStrings(
+    entities
+      .map((entity) => entity.title.trim())
+      .filter((title) => title.length > 0 && title !== 'undefined' && title !== 'null'),
+  );
+}
+
+function formatEvidenceHitLines(
+  hits: EvidenceHit[],
+  options: { includeSnippet?: boolean; maxSnippets?: number } = {},
+) {
+  const scopeLabels = Array.from(
+    new Set(hits.map((hit) => (hit.scope === 'global-fallback' ? '全库原始材料兜底' : '关联原始材料'))),
+  );
+  const matchedTerms = uniqueStrings(hits.flatMap((hit) => hit.matchedTerms)).slice(0, 6);
+  const summary = `原始材料命中：已找到 ${hits.length} 条证据（${scopeLabels.join('、')}），命中词：${matchedTerms.join('、') || '未标注'}。`;
+
+  if (!options.includeSnippet) {
+    return `${summary}\n这些原文已放在来源区，避免把未编译的长文本直接混入快速答案。`;
+  }
+
+  const lines = hits.slice(0, options.maxSnippets ?? 2).map((hit, index) => {
     const scopeLabel = hit.scope === 'global-fallback' ? '全库原始材料兜底' : '关联原始材料';
-    return `${index + 1}. ${hit.snippet}（${scopeLabel}，命中：${hit.matchedTerms.slice(0, 3).join('、')}）`;
+    return `${index + 1}. ${cleanEvidenceSnippet(hit.snippet)}（${scopeLabel}）`;
   });
 
-  return `原始材料命中：\n${lines.join('\n')}\n\n建议：这些信息应后续编译回实体档案，下次就能直接从 Wiki 回答。`;
+  return `${summary}\n证据摘录：\n${lines.join('\n')}\n建议：这些信息应后续编译回实体档案，下次就能直接从 Wiki 回答。`;
+}
+
+function cleanEvidenceSnippet(value: string) {
+  return snippet(
+    value
+      .replace(/[`>#*_]+/g, ' ')
+      .replace(/([一-龥])\s+(?=[一-龥])/g, '$1')
+      .replace(/\s+/g, ' ')
+      .trim(),
+    120,
+  );
 }
 
 function findFirstTermIndex(text: string, terms: string[]) {
