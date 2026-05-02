@@ -48,6 +48,8 @@ const relationshipTypes: RelationshipType[] = [
 
 const taskStatuses: TaskStatus[] = ['pending', 'done', 'overdue', 'cancelled'];
 
+type SaveState = 'idle' | 'saving' | 'saved' | 'error';
+
 export function EntityPage() {
   const { id } = useParams();
   const [graphDepth, setGraphDepth] = useState(1);
@@ -195,30 +197,40 @@ function PersonPanel({ entity, tasks }: { entity: Entity; tasks: Task[] }) {
 function ProjectPanel({ entity, tasks, relatedEntities }: { entity: Entity; tasks: Task[]; relatedEntities: Entity[] }) {
   const props = entity.properties as ProjectProps;
   const [status, setStatus] = useState(props.status);
-  const [saved, setSaved] = useState(false);
+  const [saveState, setSaveState] = useState<SaveState>('idle');
   const openTasks = tasks.filter((task) => task.status !== 'done' && task.status !== 'cancelled');
 
   useEffect(() => {
     setStatus(props.status);
-    setSaved(false);
-  }, [props.status]);
+    setSaveState('idle');
+  }, [entity.id]);
 
   async function handleSave() {
-    await updateEntity(entity.id, {
-      properties: {
-        ...props,
-        status,
-      },
-    });
-    setSaved(true);
+    setSaveState('saving');
+    try {
+      await updateEntity(entity.id, {
+        properties: {
+          ...props,
+          status,
+        },
+      });
+      setSaveState('saved');
+    } catch {
+      setSaveState('error');
+    }
   }
 
   return (
     <section className="mt-5 rounded-[12px] border border-[#e5e5e4] bg-white p-4">
       <div className="flex items-center justify-between gap-3">
         <h3 className="text-sm font-semibold text-[#1f2937]">事项状态</h3>
-        <button type="button" onClick={handleSave} className="rounded-full bg-[#155eef] px-3 py-1.5 text-xs text-white">
-          保存状态
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={saveState === 'saving'}
+          className="rounded-full bg-[#155eef] px-3 py-1.5 text-xs text-white disabled:bg-[#a8b7d8]"
+        >
+          {saveState === 'saving' ? '保存中...' : '保存状态'}
         </button>
       </div>
       <div className="mt-3 grid gap-3 md:grid-cols-4">
@@ -238,7 +250,7 @@ function ProjectPanel({ entity, tasks, relatedEntities }: { entity: Entity; task
         <InfoTile label="关联实体" value={`${relatedEntities.length}`} />
         <InfoTile label="来源记录" value={`${entity.sourceEntries.length}`} />
       </div>
-      {saved ? <p className="mt-2 text-xs text-[#276749]">事项状态已保存。</p> : null}
+      <SaveFeedback state={saveState} savedText="事项状态已保存。" />
     </section>
   );
 }
@@ -246,37 +258,50 @@ function ProjectPanel({ entity, tasks, relatedEntities }: { entity: Entity; task
 function TopicPanel({ entity }: { entity: Entity }) {
   const props = entity.properties as TopicProps;
   const [myView, setMyView] = useState(props.myView ?? '');
-  const [saved, setSaved] = useState(false);
+  const [saveState, setSaveState] = useState<SaveState>('idle');
 
   useEffect(() => {
     setMyView(props.myView ?? '');
-    setSaved(false);
-  }, [props.myView]);
+    setSaveState('idle');
+  }, [entity.id]);
 
   async function handleSave() {
-    await updateEntity(entity.id, {
-      properties: {
-        ...props,
-        myView,
-        viewHistory: props.myView
-          ? [...(props.viewHistory ?? []), { view: props.myView, updatedAt: Date.now() }]
-          : props.viewHistory,
-      },
-    });
-    setSaved(true);
+    setSaveState('saving');
+    try {
+      await updateEntity(entity.id, {
+        properties: {
+          ...props,
+          myView,
+          viewHistory: props.myView
+            ? [...(props.viewHistory ?? []), { view: props.myView, updatedAt: Date.now() }]
+            : props.viewHistory,
+        },
+      });
+      setSaveState('saved');
+    } catch {
+      setSaveState('error');
+    }
   }
 
   return (
     <section className="mt-5 rounded-[12px] border border-[#e5e5e4] bg-white p-4">
       <div className="flex items-center justify-between gap-3">
         <h3 className="text-sm font-semibold text-[#1f2937]">主题编译</h3>
-        <button type="button" onClick={handleSave} className="rounded-full bg-[#155eef] px-3 py-1.5 text-xs text-white">
-          保存观点
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={saveState === 'saving'}
+          className="rounded-full bg-[#155eef] px-3 py-1.5 text-xs text-white disabled:bg-[#a8b7d8]"
+        >
+          {saveState === 'saving' ? '保存中...' : '保存观点'}
         </button>
       </div>
       <textarea
         value={myView}
-        onChange={(event) => setMyView(event.target.value)}
+        onChange={(event) => {
+          setMyView(event.target.value);
+          setSaveState('idle');
+        }}
         className="mt-3 min-h-24 w-full resize-y rounded-[10px] border border-[#d9d9d6] px-3 py-2 text-sm leading-6 outline-none focus:border-[#155eef]"
         placeholder="我的核心观点"
       />
@@ -287,7 +312,7 @@ function TopicPanel({ entity }: { entity: Entity }) {
           </Link>
         ))}
       </div>
-      {saved ? <p className="mt-2 text-xs text-[#276749]">主题观点已保存。</p> : null}
+      <SaveFeedback state={saveState} savedText="主题观点已保存。" />
     </section>
   );
 }
@@ -338,18 +363,23 @@ function RelationshipEditor({ relationship, entities }: { relationship: Relation
   const [from, setFrom] = useState(relationship.from);
   const [to, setTo] = useState(relationship.to);
   const [type, setType] = useState<RelationshipType>(relationship.type);
-  const [saved, setSaved] = useState(false);
+  const [saveState, setSaveState] = useState<SaveState>('idle');
 
   useEffect(() => {
     setFrom(relationship.from);
     setTo(relationship.to);
     setType(relationship.type);
-    setSaved(false);
-  }, [relationship]);
+    setSaveState('idle');
+  }, [relationship.id]);
 
   async function handleSave() {
-    await updateRelationship(relationship.id, { from, to, type });
-    setSaved(true);
+    setSaveState('saving');
+    try {
+      await updateRelationship(relationship.id, { from, to, type });
+      setSaveState('saved');
+    } catch {
+      setSaveState('error');
+    }
   }
 
   async function handleDelete() {
@@ -360,7 +390,14 @@ function RelationshipEditor({ relationship, entities }: { relationship: Relation
     <div className="px-4 py-3 text-sm">
       <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto_auto]">
         <Field label="起点">
-          <Select value={from} options={entities.map((entity) => [entity.id, entity.title])} onChange={setFrom} />
+          <Select
+            value={from}
+            options={entities.map((entity) => [entity.id, entity.title])}
+            onChange={(value) => {
+              setFrom(value);
+              setSaveState('idle');
+            }}
+          />
         </Field>
         <Field label="关系">
           <Select
@@ -369,11 +406,21 @@ function RelationshipEditor({ relationship, entities }: { relationship: Relation
               relationshipType,
               relationshipTypeLabel(relationshipType),
             ])}
-            onChange={(value) => setType(value as RelationshipType)}
+            onChange={(value) => {
+              setType(value as RelationshipType);
+              setSaveState('idle');
+            }}
           />
         </Field>
         <Field label="终点">
-          <Select value={to} options={entities.map((entity) => [entity.id, entity.title])} onChange={setTo} />
+          <Select
+            value={to}
+            options={entities.map((entity) => [entity.id, entity.title])}
+            onChange={(value) => {
+              setTo(value);
+              setSaveState('idle');
+            }}
+          />
         </Field>
         <div className="flex items-end justify-end">
           <IconButton label="保存关系" onClick={handleSave}>
@@ -386,7 +433,7 @@ function RelationshipEditor({ relationship, entities }: { relationship: Relation
           </IconButton>
         </div>
       </div>
-      {saved ? <p className="mt-2 text-xs text-[#276749]">关系已保存。</p> : null}
+      <SaveFeedback state={saveState} savedText="关系已保存。" />
       {relationship.evidence.length > 0 ? (
         <div className="mt-2 flex flex-wrap gap-2">
           {relationship.evidence.map((entryId, index) => (
@@ -418,7 +465,7 @@ function TaskEditor({
   const [linkedTo, setLinkedTo] = useState(task.linkedTo[0] ?? '');
   const [dueDate, setDueDate] = useState(task.dueDate ?? '');
   const [status, setStatus] = useState<TaskStatus>(task.status);
-  const [saved, setSaved] = useState(false);
+  const [saveState, setSaveState] = useState<SaveState>('idle');
 
   useEffect(() => {
     setDescription(task.description);
@@ -426,19 +473,24 @@ function TaskEditor({
     setLinkedTo(task.linkedTo[0] ?? '');
     setDueDate(task.dueDate ?? '');
     setStatus(task.status);
-    setSaved(false);
-  }, [task]);
+    setSaveState('idle');
+  }, [task.id]);
 
   async function handleSave() {
-    await updateTask(task.id, {
-      description,
-      owner,
-      linkedTo: linkedTo ? [linkedTo] : [],
-      dueDate: dueDate || undefined,
-      status,
-      completedAt: status === 'done' ? task.completedAt ?? Date.now() : undefined,
-    });
-    setSaved(true);
+    setSaveState('saving');
+    try {
+      await updateTask(task.id, {
+        description,
+        owner,
+        linkedTo: linkedTo ? [linkedTo] : [],
+        dueDate: dueDate || undefined,
+        status,
+        completedAt: status === 'done' ? task.completedAt ?? Date.now() : undefined,
+      });
+      setSaveState('saved');
+    } catch {
+      setSaveState('error');
+    }
   }
 
   async function handleDelete() {
@@ -450,7 +502,10 @@ function TaskEditor({
       <div className="flex items-start gap-2">
         <input
           value={description}
-          onChange={(event) => setDescription(event.target.value)}
+          onChange={(event) => {
+            setDescription(event.target.value);
+            setSaveState('idle');
+          }}
           className="w-full rounded-[10px] border border-[#d9d9d6] px-3 py-2 text-sm outline-none focus:border-[#155eef]"
         />
         <IconButton label="保存任务" onClick={handleSave}>
@@ -462,26 +517,42 @@ function TaskEditor({
       </div>
       <div className="mt-2 grid gap-2 md:grid-cols-4">
         <Field label="负责人">
-          <Select value={owner} options={entities.map((entity) => [entity.id, entity.title])} onChange={setOwner} />
+          <Select
+            value={owner}
+            options={entities.map((entity) => [entity.id, entity.title])}
+            onChange={(value) => {
+              setOwner(value);
+              setSaveState('idle');
+            }}
+          />
         </Field>
         <Field label="关联实体">
           <Select
             value={linkedTo}
             options={[['', '无关联'], ...entities.map((entity) => [entity.id, entity.title] as [string, string])]}
-            onChange={setLinkedTo}
+            onChange={(value) => {
+              setLinkedTo(value);
+              setSaveState('idle');
+            }}
           />
         </Field>
         <Field label="状态">
           <Select
             value={status}
             options={taskStatuses.map((taskStatus) => [taskStatus, taskStatus])}
-            onChange={(value) => setStatus(value as TaskStatus)}
+            onChange={(value) => {
+              setStatus(value as TaskStatus);
+              setSaveState('idle');
+            }}
           />
         </Field>
         <Field label="截止">
           <input
             value={dueDate}
-            onChange={(event) => setDueDate(event.target.value)}
+            onChange={(event) => {
+              setDueDate(event.target.value);
+              setSaveState('idle');
+            }}
             className="w-full rounded-[10px] border border-[#d9d9d6] px-3 py-2 text-sm outline-none focus:border-[#155eef]"
           />
         </Field>
@@ -491,7 +562,9 @@ function TaskEditor({
         <Link to={`/entries/${task.source}`} className="rounded-full border border-[#d9d9d6] px-2.5 py-1 text-[#155eef]">
           查看来源
         </Link>
-        {saved ? <span className="text-[#276749]">任务已保存。</span> : null}
+        {saveState === 'saved' ? <span className="text-[#276749]">任务已保存。</span> : null}
+        {saveState === 'saving' ? <span className="text-[#626965]">保存中...</span> : null}
+        {saveState === 'error' ? <span className="text-[#b42318]">保存失败，请重试。</span> : null}
       </div>
     </div>
   );
@@ -501,25 +574,35 @@ function EntityEditor({ entity }: { entity: Entity }) {
   const [title, setTitle] = useState(entity.title);
   const [summary, setSummary] = useState(entity.summary);
   const [tags, setTags] = useState(entity.tags.join(', '));
-  const [saved, setSaved] = useState(false);
+  const [saveState, setSaveState] = useState<SaveState>('idle');
 
   useEffect(() => {
     setTitle(entity.title);
     setSummary(entity.summary);
     setTags(entity.tags.join(', '));
-    setSaved(false);
-  }, [entity]);
+    setSaveState('idle');
+  }, [entity.id]);
 
   async function handleSave() {
-    await updateEntity(entity.id, {
-      title,
-      summary,
-      tags: tags
-        .split(',')
-        .map((tag) => tag.trim())
-        .filter(Boolean),
-    });
-    setSaved(true);
+    if (!title.trim()) {
+      setSaveState('error');
+      return;
+    }
+
+    setSaveState('saving');
+    try {
+      await updateEntity(entity.id, {
+        title: title.trim(),
+        summary,
+        tags: tags
+          .split(',')
+          .map((tag) => tag.trim())
+          .filter(Boolean),
+      });
+      setSaveState('saved');
+    } catch {
+      setSaveState('error');
+    }
   }
 
   return (
@@ -531,30 +614,47 @@ function EntityEditor({ entity }: { entity: Entity }) {
         <button
           type="button"
           onClick={handleSave}
-          className="rounded-full bg-[#155eef] px-4 py-2 text-sm font-medium text-white"
+          disabled={saveState === 'saving'}
+          className="rounded-full bg-[#155eef] px-4 py-2 text-sm font-medium text-white disabled:bg-[#a8b7d8]"
         >
-          保存修改
+          {saveState === 'saving' ? '保存中...' : saveState === 'saved' ? '已保存' : '保存修改'}
         </button>
       </div>
       <input
         value={title}
-        onChange={(event) => setTitle(event.target.value)}
+        onChange={(event) => {
+          setTitle(event.target.value);
+          setSaveState('idle');
+        }}
         className="mt-5 w-full rounded-[10px] border border-[#d9d9d6] px-3 py-2 text-2xl font-semibold outline-none focus:border-[#155eef]"
       />
       <textarea
         value={summary}
-        onChange={(event) => setSummary(event.target.value)}
+        onChange={(event) => {
+          setSummary(event.target.value);
+          setSaveState('idle');
+        }}
         className="mt-3 min-h-28 w-full resize-y rounded-[10px] border border-[#d9d9d6] px-3 py-2 text-sm leading-6 outline-none focus:border-[#155eef]"
       />
       <input
         value={tags}
-        onChange={(event) => setTags(event.target.value)}
+        onChange={(event) => {
+          setTags(event.target.value);
+          setSaveState('idle');
+        }}
         className="mt-3 w-full rounded-[10px] border border-[#d9d9d6] px-3 py-2 text-sm outline-none focus:border-[#155eef]"
         placeholder="标签，用英文逗号分隔"
       />
-      {saved ? <p className="mt-3 text-sm text-[#276749]">已保存。</p> : null}
+      <SaveFeedback state={saveState} savedText="修改已保存。" />
     </section>
   );
+}
+
+function SaveFeedback({ state, savedText }: { state: SaveState; savedText: string }) {
+  if (state === 'idle') return null;
+  if (state === 'saving') return <p className="mt-2 text-xs text-[#626965]">保存中...</p>;
+  if (state === 'saved') return <p className="mt-2 text-xs text-[#276749]">{savedText}</p>;
+  return <p className="mt-2 text-xs text-[#b42318]">保存失败，请重试。</p>;
 }
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
