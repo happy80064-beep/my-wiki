@@ -1,5 +1,5 @@
 import { Loader2, Plus, Save, Trash2, WandSparkles } from 'lucide-react';
-import { type ReactNode, useMemo, useState } from 'react';
+import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import {
   type CaptureDraft,
@@ -13,6 +13,7 @@ import {
 } from '@/lib/capture';
 import { extractCaptureDraft } from '@/lib/ai/captureClient';
 import { createIngestJob, processNextIngestJob } from '@/lib/ingest';
+import { buildImportedContent, extractImportFileText, isSupportedImportFile } from '@/lib/import/fileText';
 import { db } from '@/lib/db';
 import type { EntityType, RelationshipType, Scene, TaskStatus } from '@/types';
 
@@ -64,7 +65,15 @@ type SaveResult = {
   queuedCompileSuggestions: number;
 };
 
+type ProgressState = {
+  active: boolean;
+  percent: number;
+  label: string;
+  detail?: string;
+};
+
 export function CapturePage() {
+  const organizeTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [content, setContent] = useState('');
   const [draft, setDraft] = useState<CaptureDraft | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -74,9 +83,55 @@ export function CapturePage() {
   const [providerLabel, setProviderLabel] = useState<string | null>(null);
   const [isQueueProcessing, setIsQueueProcessing] = useState(false);
   const [queueMessage, setQueueMessage] = useState<string | null>(null);
+  const [organizeProgress, setOrganizeProgress] = useState<ProgressState | null>(null);
+  const [importProgress, setImportProgress] = useState<ProgressState | null>(null);
+  const [queueProgress, setQueueProgress] = useState<ProgressState | null>(null);
   const ingestJobs = useLiveQuery(() => db.ingestJobs.orderBy('createdAt').reverse().limit(8).toArray(), [], []);
 
   const draftEntities = useMemo(() => (draft ? getDraftEntities(draft) : []), [draft]);
+
+  useEffect(() => {
+    return () => {
+      if (organizeTimerRef.current) {
+        clearInterval(organizeTimerRef.current);
+      }
+    };
+  }, []);
+
+  function startOrganizeProgress() {
+    if (organizeTimerRef.current) {
+      clearInterval(organizeTimerRef.current);
+    }
+    setOrganizeProgress({ active: true, percent: 8, label: '准备 AI 整理', detail: '正在读取输入内容' });
+    organizeTimerRef.current = setInterval(() => {
+      setOrganizeProgress((current) => {
+        if (!current?.active) return current;
+        const next = current.percent < 35 ? current.percent + 4 : current.percent < 72 ? current.percent + 2 : current.percent + 1;
+        return {
+          ...current,
+          percent: Math.min(next, 88),
+          label: next < 40 ? '分析内容结构' : next < 76 ? '调用 AI 提取' : '整理结构化草稿',
+        };
+      });
+    }, 700);
+  }
+
+  function finishOrganizeProgress(label: string) {
+    if (organizeTimerRef.current) {
+      clearInterval(organizeTimerRef.current);
+      organizeTimerRef.current = null;
+    }
+    setOrganizeProgress({ active: false, percent: 100, label });
+    window.setTimeout(() => setOrganizeProgress(null), 1200);
+  }
+
+  function stopOrganizeProgress(label: string) {
+    if (organizeTimerRef.current) {
+      clearInterval(organizeTimerRef.current);
+      organizeTimerRef.current = null;
+    }
+    setOrganizeProgress({ active: false, percent: 100, label });
+  }
 
   async function handleOrganize() {
     const trimmed = content.trim();
@@ -86,14 +141,17 @@ export function CapturePage() {
     setLastSave(null);
     setExtractError(null);
     setProviderLabel(null);
+    startOrganizeProgress();
 
     try {
       const result = await extractCaptureDraft(trimmed);
       setDraft(result.draft);
       setProviderLabel(`${result.provider} · ${result.model}${result.mode === 'two-step' ? ' · 两步摄入' : ''}`);
+      finishOrganizeProgress('AI 整理完成');
     } catch (error) {
       setDraft(null);
       setExtractError(error instanceof Error ? error.message : 'AI 提取失败');
+      stopOrganizeProgress('AI 整理失败');
     } finally {
       setIsProcessing(false);
     }
@@ -117,15 +175,67 @@ export function CapturePage() {
   async function handleImportFiles(files: FileList | null) {
     if (!files || files.length === 0) return;
 
+    const selectedFiles = Array.from(files);
     let count = 0;
-    for (const file of Array.from(files)) {
-      if (!/\.(txt|md|markdown)$/i.test(file.name)) continue;
-      const text = await file.text();
-      if (!text.trim()) continue;
-      await createIngestJob({ content: text, source: 'file', filename: file.name });
-      count += 1;
+    const errors: string[] = [];
+    setImportProgress({
+      active: true,
+      percent: 0,
+      label: '准备批量导入',
+      detail: `共 ${selectedFiles.length} 个文件`,
+    });
+
+    for (let index = 0; index < selectedFiles.length; index += 1) {
+      const file = selectedFiles[index];
+      const basePercent = Math.round((index / selectedFiles.length) * 100);
+      if (!isSupportedImportFile(file.name, file.type)) {
+        errors.push(`${file.name}：格式暂不支持`);
+        setImportProgress({
+          active: true,
+          percent: basePercent,
+          label: `跳过 ${file.name}`,
+          detail: `${index + 1}/${selectedFiles.length}`,
+        });
+        continue;
+      }
+
+      try {
+        const extraction = await extractImportFileText(file, (progress) => {
+          const fileShare = progress.percent / selectedFiles.length;
+          setImportProgress({
+            active: true,
+            percent: Math.min(99, Math.round(basePercent + fileShare)),
+            label: progress.label,
+            detail: `${index + 1}/${selectedFiles.length}`,
+          });
+        });
+        if (!extraction.text.trim()) {
+          errors.push(`${file.name}：没有提取到可用文本`);
+          continue;
+        }
+        await createIngestJob({
+          content: buildImportedContent(extraction),
+          source: extraction.source,
+          filename: extraction.filename,
+        });
+        count += 1;
+      } catch (error) {
+        errors.push(`${file.name}：${error instanceof Error ? error.message : '解析失败'}`);
+      }
     }
-    setQueueMessage(count > 0 ? `已加入 ${count} 个文件到摄入队列。` : '没有可导入的 txt/md 文件。');
+
+    setImportProgress({
+      active: false,
+      percent: 100,
+      label: '批量导入完成',
+      detail: `成功 ${count} 个，失败/跳过 ${errors.length} 个`,
+    });
+    setQueueMessage(
+      count > 0
+        ? `已加入 ${count} 个文件到摄入队列。${errors.length > 0 ? `未导入：${errors.slice(0, 3).join('；')}` : ''}`
+        : `没有可导入的文件。${errors.slice(0, 3).join('；')}`,
+    );
+    window.setTimeout(() => setImportProgress(null), 1800);
   }
 
   async function handleProcessQueue() {
@@ -133,12 +243,34 @@ export function CapturePage() {
     setQueueMessage(null);
     let processed = 0;
     try {
-      for (let index = 0; index < 10; index += 1) {
+      const total = await db.ingestJobs.where('status').equals('pending').count();
+      if (total === 0) {
+        setQueueProgress({ active: false, percent: 100, label: '当前没有待处理队列项' });
+        setQueueMessage('当前没有待处理队列项。');
+        window.setTimeout(() => setQueueProgress(null), 1200);
+        return;
+      }
+
+      setQueueProgress({ active: true, percent: 0, label: '开始处理摄入队列', detail: `0/${total}` });
+      for (let index = 0; index < total; index += 1) {
         const result = await processNextIngestJob();
         if (!result) break;
         processed += 1;
+        setQueueProgress({
+          active: true,
+          percent: Math.round((processed / total) * 100),
+          label: result.filename ? `已处理 ${result.filename}` : '已处理队列项',
+          detail: `${processed}/${total}`,
+        });
       }
       setQueueMessage(processed > 0 ? `已处理 ${processed} 个队列项。` : '当前没有待处理队列项。');
+      setQueueProgress({
+        active: false,
+        percent: 100,
+        label: '队列处理完成',
+        detail: `${processed}/${total}`,
+      });
+      window.setTimeout(() => setQueueProgress(null), 1500);
     } finally {
       setIsQueueProcessing(false);
     }
@@ -258,12 +390,16 @@ export function CapturePage() {
               <input
                 type="file"
                 multiple
-                accept=".txt,.md,.markdown,text/plain,text/markdown"
+                accept=".txt,.md,.markdown,.doc,.docx,.pdf,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff,text/plain,text/markdown,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/*"
                 className="hidden"
                 onChange={(event) => handleImportFiles(event.target.files)}
               />
-              批量导入文本
+              批量导入文件
             </label>
+          </div>
+          <div className="mt-4 space-y-3">
+            {organizeProgress ? <ProgressBar progress={organizeProgress} /> : null}
+            {importProgress ? <ProgressBar progress={importProgress} /> : null}
           </div>
           {lastSave ? (
             <div className="mt-4 rounded-[10px] border border-[#b7e4c7] bg-[#f0fff4] px-3 py-2 text-sm leading-6 text-[#276749]">
@@ -302,6 +438,11 @@ export function CapturePage() {
                 处理队列
               </button>
             </div>
+            {queueProgress ? (
+              <div className="mt-3">
+                <ProgressBar progress={queueProgress} />
+              </div>
+            ) : null}
             {queueMessage ? <p className="mt-2 text-xs text-[#626965]">{queueMessage}</p> : null}
             <div className="mt-3 grid gap-2">
               {ingestJobs.length === 0 ? (
@@ -353,6 +494,25 @@ export function CapturePage() {
         </section>
       </div>
     </section>
+  );
+}
+
+function ProgressBar({ progress }: { progress: ProgressState }) {
+  const percent = Math.max(0, Math.min(100, Math.round(progress.percent)));
+  return (
+    <div className="rounded-[10px] border border-[#d9d9d6] bg-white px-3 py-2">
+      <div className="flex items-center justify-between gap-3 text-xs">
+        <span className="font-medium text-[#1f2937]">{progress.label}</span>
+        <span className="tabular-nums text-[#155eef]">{percent}%</span>
+      </div>
+      <div className="mt-2 h-2 overflow-hidden rounded-full bg-[#eef2f7]">
+        <div
+          className="h-full rounded-full bg-[#155eef] transition-all duration-300"
+          style={{ width: `${percent}%` }}
+        />
+      </div>
+      {progress.detail ? <p className="mt-1 text-xs text-[#626965]">{progress.detail}</p> : null}
+    </div>
   );
 }
 

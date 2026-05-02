@@ -149,6 +149,45 @@ export default defineConfig(({ mode }) => {
             }
           });
 
+          server.middlewares.use('/api/import/extract', async (req, res) => {
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { error: 'Method not allowed' });
+              return;
+            }
+
+            try {
+              const body = (await readJsonBody(req)) as {
+                filename?: string;
+                mimeType?: string;
+                dataBase64?: string;
+              };
+              const filename = body.filename?.trim();
+              const dataBase64 = body.dataBase64?.trim();
+              if (!filename || !dataBase64) {
+                sendJson(res, 400, { error: 'filename and dataBase64 are required.' });
+                return;
+              }
+
+              const buffer = Buffer.from(dataBase64, 'base64');
+              const text = await extractImportFileText({
+                filename,
+                mimeType: body.mimeType ?? '',
+                buffer,
+              });
+
+              if (!text.trim()) {
+                sendJson(res, 422, { error: `${filename} 没有提取到可用文本。` });
+                return;
+              }
+
+              sendJson(res, 200, { text });
+            } catch (error) {
+              sendJson(res, 500, {
+                error: error instanceof Error ? error.message : 'File extraction failed.',
+              });
+            }
+          });
+
           server.middlewares.use('/api/query/compose', async (req, res) => {
             if (req.method !== 'POST') {
               sendJson(res, 405, { error: 'Method not allowed' });
@@ -536,6 +575,79 @@ function sendJson(res: import('node:http').ServerResponse, statusCode: number, p
   res.statusCode = statusCode;
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.end(JSON.stringify(payload));
+}
+
+async function extractImportFileText({
+  filename,
+  mimeType,
+  buffer,
+}: {
+  filename: string;
+  mimeType: string;
+  buffer: Buffer;
+}) {
+  const extension = filename.toLowerCase().split('.').at(-1) ?? '';
+  const normalizedMimeType = mimeType.toLowerCase();
+
+  if (['txt', 'md', 'markdown'].includes(extension) || normalizedMimeType.startsWith('text/')) {
+    return buffer.toString('utf8');
+  }
+
+  if (
+    ['doc', 'docx'].includes(extension) ||
+    normalizedMimeType.includes('wordprocessingml') ||
+    normalizedMimeType === 'application/msword'
+  ) {
+    return extractWordText(buffer, filename);
+  }
+
+  if (extension === 'pdf' || normalizedMimeType === 'application/pdf') {
+    return extractPdfText(buffer);
+  }
+
+  if (
+    ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif', 'tif', 'tiff'].includes(extension) ||
+    normalizedMimeType.startsWith('image/')
+  ) {
+    return extractImageText(buffer);
+  }
+
+  throw new Error(`暂不支持 ${filename} 的文件格式。`);
+}
+
+async function extractWordText(buffer: Buffer, filename: string) {
+  try {
+    const mammoth = await import('mammoth');
+    const result = await mammoth.extractRawText({ buffer });
+    return result.value;
+  } catch (error) {
+    if (filename.toLowerCase().endsWith('.doc')) {
+      throw new Error('旧版 .doc 文件解析失败，请先另存为 .docx 后再导入。');
+    }
+    throw error;
+  }
+}
+
+async function extractPdfText(buffer: Buffer) {
+  const { PDFParse } = await import('pdf-parse');
+  const parser = new PDFParse({ data: buffer });
+  try {
+    const result = await parser.getText();
+    return result.text;
+  } finally {
+    await parser.destroy();
+  }
+}
+
+async function extractImageText(buffer: Buffer) {
+  const { createWorker } = await import('tesseract.js');
+  const worker = await createWorker(['chi_sim', 'eng']);
+  try {
+    const result = await worker.recognize(buffer);
+    return result.data.text;
+  } finally {
+    await worker.terminate();
+  }
 }
 
 function normalizeMiniMaxModel(model?: string) {

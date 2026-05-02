@@ -1,0 +1,145 @@
+import type { EntrySource } from '@/types';
+
+export type ImportFileKind = 'text' | 'word' | 'pdf' | 'image';
+
+export type ImportFileExtraction = {
+  filename: string;
+  kind: ImportFileKind;
+  source: EntrySource;
+  text: string;
+};
+
+export type FileExtractProgress = {
+  percent: number;
+  label: string;
+};
+
+const textExtensions = new Set(['txt', 'md', 'markdown']);
+const wordExtensions = new Set(['doc', 'docx']);
+const imageExtensions = new Set(['png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif', 'tif', 'tiff']);
+
+export function getImportFileKind(filename: string, mimeType = ''): ImportFileKind | undefined {
+  const extension = getExtension(filename);
+  const normalizedMimeType = mimeType.toLowerCase();
+
+  if (textExtensions.has(extension) || normalizedMimeType.startsWith('text/')) return 'text';
+  if (
+    wordExtensions.has(extension) ||
+    normalizedMimeType.includes('wordprocessingml') ||
+    normalizedMimeType === 'application/msword'
+  ) {
+    return 'word';
+  }
+  if (extension === 'pdf' || normalizedMimeType === 'application/pdf') return 'pdf';
+  if (imageExtensions.has(extension) || normalizedMimeType.startsWith('image/')) return 'image';
+
+  return undefined;
+}
+
+export function isSupportedImportFile(filename: string, mimeType = '') {
+  return Boolean(getImportFileKind(filename, mimeType));
+}
+
+export async function extractImportFileText(
+  file: File,
+  onProgress?: (progress: FileExtractProgress) => void,
+): Promise<ImportFileExtraction> {
+  const kind = getImportFileKind(file.name, file.type);
+  if (!kind) {
+    throw new Error(`暂不支持 ${file.name} 的文件格式。`);
+  }
+
+  onProgress?.({ percent: 8, label: `读取 ${file.name}` });
+
+  if (kind === 'text') {
+    const text = await file.text();
+    onProgress?.({ percent: 100, label: `${file.name} 已读取` });
+    return {
+      filename: file.name,
+      kind,
+      source: 'file',
+      text: text.trim(),
+    };
+  }
+
+  const dataBase64 = await readFileAsBase64(file, (percent) => {
+    onProgress?.({
+      percent: Math.min(42, 8 + Math.round(percent * 0.34)),
+      label: `读取 ${file.name}`,
+    });
+  });
+
+  onProgress?.({ percent: 48, label: `解析 ${file.name}` });
+  let simulatedPercent = 48;
+  const timer = window.setInterval(() => {
+    simulatedPercent = Math.min(92, simulatedPercent + 3);
+    onProgress?.({ percent: simulatedPercent, label: `解析 ${file.name}` });
+  }, 800);
+
+  let payload: { text?: string; error?: string };
+  try {
+    const response = await fetch('/api/import/extract', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        filename: file.name,
+        mimeType: file.type,
+        dataBase64,
+      }),
+    });
+
+    payload = (await response.json()) as { text?: string; error?: string };
+    if (!response.ok || !payload.text?.trim()) {
+      throw new Error(payload.error || `${file.name} 没有提取到可用文本。`);
+    }
+  } finally {
+    window.clearInterval(timer);
+  }
+
+  onProgress?.({ percent: 100, label: `${file.name} 已解析` });
+  return {
+    filename: file.name,
+    kind,
+    source: kind === 'image' ? 'image' : 'file',
+    text: payload.text.trim(),
+  };
+}
+
+export function buildImportedContent(extraction: ImportFileExtraction) {
+  return [
+    `# 导入文件：${extraction.filename}`,
+    '',
+    `来源格式：${kindLabels[extraction.kind]}`,
+    '',
+    extraction.text,
+  ].join('\n');
+}
+
+function readFileAsBase64(file: File, onProgress?: (percent: number) => void) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onprogress = (event) => {
+      if (event.lengthComputable) {
+        onProgress?.(Math.round((event.loaded / event.total) * 100));
+      }
+    };
+    reader.onerror = () => reject(reader.error ?? new Error('文件读取失败。'));
+    reader.onload = () => {
+      const result = String(reader.result ?? '');
+      resolve(result.includes(',') ? result.split(',').at(-1) ?? '' : result);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function getExtension(filename: string) {
+  const parts = filename.toLowerCase().split('.');
+  return parts.length > 1 ? parts.at(-1) ?? '' : '';
+}
+
+const kindLabels: Record<ImportFileKind, string> = {
+  text: '文本',
+  word: 'Word',
+  pdf: 'PDF',
+  image: '图片 OCR',
+};
