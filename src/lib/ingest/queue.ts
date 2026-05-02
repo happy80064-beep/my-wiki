@@ -12,11 +12,15 @@ export type CreateIngestJobInput = {
   targetEntryId?: string;
 };
 
+export const INGEST_JOB_STALE_MS = 15 * 60 * 1000;
+
 export async function createIngestJob(input: CreateIngestJobInput) {
   const content = input.content.trim();
   if (!content) {
     throw new Error('content is required.');
   }
+
+  await resetStaleIngestJobs();
 
   const now = Date.now();
   const contentHash = await sha256(content);
@@ -51,6 +55,7 @@ export async function listIngestJobs(limit = 20) {
 }
 
 export async function processNextIngestJob(extractor: IngestExtractor = extractCaptureDraft) {
+  await resetStaleIngestJobs();
   const job = await db.ingestJobs
     .where('status')
     .equals('pending')
@@ -60,6 +65,7 @@ export async function processNextIngestJob(extractor: IngestExtractor = extractC
 }
 
 export async function processIngestJob(id: string, extractor: IngestExtractor = extractCaptureDraft) {
+  await resetStaleIngestJobs();
   const job = await db.ingestJobs.get(id);
   if (!job || !['pending', 'failed'].includes(job.status)) return job;
 
@@ -115,6 +121,27 @@ export async function processIngestJob(id: string, extractor: IngestExtractor = 
   }
 
   return db.ingestJobs.get(job.id);
+}
+
+export async function resetStaleIngestJobs(now = Date.now(), staleMs = INGEST_JOB_STALE_MS) {
+  const staleBefore = now - staleMs;
+  const staleJobs = await db.ingestJobs
+    .where('status')
+    .equals('processing')
+    .filter((job) => job.updatedAt < staleBefore)
+    .toArray();
+
+  await Promise.all(
+    staleJobs.map((job) =>
+      db.ingestJobs.update(job.id, {
+        status: 'failed',
+        error: '上次摄入未正常结束，已恢复为可重试状态。',
+        updatedAt: now,
+      }),
+    ),
+  );
+
+  return staleJobs.length;
 }
 
 export async function clearFinishedIngestJobs() {

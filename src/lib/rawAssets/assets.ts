@@ -143,12 +143,19 @@ export async function processRawAsset(
     const processed = await processIngestJob(job.id, extractor ?? extractRawAssetCaptureDraft);
     const completedAt = Date.now();
 
-    const finalStatus = processed?.status === 'skipped' ? 'skipped' : processed?.status === 'done' ? 'compiled' : 'failed';
+    const finalStatus =
+      processed?.status === 'skipped'
+        ? 'skipped'
+        : processed?.status === 'done'
+          ? 'compiled'
+          : processed?.status === 'processing'
+            ? 'compiling'
+            : 'failed';
     await db.rawAssets.update(asset.id, {
       status: finalStatus,
       ingestJobId: job.id,
       entryId: processed?.entryId ?? asset.entryId,
-      error: finalStatus === 'failed' ? processed?.error ?? '编译失败。' : undefined,
+      error: finalStatus === 'failed' ? buildRawAssetFailureMessage(processed?.status, processed?.error) : undefined,
       compiledAt: completedAt,
       updatedAt: completedAt,
     });
@@ -258,6 +265,17 @@ function getUsableBlob(asset: RawAsset) {
   return new Blob([base64ToBytes(asset.dataBase64)], {
     type: asset.mimeType,
   });
+}
+
+function buildRawAssetFailureMessage(status?: string, error?: string) {
+  if (error) return error;
+  if (status === 'pending') {
+    return '摄入任务暂未完成，已恢复为可重试状态。';
+  }
+  if (!status) {
+    return '未找到对应的摄入任务，请重新编译。';
+  }
+  return '编译失败，请重新尝试。';
 }
 
 function bytesToBase64(bytes: Uint8Array) {
