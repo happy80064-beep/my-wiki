@@ -102,6 +102,7 @@ export function entrySource(entry: Entry): QuerySource {
 export function dedupeSources(sources: QuerySource[]) {
   const seen = new Set<string>();
   return sources.filter((source) => {
+    if (!source.title.trim()) return false;
     const key = `${source.type}:${source.id}`;
     if (seen.has(key)) return false;
     seen.add(key);

@@ -198,6 +198,44 @@ describe('structured query', () => {
     expect(result.sources.some((source) => source.id === noisyEntry.id)).toBe(true);
   });
 
+  it('extracts numeric metric answers from linked source evidence', async () => {
+    const entry = await createEntry({
+      content:
+        '福瑞科技园三期稳定运营期测算：年均项目总收入为 1,234.56 万元，相关收入来自园区运营、展示和服务配套。短视频爆款元素汇总不应进入答案。',
+      source: 'text',
+    });
+    await createEntity({
+      type: 'topic',
+      title: '福瑞健康科技园',
+      summary: '提供首批B端客户资源和线下展示场景。',
+      tags: ['福瑞科技园', '三期'],
+      sourceEntries: [entry.id],
+    });
+
+    const result = await runStructuredQuery('福瑞科技园三期稳定运营期的年均项目总收入是多少？');
+
+    expect(result.answer).toContain('年均项目总收入是1,234.56万元');
+    expect(result.answer).toContain('来源材料命中');
+    expect(result.answer).not.toContain('短视频爆款元素');
+    expect(result.sources.some((source) => source.id === entry.id)).toBe(true);
+  });
+
+  it('filters blank source titles from query sources', async () => {
+    const entry = await createEntry({ content: '福瑞科技园三期收入记录。', source: 'text' });
+    const project = await createEntity({
+      type: 'topic',
+      title: '福瑞健康科技园',
+      summary: '园区项目。',
+      sourceEntries: [entry.id],
+    });
+    const blank = await createEntity({ type: 'topic', title: '' });
+    await createRelationship({ from: project.id, to: blank.id, type: 'related-to', evidence: [entry.id] });
+
+    const result = await runStructuredQuery('福瑞科技园是什么？');
+
+    expect(result.sources.every((source) => source.title.trim().length > 0)).toBe(true);
+  });
+
   it('expands wiki reads through two-hop graph relevance', async () => {
     const entry = await createEntry({
       content: '桌面数字生命体需要稳定唤醒方案和语音交互主链。',

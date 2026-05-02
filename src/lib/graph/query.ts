@@ -1002,9 +1002,12 @@ function formatWikiReadAnswer(question: string, document: EntityDocument) {
   const compiledPropertyValue = queriedPropertyKey ? getEntityPropertyDisplayValue(entity, queriedPropertyKey) : undefined;
   const evidencePropertyValue = queriedPropertyKey ? extractEvidencePropertyValue(queriedPropertyKey, evidenceHits) : undefined;
   const propertyValue = compiledPropertyValue ?? evidencePropertyValue;
+  const metricAnswer = !propertyValue ? extractMetricAnswer(question, evidenceHits) : undefined;
 
   if (queriedPropertyKey && propertyValue) {
     lines.push(`${entity.title}的${propertyLabel(queriedPropertyKey)}是${propertyValue}。`);
+  } else if (metricAnswer) {
+    lines.push(`${entity.title}的${metricAnswer.label}是${metricAnswer.value}。`);
   } else {
     lines.push(`${entity.title}（${entityTypeLabel(entity.type)}）`);
   }
@@ -1035,6 +1038,8 @@ function formatWikiReadAnswer(question: string, document: EntityDocument) {
   if (queriedPropertyKey && propertyValue) {
     const sourceHint = compiledPropertyValue ? '已写入 Wiki' : '来源材料命中，待编译回 Wiki';
     lines.push(`${propertyLabel(queriedPropertyKey)}：${propertyValue}（${sourceHint}）`);
+  } else if (metricAnswer) {
+    lines.push(`${metricAnswer.label}：${metricAnswer.value}（来源材料命中，待编译回 Wiki）`);
   }
 
   const openTasks = tasks.filter((task) => task.status !== 'done' && task.status !== 'cancelled');
@@ -1670,11 +1675,41 @@ function buildAttributeTerms(question: string) {
     { test: /(路径|目录|文件夹|本地项目)/, terms: ['路径', '目录', '文件夹', '本地项目路径'] },
     { test: /(负责人|owner|谁负责|归谁)/i, terms: ['负责人', 'owner', '负责'] },
     { test: /(角色名|名字|名称|叫什么|叫啥)/, terms: ['角色名', '名字', '名称'] },
+    {
+      test: /(收入|营收|金额|费用|成本|投资|利润|价格|总额|面积|规模|人数|数量|年均|合计|多少)/,
+      terms: buildMetricTerms(question),
+    },
   ];
 
   return Array.from(
     new Set(groups.flatMap((group) => (group.test.test(question) ? group.terms : []))),
   );
+}
+
+function buildMetricTerms(question: string) {
+  if (!isMetricQuestion(question)) return [];
+
+  const compactQuestion = question.replace(/[？?。！!，,、：:；;]/g, '').replace(/\s+/g, '');
+  const terms: string[] = [];
+  const afterDe = compactQuestion.match(/的([^的]{2,28}?)(?:是多少|多少|为多少|是几|几|$)/);
+  if (afterDe?.[1]) terms.push(afterDe[1]);
+
+  for (const match of compactQuestion.matchAll(/([\u4e00-\u9fa5A-Za-z0-9/-]{0,16}(?:收入|营收|金额|费用|成本|投资|利润|价格|总额|面积|规模|人数|数量))/g)) {
+    if (match[1]) terms.push(match[1]);
+  }
+
+  if (/年均/.test(question)) terms.push('年均');
+  if (/稳定运营期/.test(question)) terms.push('稳定运营期');
+  if (/项目总收入/.test(question)) terms.push('项目总收入');
+  if (/总收入/.test(question)) terms.push('总收入');
+  if (/收入|营收/.test(question)) terms.push('收入', '营收');
+  if (/多少/.test(question)) terms.push(...compactQuestion.split(/的/).filter((term) => term.length >= 2).slice(-2));
+
+  return uniqueStrings(terms).slice(0, 12);
+}
+
+function isMetricQuestion(question: string) {
+  return /(收入|营收|金额|费用|成本|投资|利润|价格|总额|面积|规模|人数|数量|年均|合计|多少|几多|多少钱)/.test(question);
 }
 
 function inferAttribute(question: string) {
@@ -1813,6 +1848,73 @@ function factScore(fact: string, terms: string[]) {
 
 function isRelationshipOrToolQuestion(question: string) {
   return /(关系|关联|相关|依赖|基于|来源|源自|工具|模型|组件|用了哪些|使用哪些|和.+什么关系)/.test(question);
+}
+
+function extractMetricAnswer(question: string, hits: EvidenceHit[]) {
+  if (!isMetricQuestion(question)) return undefined;
+  const terms = buildMetricTerms(question);
+  if (terms.length === 0) return undefined;
+
+  for (const hit of hits) {
+    const value = extractMetricValueFromText(hit.entry.content || hit.snippet, terms);
+    if (value) {
+      return {
+        label: normalizeMetricLabel(terms[0] ?? '相关数值'),
+        value,
+      };
+    }
+  }
+
+  return undefined;
+}
+
+function extractMetricValueFromText(text: string, terms: string[]) {
+  const cleaned = normalizeEvidenceForMetric(text);
+  const sentences = cleaned
+    .split(/[。\n；;]/)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
+  const matchedSentences = sentences.filter((sentence) =>
+    terms.some((term) => evidenceTextMatches(sentence, term)),
+  );
+  const candidates = matchedSentences.length > 0 ? matchedSentences : sentences;
+
+  for (const sentence of candidates) {
+    const value = extractCurrencyLikeValue(sentence);
+    if (value) return value;
+  }
+
+  return undefined;
+}
+
+function extractCurrencyLikeValue(text: string) {
+  const currencyMatch = text.match(/(?:人民币|RMB)?\s*([0-9][0-9,，]*(?:\.[0-9]+)?\s*(?:亿元|万元|元))/i);
+  if (currencyMatch?.[1]) return normalizeMetricValue(currencyMatch[1]);
+
+  const looseMatch = text.match(/([0-9][0-9,，]*(?:\.[0-9]+)?\s*(?:亿|万))/);
+  if (looseMatch?.[1]) return normalizeMetricValue(looseMatch[1]);
+
+  return undefined;
+}
+
+function normalizeMetricLabel(label: string) {
+  return label
+    .replace(/^(这个|该|其)/, '')
+    .replace(/是多少|多少|为多少|是几|几/g, '')
+    .trim() || '相关数值';
+}
+
+function normalizeMetricValue(value: string) {
+  return value.replace(/，/g, ',').replace(/\s+/g, '');
+}
+
+function normalizeEvidenceForMetric(value: string) {
+  return value
+    .replace(/[`>#*_]+/g, ' ')
+    .replace(/([一-龥])\s+(?=[一-龥])/g, '$1')
+    .replace(/([0-9])\s+(?=[0-9])/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function readableRelatedTitles(entities: Entity[]) {
