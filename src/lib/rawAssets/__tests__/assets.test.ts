@@ -1,7 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createLocalCaptureDraft } from '@/lib/capture';
 import { db, resetDatabase } from '@/lib/db';
-import { buildCaptureInputExcerpt, createRawAssetFromFile, processRawAsset } from '@/lib/rawAssets';
+import {
+  RAW_ASSET_STALE_MS,
+  buildCaptureInputExcerpt,
+  createRawAssetFromFile,
+  processNextRawAsset,
+  processRawAsset,
+  resetStaleRawAssets,
+} from '@/lib/rawAssets';
 
 describe('raw assets', () => {
   beforeEach(async () => {
@@ -64,6 +71,39 @@ describe('raw assets', () => {
     expect(compiled?.status).toBe('compiled');
     expect(compiled?.entryId).toBeTruthy();
     expect(await db.entries.count()).toBe(1);
+  });
+
+  it('recovers stale compiling raw assets so they can be retried', async () => {
+    const file = new File(['OpenMaic 是开源项目。'], 'stale.md', { type: 'text/markdown' });
+    const { asset } = await createRawAssetFromFile(file);
+    const now = Date.now();
+    await db.rawAssets.update(asset.id, {
+      status: 'compiling',
+      updatedAt: now - RAW_ASSET_STALE_MS - 1000,
+    });
+
+    const recovered = await resetStaleRawAssets(now);
+    const reset = await db.rawAssets.get(asset.id);
+
+    expect(recovered).toBe(1);
+    expect(reset?.status).toBe('failed');
+    expect(reset?.error).toContain('可重试');
+  });
+
+  it('processes recovered stale raw assets from the queue', async () => {
+    const file = new File(['OpenMaic 是开源项目。'], 'recover.md', { type: 'text/markdown' });
+    const { asset } = await createRawAssetFromFile(file);
+    await db.rawAssets.update(asset.id, {
+      status: 'compiling',
+      updatedAt: Date.now() - RAW_ASSET_STALE_MS - 1000,
+    });
+
+    const compiled = await processNextRawAsset(async (content) => ({
+      draft: createLocalCaptureDraft(content),
+    }));
+
+    expect(compiled?.id).toBe(asset.id);
+    expect(compiled?.status).toBe('compiled');
   });
 
   it('builds a bounded excerpt for long raw content before sending it to AI', () => {

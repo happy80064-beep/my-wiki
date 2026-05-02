@@ -16,6 +16,8 @@ export type RawAssetCompileProgress = {
   label: string;
 };
 
+export const RAW_ASSET_STALE_MS = 15 * 60 * 1000;
+
 export async function createRawAssetFromFile(file: File): Promise<RawAssetImportResult> {
   const kind = getImportFileKind(file.name, file.type);
   if (!kind) {
@@ -72,6 +74,7 @@ export async function processNextRawAsset(
   extractor?: IngestExtractor,
   onProgress?: (progress: RawAssetCompileProgress) => void,
 ) {
+  await resetStaleRawAssets();
   const asset = await db.rawAssets
     .where('status')
     .equals('raw')
@@ -159,6 +162,27 @@ export async function processRawAsset(
   }
 
   return db.rawAssets.get(asset.id);
+}
+
+export async function resetStaleRawAssets(now = Date.now(), staleMs = RAW_ASSET_STALE_MS) {
+  const staleBefore = now - staleMs;
+  const staleAssets = await db.rawAssets
+    .where('status')
+    .anyOf(['extracting', 'compiling'])
+    .filter((asset) => asset.updatedAt < staleBefore)
+    .toArray();
+
+  await Promise.all(
+    staleAssets.map((asset) =>
+      db.rawAssets.update(asset.id, {
+        status: 'failed',
+        error: '上次编译未正常结束，已恢复为可重试状态。',
+        updatedAt: now,
+      }),
+    ),
+  );
+
+  return staleAssets.length;
 }
 
 export async function listRecentRawAssets(limit = 12) {

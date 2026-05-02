@@ -14,7 +14,7 @@ import {
 import { extractCaptureDraft } from '@/lib/ai/captureClient';
 import { createIngestJob, processNextIngestJob } from '@/lib/ingest';
 import { isSupportedImportFile } from '@/lib/import/fileText';
-import { createRawAssetFromFile, processNextRawAsset } from '@/lib/rawAssets';
+import { createRawAssetFromFile, processNextRawAsset, resetStaleRawAssets } from '@/lib/rawAssets';
 import { db } from '@/lib/db';
 import type { EntityType, RawAssetStatus, RelationshipType, Scene, TaskStatus } from '@/types';
 
@@ -110,6 +110,8 @@ export function CapturePage() {
   const draftEntities = useMemo(() => (draft ? getDraftEntities(draft) : []), [draft]);
 
   useEffect(() => {
+    void resetStaleRawAssets();
+
     return () => {
       if (organizeTimerRef.current) {
         clearInterval(organizeTimerRef.current);
@@ -280,6 +282,7 @@ export function CapturePage() {
     setQueueMessage(null);
     let processed = 0;
     try {
+      const recovered = await resetStaleRawAssets();
       const rawTotal =
         (await db.rawAssets.where('status').equals('raw').count()) +
         (await db.rawAssets.where('status').equals('failed').count());
@@ -292,7 +295,12 @@ export function CapturePage() {
         return;
       }
 
-      setQueueProgress({ active: true, percent: 0, label: '开始编译新材料', detail: `0/${total}` });
+      setQueueProgress({
+        active: true,
+        percent: 0,
+        label: recovered > 0 ? `已恢复 ${recovered} 个未完成编译任务` : '开始编译新材料',
+        detail: `0/${total}`,
+      });
       for (let index = 0; index < rawTotal; index += 1) {
         const result = await processNextRawAsset(undefined, (progress) => {
           setQueueProgress({
