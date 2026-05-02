@@ -1,5 +1,5 @@
 import { Loader2, Plus, Save, Trash2, WandSparkles } from 'lucide-react';
-import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import { type ClipboardEvent, type DragEvent, type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import {
   type CaptureDraft,
@@ -191,7 +191,7 @@ export function CapturePage() {
     setQueueMessage('已加入摄入队列。');
   }
 
-  async function handleImportFiles(files: FileList | null) {
+  async function handleImportFiles(files: FileList | File[] | null) {
     if (!files || files.length === 0) return;
 
     const selectedFiles = Array.from(files);
@@ -248,6 +248,31 @@ export function CapturePage() {
         : `没有可接收的文件。${errors.slice(0, 3).join('；')}`,
     );
     window.setTimeout(() => setImportProgress(null), 1800);
+  }
+
+  function handleFileDragOver(event: DragEvent<HTMLElement>) {
+    if (!hasDraggedFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    setIsRawDropActive(true);
+  }
+
+  function handleFileDragLeave(event: DragEvent<HTMLElement>) {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    setIsRawDropActive(false);
+  }
+
+  function handleFileDrop(event: DragEvent<HTMLElement>) {
+    if (!hasDraggedFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    setIsRawDropActive(false);
+    void handleImportFiles(event.dataTransfer.files);
+  }
+
+  function handleFilePaste(event: ClipboardEvent<HTMLElement>) {
+    const pastedFiles = extractClipboardFiles(event.clipboardData);
+    if (pastedFiles.length === 0) return;
+    event.preventDefault();
+    void handleImportFiles(pastedFiles);
   }
 
   async function handleProcessQueue() {
@@ -382,7 +407,13 @@ export function CapturePage() {
   }
 
   return (
-    <section className="mx-auto max-w-6xl px-5 py-8">
+    <section
+      className="mx-auto max-w-6xl px-5 py-8"
+      onDragOver={handleFileDragOver}
+      onDragLeave={handleFileDragLeave}
+      onDrop={handleFileDrop}
+      onPaste={handleFilePaste}
+    >
       <div className="grid gap-5 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
         <section className="rounded-[12px] border border-[#e5e5e4] bg-white p-5">
           <p className="text-xs font-medium text-[#155eef]">Capture</p>
@@ -428,7 +459,10 @@ export function CapturePage() {
                 multiple
                 accept=".txt,.md,.markdown,.doc,.docx,.pdf,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff,text/plain,text/markdown,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/*"
                 className="hidden"
-                onChange={(event) => handleImportFiles(event.target.files)}
+                onChange={(event) => {
+                  void handleImportFiles(event.target.files);
+                  event.currentTarget.value = '';
+                }}
               />
               批量导入文件
             </label>
@@ -463,16 +497,6 @@ export function CapturePage() {
               className={`rounded-[12px] border border-dashed px-3 py-3 transition ${
                 isRawDropActive ? 'border-[#155eef] bg-[#eef5ff]' : 'border-[#d9d9d6] bg-white'
               }`}
-              onDragOver={(event) => {
-                event.preventDefault();
-                setIsRawDropActive(true);
-              }}
-              onDragLeave={() => setIsRawDropActive(false)}
-              onDrop={(event) => {
-                event.preventDefault();
-                setIsRawDropActive(false);
-                void handleImportFiles(event.dataTransfer.files);
-              }}
             >
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
@@ -491,7 +515,9 @@ export function CapturePage() {
                   编译新材料
                 </button>
               </div>
-              <p className="mt-3 text-xs text-[#626965]">支持 Markdown、文本、Word、PDF 和图片。采集完成后可稍后统一编译。</p>
+              <p className="mt-3 text-xs text-[#626965]">
+                支持 Markdown、文本、Word、PDF 和图片。可以拖到本页任意位置，也可以直接粘贴剪贴板里的文件或截图。
+              </p>
             </div>
             <div className="mt-3">
               {queueProgress ? (
@@ -1051,6 +1077,41 @@ function formatBytes(size: number) {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function hasDraggedFiles(dataTransfer: DataTransfer) {
+  return Array.from(dataTransfer.types).includes('Files');
+}
+
+function extractClipboardFiles(clipboardData: DataTransfer) {
+  const files = Array.from(clipboardData.files ?? []);
+  if (files.length > 0) {
+    return files.map(normalizeClipboardFile);
+  }
+
+  return Array.from(clipboardData.items ?? [])
+    .filter((item) => item.kind === 'file')
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => Boolean(file))
+    .map(normalizeClipboardFile);
+}
+
+function normalizeClipboardFile(file: File, index: number) {
+  if (file.name?.trim()) return file;
+  const extension = mimeExtension(file.type);
+  return new File([file], `clipboard-${Date.now()}-${index}.${extension}`, {
+    type: file.type,
+    lastModified: Date.now(),
+  });
+}
+
+function mimeExtension(mimeType: string) {
+  if (mimeType.includes('png')) return 'png';
+  if (mimeType.includes('jpeg') || mimeType.includes('jpg')) return 'jpg';
+  if (mimeType.includes('webp')) return 'webp';
+  if (mimeType.includes('pdf')) return 'pdf';
+  if (mimeType.startsWith('text/')) return 'txt';
+  return 'bin';
 }
 
 function Field({ label, children }: { label: string; children: ReactNode }) {

@@ -1,5 +1,7 @@
 import { db } from '@/lib/db/schema';
 import { createId } from '@/lib/db/ids';
+import { extractCaptureDraft } from '@/lib/ai/captureClient';
+import { createLocalCaptureDraft } from '@/lib/capture';
 import { buildImportedContent, extractImportBlobText, getImportFileKind } from '@/lib/import/fileText';
 import { createIngestJob, processIngestJob, type IngestExtractor } from '@/lib/ingest';
 import type { RawAsset, RawAssetKind } from '@/types';
@@ -106,7 +108,7 @@ export async function processRawAsset(
       source: asset.kind === 'image' ? 'image' : 'file',
       filename: asset.filename,
     });
-    const processed = await processIngestJob(job.id, extractor);
+    const processed = await processIngestJob(job.id, extractor ?? extractRawAssetCaptureDraft);
     const completedAt = Date.now();
 
     const finalStatus = processed?.status === 'skipped' ? 'skipped' : processed?.status === 'done' ? 'compiled' : 'failed';
@@ -132,6 +134,44 @@ export async function processRawAsset(
 
 export async function listRecentRawAssets(limit = 12) {
   return db.rawAssets.orderBy('createdAt').reverse().limit(limit).toArray();
+}
+
+export function buildCaptureInputExcerpt(content: string, maxChars = 32000) {
+  const trimmed = content.trim();
+  if (trimmed.length <= maxChars) return trimmed;
+
+  const headerBudget = Math.round(maxChars * 0.36);
+  const priorityBudget = Math.round(maxChars * 0.34);
+  const tailBudget = maxChars - headerBudget - priorityBudget;
+  const priorityLines = trimmed
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /(摘要|结论|总结|建议|问题|风险|任务|行动|计划|路线|优先级|目标|项目|下一阶段|待办|TODO|todo)/i.test(line))
+    .join('\n')
+    .slice(0, priorityBudget);
+
+  return [
+    '以下为原始材料摘录。原文较长，已保留开头、关键行和结尾；完整原文仍会写入 Wiki 原始材料。',
+    '',
+    '--- 开头 ---',
+    trimmed.slice(0, headerBudget),
+    priorityLines ? '\n--- 关键行 ---' : '',
+    priorityLines,
+    '\n--- 结尾 ---',
+    trimmed.slice(-tailBudget),
+  ]
+    .filter(Boolean)
+    .join('\n')
+    .slice(0, maxChars + 220);
+}
+
+async function extractRawAssetCaptureDraft(content: string) {
+  try {
+    const result = await extractCaptureDraft(buildCaptureInputExcerpt(content));
+    return { draft: result.draft };
+  } catch {
+    return { draft: createLocalCaptureDraft(content) };
+  }
 }
 
 async function hashBytes(bytes: Uint8Array) {

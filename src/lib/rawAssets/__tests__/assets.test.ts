@@ -1,11 +1,15 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createLocalCaptureDraft } from '@/lib/capture';
 import { db, resetDatabase } from '@/lib/db';
-import { createRawAssetFromFile, processRawAsset } from '@/lib/rawAssets';
+import { buildCaptureInputExcerpt, createRawAssetFromFile, processRawAsset } from '@/lib/rawAssets';
 
 describe('raw assets', () => {
   beforeEach(async () => {
     await resetDatabase();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it('stores files in Raw Inbox without compiling immediately', async () => {
@@ -41,5 +45,36 @@ describe('raw assets', () => {
     expect(compiled?.status).toBe('compiled');
     expect(compiled?.entryId).toBeTruthy();
     expect(await db.entries.count()).toBe(1);
+  });
+
+  it('falls back to local indexing when AI extraction fails for a raw file', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ error: 'invalid model json' }), { status: 502 })),
+    );
+    const file = new File(['一份很长的 PDF 解析文本。'], 'report.md', { type: 'text/markdown' });
+    const { asset } = await createRawAssetFromFile(file);
+
+    const compiled = await processRawAsset(asset.id);
+
+    expect(compiled?.status).toBe('compiled');
+    expect(compiled?.entryId).toBeTruthy();
+    expect(await db.entries.count()).toBe(1);
+  });
+
+  it('builds a bounded excerpt for long raw content before sending it to AI', () => {
+    const longContent = [
+      '# 导入文件：report.pdf',
+      '开头内容'.repeat(5000),
+      '## 关键建议\n下一阶段需要完成任务规划和风险处理。',
+      '结尾内容'.repeat(5000),
+    ].join('\n');
+
+    const excerpt = buildCaptureInputExcerpt(longContent, 1200);
+
+    expect(excerpt.length).toBeLessThanOrEqual(1420);
+    expect(excerpt).toContain('原文较长');
+    expect(excerpt).toContain('下一阶段需要完成任务规划和风险处理');
+    expect(excerpt).toContain('--- 结尾 ---');
   });
 });

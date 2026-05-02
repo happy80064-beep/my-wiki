@@ -277,7 +277,7 @@ function parseBestCaptureJson(text: string) {
     }
   }
 
-  throw new Error('MiniMax did not return a valid MyWiki JSON object.');
+  throw new Error('LLM did not return a valid MyWiki JSON object.');
 }
 
 function extractJsonObjects(text: string) {
@@ -318,7 +318,7 @@ function extractJsonObjects(text: string) {
   }
 
   if (objects.length === 0) {
-    throw new Error('MiniMax did not return a JSON object.');
+    throw new Error('LLM did not return a JSON object.');
   }
   return objects;
 }
