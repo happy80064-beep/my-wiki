@@ -93,6 +93,71 @@ export const allowedWikiPatchPropertyKeys = [
   'openSourceStatus',
 ] as const;
 
+export function shouldUseCaptureDigest(content: string, threshold = 3000) {
+  return content.trim().length > threshold;
+}
+
+export function splitCaptureContentIntoChunks(content: string, maxChars = 5000, maxChunks = 6) {
+  const trimmed = content.trim();
+  if (!trimmed) return [];
+  if (trimmed.length <= maxChars) return [trimmed];
+
+  const paragraphs = trimmed.split(/\n{2,}/).map((part) => part.trim()).filter(Boolean);
+  const chunks: string[] = [];
+  let current = '';
+
+  for (const paragraph of paragraphs) {
+    const next = current ? `${current}\n\n${paragraph}` : paragraph;
+    if (next.length <= maxChars) {
+      current = next;
+      continue;
+    }
+    if (current) chunks.push(current);
+    if (paragraph.length > maxChars) {
+      for (let index = 0; index < paragraph.length; index += maxChars) {
+        chunks.push(paragraph.slice(index, index + maxChars));
+      }
+      current = '';
+    } else {
+      current = paragraph;
+    }
+  }
+
+  if (current) chunks.push(current);
+  return selectRepresentativeChunks(chunks, maxChunks);
+}
+
+export function buildCaptureDigestPrompt(content: string, chunkIndex = 1, totalChunks = 1) {
+  return `你是 MyWiki 的长文档阅读 Agent。请把下面这段原始材料整理成 Markdown 阅读摘要，先不要输出 JSON。
+
+材料分块：${chunkIndex}/${totalChunks}
+
+原始材料：
+${content}
+
+请输出 Markdown，包含这些小节：
+
+## 这段材料讲什么
+用 2-4 句话概括。
+
+## 关键实体
+- 实体名：类型（person/project/event/topic），证据短句
+
+## 关键事实
+- 主体｜属性/关系｜值｜证据短句
+
+## 任务与行动项
+- 任务：负责人（不确定则写“我”），关联事项，证据短句
+
+## 需要回写 Wiki 的建议
+- 建议创建/更新的实体、属性、关系或任务
+
+规则：
+- 只根据材料，不要补充外部知识。
+- 保留原文中的专名、日期、路径、模型名、项目名。
+- 不要输出 JSON，不要输出代码块。`;
+}
+
 export function buildCaptureAnalysisPrompt(content: string, entityIndexJson: string) {
   return `你是 MyWiki 的摄入分析 Agent。你只负责理解材料，不负责写入数据库。
 
@@ -439,6 +504,30 @@ function normalizeTitle(value: string) {
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
+}
+
+function selectRepresentativeChunks(chunks: string[], maxChunks: number) {
+  if (chunks.length <= maxChunks) return chunks;
+
+  const selectedIndexes = new Set<number>();
+  selectedIndexes.add(0);
+  selectedIndexes.add(chunks.length - 1);
+
+  const scored = chunks
+    .map((chunk, index) => ({
+      index,
+      score: /(摘要|结论|总结|建议|问题|风险|任务|行动|计划|路线|优先级|目标|项目|下一阶段|待办|TODO|todo)/i.test(chunk)
+        ? 2
+        : 0,
+    }))
+    .sort((left, right) => right.score - left.score);
+
+  for (const item of scored) {
+    if (selectedIndexes.size >= maxChunks) break;
+    selectedIndexes.add(item.index);
+  }
+
+  return [...selectedIndexes].sort((left, right) => left - right).map((index) => chunks[index]);
 }
 
 const entityTypes = ['person', 'project', 'event', 'topic'] as const;

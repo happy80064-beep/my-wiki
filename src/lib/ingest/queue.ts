@@ -9,6 +9,7 @@ export type CreateIngestJobInput = {
   content: string;
   source?: EntrySource;
   filename?: string;
+  targetEntryId?: string;
 };
 
 export async function createIngestJob(input: CreateIngestJobInput) {
@@ -33,6 +34,7 @@ export async function createIngestJob(input: CreateIngestJobInput) {
     content,
     source: input.source ?? 'text',
     filename: input.filename,
+    targetEntryId: input.targetEntryId,
     contentHash,
     status: 'pending',
     retryCount: 0,
@@ -62,7 +64,7 @@ export async function processIngestJob(id: string, extractor: IngestExtractor = 
   if (!job || !['pending', 'failed'].includes(job.status)) return job;
 
   const cached = await getUsableCache(job.contentHash);
-  if (cached) {
+  if (cached && !job.targetEntryId) {
     const now = Date.now();
     await db.ingestJobs.update(job.id, {
       status: 'skipped',
@@ -83,7 +85,9 @@ export async function processIngestJob(id: string, extractor: IngestExtractor = 
 
   try {
     const result = await extractor(job.content);
-    const persisted = await persistCaptureDraft(job.content, result.draft, job.source);
+    const persisted = await persistCaptureDraft(job.content, result.draft, job.source, {
+      entryId: job.targetEntryId,
+    });
     const completedAt = Date.now();
     await db.transaction('rw', db.ingestJobs, db.ingestCache, async () => {
       await db.ingestCache.put({

@@ -54,7 +54,7 @@ const relationshipLabels: Record<RelationshipType, string> = {
 };
 
 const rawAssetStatusLabel: Record<RawAssetStatus, string> = {
-  raw: '待编译',
+  raw: '已采集/待编译',
   extracting: '解析中',
   compiling: '编译中',
   compiled: '已入库',
@@ -502,7 +502,7 @@ export function CapturePage() {
                 <div>
                   <h3 className="text-sm font-semibold text-[#1f2937]">Raw Inbox</h3>
                   <p className="mt-1 text-xs text-[#626965]">
-                    拖入文件先原样收进本地收件箱；解析、AI 提取和写入 Wiki 可异步批量执行。
+                    拖入文件先生成原始记录；解析、AI 提取和结构化写回 Wiki 可异步批量执行。
                   </p>
                 </div>
                 <button

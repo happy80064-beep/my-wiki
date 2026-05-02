@@ -12,10 +12,13 @@ import {
 } from './src/lib/ai/queryPlanner';
 import {
   buildCaptureAnalysisPrompt,
+  buildCaptureDigestPrompt,
   buildWikiPatchPrompt,
   normalizeCaptureAnalysis,
   normalizeWikiPatchesToCaptureDraft,
   normalizeWikiPatchResponse,
+  shouldUseCaptureDigest,
+  splitCaptureContentIntoChunks,
 } from './src/lib/ai/wikiPatch';
 
 export default defineConfig(({ mode }) => {
@@ -442,12 +445,24 @@ async function requestOpenAiCompatibleTwoStepCapture({
   extraBody?: Record<string, unknown>;
 }): Promise<{ ok: true; draft: ReturnType<typeof normalizeWikiPatchesToCaptureDraft> } | { ok: false; error: string }> {
   try {
+    const structuredContentResult = await prepareContentForStructuredCapture({
+      apiKey,
+      baseUrl,
+      model,
+      providerName,
+      content,
+      extraBody,
+    });
+
+    if (!structuredContentResult.ok) return structuredContentResult;
+    const structuredContent = structuredContentResult.content;
+
     const analysisResult = await requestOpenAiCompatibleText({
       apiKey,
       baseUrl,
       model,
       providerName,
-      prompt: buildCaptureAnalysisPrompt(content, JSON.stringify(entityIndex.slice(0, 120), null, 2)),
+      prompt: buildCaptureAnalysisPrompt(structuredContent, JSON.stringify(entityIndex.slice(0, 120), null, 2)),
       systemPrompt: '你是 MyWiki 摄入分析 Agent。只输出符合 schema 的 JSON 对象。',
       maxTokens: 2200,
       extraBody,
@@ -461,7 +476,7 @@ async function requestOpenAiCompatibleTwoStepCapture({
       baseUrl,
       model,
       providerName,
-      prompt: buildWikiPatchPrompt(content, analysis),
+      prompt: buildWikiPatchPrompt(structuredContent, analysis),
       systemPrompt: '你是 MyWiki WikiPatch 生成 Agent。只输出 JSON 对象。',
       maxTokens: 2600,
       extraBody,
@@ -474,13 +489,69 @@ async function requestOpenAiCompatibleTwoStepCapture({
       return { ok: false, error: `${providerName} did not return usable WikiPatch items.` };
     }
 
-    return { ok: true, draft: normalizeWikiPatchesToCaptureDraft(patches, content) };
+    return { ok: true, draft: normalizeWikiPatchesToCaptureDraft(patches, structuredContent) };
   } catch (error) {
     return {
       ok: false,
       error: error instanceof Error ? error.message : `${providerName} two-step capture failed.`,
     };
   }
+}
+
+async function prepareContentForStructuredCapture({
+  apiKey,
+  baseUrl,
+  model,
+  providerName,
+  content,
+  extraBody,
+}: {
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  providerName: string;
+  content: string;
+  extraBody?: Record<string, unknown>;
+}): Promise<{ ok: true; content: string } | { ok: false; error: string }> {
+  if (!shouldUseCaptureDigest(content)) {
+    return { ok: true, content };
+  }
+
+  const chunks = splitCaptureContentIntoChunks(content);
+  const digests: string[] = [];
+
+  for (let index = 0; index < chunks.length; index += 1) {
+    const digestResult = await requestOpenAiCompatibleText({
+      apiKey,
+      baseUrl,
+      model,
+      providerName,
+      prompt: buildCaptureDigestPrompt(chunks[index], index + 1, chunks.length),
+      systemPrompt: '你是 MyWiki 长文档阅读 Agent。只输出 Markdown 阅读摘要，不要输出 JSON。',
+      maxTokens: 1600,
+      extraBody: withoutJsonResponseFormat(extraBody),
+    });
+
+    if (!digestResult.ok) return digestResult;
+    digests.push(`## 分块 ${index + 1}/${chunks.length}\n\n${digestResult.text}`);
+  }
+
+  return {
+    ok: true,
+    content: [
+      '# 长文档 Markdown 阅读摘要',
+      '',
+      '以下内容由 MyWiki 长文档阅读 Agent 从原始材料分块整理而来。结构化 WikiPatch 只能基于这些摘要生成；完整原文已保存在原始 Entry 中。',
+      '',
+      ...digests,
+    ].join('\n'),
+  };
+}
+
+function withoutJsonResponseFormat(extraBody?: Record<string, unknown>) {
+  if (!extraBody) return undefined;
+  const { response_format: _responseFormat, ...rest } = extraBody;
+  return rest;
 }
 
 async function requestOpenAiCompatibleText({

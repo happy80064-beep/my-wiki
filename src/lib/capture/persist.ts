@@ -25,8 +25,32 @@ export type CaptureCompilationSummary = {
   queuedCompileSuggestions: number;
 };
 
-export async function persistCaptureDraft(content: string, draft: CaptureDraft, source: EntrySource = 'text') {
-  const entry = await createEntry({ content, source, processed: true });
+export type PersistCaptureDraftOptions = {
+  entryId?: string;
+};
+
+export async function persistCaptureDraft(
+  content: string,
+  draft: CaptureDraft,
+  source: EntrySource = 'text',
+  options: PersistCaptureDraftOptions = {},
+) {
+  const existingEntry = options.entryId ? await db.entries.get(options.entryId) : undefined;
+  const entry =
+    existingEntry ??
+    (await createEntry({
+      content,
+      source,
+      processed: true,
+    }));
+
+  if (existingEntry) {
+    await updateEntry(existingEntry.id, {
+      content,
+      source,
+      processed: true,
+    });
+  }
   const entityIdByClientId = new Map<string, string>();
   const compilation: CaptureCompilationSummary = {
     createdEntities: 0,

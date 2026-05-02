@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildCaptureAnalysisPrompt,
+  buildCaptureDigestPrompt,
   buildWikiPatchPrompt,
   normalizeCaptureAnalysis,
   normalizeWikiPatchesToCaptureDraft,
   normalizeWikiPatchResponse,
+  shouldUseCaptureDigest,
+  splitCaptureContentIntoChunks,
   validateWikiPatch,
   type CaptureAnalysis,
 } from '@/lib/ai/wikiPatch';
@@ -47,6 +50,23 @@ describe('wiki patch prompts', () => {
     expect(patchPrompt).toContain('WikiPatch');
     expect(patchPrompt).toContain('openSourceStatus');
     expect(patchPrompt).toContain('REVIEW_REQUIRED.options');
+  });
+
+  it('builds markdown digest prompts and representative chunks for long documents', () => {
+    const longContent = [
+      '开头段落。'.repeat(1200),
+      '\n\n## 推荐路线\n下一阶段需要完善任务规划器和风险处理。',
+      '\n\n结尾段落。'.repeat(1200),
+    ].join('');
+
+    const chunks = splitCaptureContentIntoChunks(longContent, 800, 3);
+    const digestPrompt = buildCaptureDigestPrompt(chunks[0] ?? '', 1, chunks.length);
+
+    expect(shouldUseCaptureDigest(longContent, 1000)).toBe(true);
+    expect(chunks.length).toBeLessThanOrEqual(3);
+    expect(chunks.join('\n')).toContain('下一阶段需要完善任务规划器和风险处理');
+    expect(digestPrompt).toContain('Markdown 阅读摘要');
+    expect(digestPrompt).toContain('不要输出 JSON');
   });
 
   it('validates property whitelist and review options', () => {

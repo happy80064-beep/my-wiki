@@ -16,10 +16,13 @@ describe('raw assets', () => {
     const file = new File(['OpenMaic 是开源项目。'], 'openmaic.md', { type: 'text/markdown' });
 
     const result = await createRawAssetFromFile(file);
+    const rawEntry = result.asset.entryId ? await db.entries.get(result.asset.entryId) : undefined;
 
     expect(result.reused).toBe(false);
     expect(result.asset.status).toBe('raw');
-    expect(await db.entries.count()).toBe(0);
+    expect(await db.entries.count()).toBe(1);
+    expect(rawEntry?.processed).toBe(false);
+    expect(rawEntry?.content).toContain('原始文件：openmaic.md');
     expect(await db.ingestJobs.count()).toBe(0);
   });
 
@@ -45,6 +48,7 @@ describe('raw assets', () => {
     expect(compiled?.status).toBe('compiled');
     expect(compiled?.entryId).toBeTruthy();
     expect(await db.entries.count()).toBe(1);
+    expect((await db.entries.get(compiled!.entryId!))?.processed).toBe(true);
   });
 
   it('falls back to local indexing when AI extraction fails for a raw file', async () => {

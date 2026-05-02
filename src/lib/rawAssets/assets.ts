@@ -1,5 +1,5 @@
 import { db } from '@/lib/db/schema';
-import { createId } from '@/lib/db/ids';
+import { createEntry, createId, updateEntry } from '@/lib/db';
 import { extractCaptureDraft } from '@/lib/ai/captureClient';
 import { createLocalCaptureDraft } from '@/lib/capture';
 import { buildImportedContent, extractImportBlobText, getImportFileKind } from '@/lib/import/fileText';
@@ -30,8 +30,27 @@ export async function createRawAssetFromFile(file: File): Promise<RawAssetImport
   }
 
   const now = Date.now();
+  const id = createId('raw');
+  const source = kind === 'image' ? 'image' : 'file';
+  const rawEntry = await createEntry({
+    content: buildRawEntryContent({
+      filename: file.name,
+      kind,
+      size: file.size,
+      contentHash,
+      status: '待解析，原始文件已保存到 Raw Inbox。',
+    }),
+    source,
+    processed: false,
+    capturedAt: now,
+    fileMetadata: {
+      filename: file.name,
+      mimeType: file.type,
+      url: `raw://${id}`,
+    },
+  });
   const asset: RawAsset = {
-    id: createId('raw'),
+    id,
     filename: file.name,
     mimeType: file.type,
     kind,
@@ -40,6 +59,7 @@ export async function createRawAssetFromFile(file: File): Promise<RawAssetImport
     blob: file,
     dataBase64: bytesToBase64(new Uint8Array(buffer)),
     status: 'raw',
+    entryId: rawEntry.id,
     createdAt: now,
     updatedAt: now,
   };
@@ -96,6 +116,14 @@ export async function processRawAsset(
     });
     const extractedAt = Date.now();
 
+    if (asset.entryId) {
+      await updateEntry(asset.entryId, {
+        content,
+        source: asset.kind === 'image' ? 'image' : 'file',
+        processed: false,
+      });
+    }
+
     await db.rawAssets.update(asset.id, {
       status: 'compiling',
       extractedText,
@@ -107,6 +135,7 @@ export async function processRawAsset(
       content,
       source: asset.kind === 'image' ? 'image' : 'file',
       filename: asset.filename,
+      targetEntryId: asset.entryId,
     });
     const processed = await processIngestJob(job.id, extractor ?? extractRawAssetCaptureDraft);
     const completedAt = Date.now();
@@ -115,7 +144,7 @@ export async function processRawAsset(
     await db.rawAssets.update(asset.id, {
       status: finalStatus,
       ingestJobId: job.id,
-      entryId: processed?.entryId,
+      entryId: processed?.entryId ?? asset.entryId,
       error: finalStatus === 'failed' ? processed?.error ?? '编译失败。' : undefined,
       compiledAt: completedAt,
       updatedAt: completedAt,
@@ -223,3 +252,29 @@ function base64ToBytes(value: string) {
   }
   return bytes;
 }
+
+function buildRawEntryContent(input: {
+  filename: string;
+  kind: RawAssetKind;
+  size: number;
+  contentHash: string;
+  status: string;
+}) {
+  return [
+    `# 原始文件：${input.filename}`,
+    '',
+    `来源格式：${rawKindLabels[input.kind]}`,
+    `文件大小：${input.size} bytes`,
+    `内容指纹：${input.contentHash}`,
+    `采集状态：${input.status}`,
+    '',
+    '这条记录用于保证文件采集先成功。解析和结构化编译会异步补充完整正文、实体、关系和任务。',
+  ].join('\n');
+}
+
+const rawKindLabels: Record<RawAssetKind, string> = {
+  text: '文本',
+  word: 'Word',
+  pdf: 'PDF',
+  image: '图片',
+};

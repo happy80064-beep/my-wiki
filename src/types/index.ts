@@ -164,6 +164,7 @@ export type IngestJob = {
   content: string;
   source: EntrySource;
   filename?: string;
+  targetEntryId?: ID;
   contentHash: string;
   status: IngestJobStatus;
   retryCount: number;
