@@ -13,9 +13,10 @@ import {
 } from '@/lib/capture';
 import { extractCaptureDraft } from '@/lib/ai/captureClient';
 import { createIngestJob, processNextIngestJob } from '@/lib/ingest';
-import { buildImportedContent, extractImportFileText, isSupportedImportFile } from '@/lib/import/fileText';
+import { isSupportedImportFile } from '@/lib/import/fileText';
+import { createRawAssetFromFile, processNextRawAsset } from '@/lib/rawAssets';
 import { db } from '@/lib/db';
-import type { EntityType, RelationshipType, Scene, TaskStatus } from '@/types';
+import type { EntityType, RawAssetStatus, RelationshipType, Scene, TaskStatus } from '@/types';
 
 const entityTypes: EntityType[] = ['person', 'project', 'event', 'topic'];
 const scenes: Scene[] = ['work', 'life', 'social', 'personal'];
@@ -52,6 +53,22 @@ const relationshipLabels: Record<RelationshipType, string> = {
   mentions: '提及',
 };
 
+const rawAssetStatusLabel: Record<RawAssetStatus, string> = {
+  raw: '待编译',
+  extracting: '解析中',
+  compiling: '编译中',
+  compiled: '已入库',
+  skipped: '已跳过',
+  failed: '失败',
+};
+
+const assetKindLabel = {
+  text: '文本',
+  word: 'Word',
+  pdf: 'PDF',
+  image: '图片',
+} as const;
+
 type SaveResult = {
   entities: number;
   relationships: number;
@@ -86,7 +103,9 @@ export function CapturePage() {
   const [organizeProgress, setOrganizeProgress] = useState<ProgressState | null>(null);
   const [importProgress, setImportProgress] = useState<ProgressState | null>(null);
   const [queueProgress, setQueueProgress] = useState<ProgressState | null>(null);
+  const [isRawDropActive, setIsRawDropActive] = useState(false);
   const ingestJobs = useLiveQuery(() => db.ingestJobs.orderBy('createdAt').reverse().limit(8).toArray(), [], []);
+  const rawAssets = useLiveQuery(() => db.rawAssets.orderBy('createdAt').reverse().limit(10).toArray(), [], []);
 
   const draftEntities = useMemo(() => (draft ? getDraftEntities(draft) : []), [draft]);
 
@@ -177,22 +196,23 @@ export function CapturePage() {
 
     const selectedFiles = Array.from(files);
     let count = 0;
+    let reused = 0;
     const errors: string[] = [];
     setImportProgress({
       active: true,
       percent: 0,
-      label: '准备批量导入',
+      label: '保存到 Raw Inbox',
       detail: `共 ${selectedFiles.length} 个文件`,
     });
 
     for (let index = 0; index < selectedFiles.length; index += 1) {
       const file = selectedFiles[index];
-      const basePercent = Math.round((index / selectedFiles.length) * 100);
+      const percent = Math.round(((index + 1) / selectedFiles.length) * 100);
       if (!isSupportedImportFile(file.name, file.type)) {
         errors.push(`${file.name}：格式暂不支持`);
         setImportProgress({
           active: true,
-          percent: basePercent,
+          percent,
           label: `跳过 ${file.name}`,
           detail: `${index + 1}/${selectedFiles.length}`,
         });
@@ -200,40 +220,32 @@ export function CapturePage() {
       }
 
       try {
-        const extraction = await extractImportFileText(file, (progress) => {
-          const fileShare = progress.percent / selectedFiles.length;
-          setImportProgress({
-            active: true,
-            percent: Math.min(99, Math.round(basePercent + fileShare)),
-            label: progress.label,
-            detail: `${index + 1}/${selectedFiles.length}`,
-          });
+        const result = await createRawAssetFromFile(file);
+        if (result.reused) reused += 1;
+        else count += 1;
+        setImportProgress({
+          active: true,
+          percent,
+          label: result.reused ? `已存在 ${file.name}` : `已保存 ${file.name}`,
+          detail: `${index + 1}/${selectedFiles.length}`,
         });
-        if (!extraction.text.trim()) {
-          errors.push(`${file.name}：没有提取到可用文本`);
-          continue;
-        }
-        await createIngestJob({
-          content: buildImportedContent(extraction),
-          source: extraction.source,
-          filename: extraction.filename,
-        });
-        count += 1;
       } catch (error) {
-        errors.push(`${file.name}：${error instanceof Error ? error.message : '解析失败'}`);
+        errors.push(`${file.name}：${error instanceof Error ? error.message : '保存失败'}`);
       }
     }
 
     setImportProgress({
       active: false,
       percent: 100,
-      label: '批量导入完成',
-      detail: `成功 ${count} 个，失败/跳过 ${errors.length} 个`,
+      label: 'Raw Inbox 已接收',
+      detail: `新增 ${count} 个，已存在 ${reused} 个，失败/跳过 ${errors.length} 个`,
     });
     setQueueMessage(
-      count > 0
-        ? `已加入 ${count} 个文件到摄入队列。${errors.length > 0 ? `未导入：${errors.slice(0, 3).join('；')}` : ''}`
-        : `没有可导入的文件。${errors.slice(0, 3).join('；')}`,
+      count + reused > 0
+        ? `已放入 Raw Inbox：新增 ${count} 个，已存在 ${reused} 个。可稍后点击“编译新材料”。${
+            errors.length > 0 ? `未接收：${errors.slice(0, 3).join('；')}` : ''
+          }`
+        : `没有可接收的文件。${errors.slice(0, 3).join('；')}`,
     );
     window.setTimeout(() => setImportProgress(null), 1800);
   }
@@ -243,31 +255,55 @@ export function CapturePage() {
     setQueueMessage(null);
     let processed = 0;
     try {
-      const total = await db.ingestJobs.where('status').equals('pending').count();
+      const rawTotal =
+        (await db.rawAssets.where('status').equals('raw').count()) +
+        (await db.rawAssets.where('status').equals('failed').count());
+      const ingestTotal = await db.ingestJobs.where('status').equals('pending').count();
+      const total = rawTotal + ingestTotal;
       if (total === 0) {
-        setQueueProgress({ active: false, percent: 100, label: '当前没有待处理队列项' });
-        setQueueMessage('当前没有待处理队列项。');
+        setQueueProgress({ active: false, percent: 100, label: '当前没有待编译材料' });
+        setQueueMessage('当前没有待编译材料。');
         window.setTimeout(() => setQueueProgress(null), 1200);
         return;
       }
 
-      setQueueProgress({ active: true, percent: 0, label: '开始处理摄入队列', detail: `0/${total}` });
-      for (let index = 0; index < total; index += 1) {
+      setQueueProgress({ active: true, percent: 0, label: '开始编译新材料', detail: `0/${total}` });
+      for (let index = 0; index < rawTotal; index += 1) {
+        const result = await processNextRawAsset(undefined, (progress) => {
+          setQueueProgress({
+            active: true,
+            percent: Math.min(99, Math.round(((processed + progress.percent / 100) / total) * 100)),
+            label: progress.label,
+            detail: `${processed}/${total}`,
+          });
+        });
+        if (!result) break;
+        processed += 1;
+        setQueueProgress({
+          active: true,
+          percent: Math.round((processed / total) * 100),
+          label: result.filename ? `已编译 ${result.filename}` : '已编译材料',
+          detail: `${processed}/${total}`,
+        });
+      }
+
+      for (let index = 0; index < ingestTotal; index += 1) {
         const result = await processNextIngestJob();
         if (!result) break;
         processed += 1;
         setQueueProgress({
           active: true,
           percent: Math.round((processed / total) * 100),
-          label: result.filename ? `已处理 ${result.filename}` : '已处理队列项',
+          label: result.filename ? `已处理 ${result.filename}` : '已处理文本队列项',
           detail: `${processed}/${total}`,
         });
       }
-      setQueueMessage(processed > 0 ? `已处理 ${processed} 个队列项。` : '当前没有待处理队列项。');
+
+      setQueueMessage(processed > 0 ? `已编译 ${processed} 个材料。` : '当前没有待编译材料。');
       setQueueProgress({
         active: false,
         percent: 100,
-        label: '队列处理完成',
+        label: '编译完成',
         detail: `${processed}/${total}`,
       });
       window.setTimeout(() => setQueueProgress(null), 1500);
@@ -423,42 +459,76 @@ export function CapturePage() {
             </div>
           ) : null}
           <section className="mt-5 rounded-[12px] border border-[#e5e5e4] bg-[#fbfbfa] p-4">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h3 className="text-sm font-semibold text-[#1f2937]">摄入队列</h3>
-                <p className="mt-1 text-xs text-[#626965]">支持重复内容哈希缓存；同一原文已入库时会跳过。</p>
+            <div
+              className={`rounded-[12px] border border-dashed px-3 py-3 transition ${
+                isRawDropActive ? 'border-[#155eef] bg-[#eef5ff]' : 'border-[#d9d9d6] bg-white'
+              }`}
+              onDragOver={(event) => {
+                event.preventDefault();
+                setIsRawDropActive(true);
+              }}
+              onDragLeave={() => setIsRawDropActive(false)}
+              onDrop={(event) => {
+                event.preventDefault();
+                setIsRawDropActive(false);
+                void handleImportFiles(event.dataTransfer.files);
+              }}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-[#1f2937]">Raw Inbox</h3>
+                  <p className="mt-1 text-xs text-[#626965]">
+                    拖入文件先原样收进本地收件箱；解析、AI 提取和写入 Wiki 可异步批量执行。
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleProcessQueue}
+                  disabled={isQueueProcessing}
+                  className="inline-flex items-center gap-2 rounded-full bg-[#155eef] px-3 py-1.5 text-xs font-medium text-white disabled:bg-[#a8b7d8]"
+                >
+                  {isQueueProcessing ? <Loader2 size={14} className="animate-spin" /> : <WandSparkles size={14} />}
+                  编译新材料
+                </button>
               </div>
-              <button
-                type="button"
-                onClick={handleProcessQueue}
-                disabled={isQueueProcessing}
-                className="inline-flex items-center gap-2 rounded-full bg-[#155eef] px-3 py-1.5 text-xs font-medium text-white disabled:bg-[#a8b7d8]"
-              >
-                {isQueueProcessing ? <Loader2 size={14} className="animate-spin" /> : <WandSparkles size={14} />}
-                处理队列
-              </button>
+              <p className="mt-3 text-xs text-[#626965]">支持 Markdown、文本、Word、PDF 和图片。采集完成后可稍后统一编译。</p>
             </div>
-            {queueProgress ? (
-              <div className="mt-3">
-                <ProgressBar progress={queueProgress} />
-              </div>
-            ) : null}
-            {queueMessage ? <p className="mt-2 text-xs text-[#626965]">{queueMessage}</p> : null}
+            <div className="mt-3">
+              {queueProgress ? (
+                <div>
+                  <ProgressBar progress={queueProgress} />
+                </div>
+              ) : null}
+              {queueMessage ? <p className="mt-2 text-xs text-[#626965]">{queueMessage}</p> : null}
+            </div>
             <div className="mt-3 grid gap-2">
-              {ingestJobs.length === 0 ? (
-                <p className="text-xs text-[#626965]">暂无队列项。</p>
+              {rawAssets.length === 0 ? (
+                <p className="text-xs text-[#626965]">暂无 Raw 文件。可以批量选择或拖入文件后先放入收件箱。</p>
               ) : (
-                ingestJobs.map((job) => (
-                  <div key={job.id} className="rounded-[10px] border border-[#e5e5e4] bg-white px-3 py-2 text-xs">
+                rawAssets.map((asset) => (
+                  <div key={asset.id} className="rounded-[10px] border border-[#e5e5e4] bg-white px-3 py-2 text-xs">
                     <div className="flex items-center justify-between gap-3">
-                      <span className="font-medium text-[#1f2937]">{job.filename ?? job.content.slice(0, 24)}</span>
-                      <span className="rounded-full border border-[#d9d9d6] px-2 py-0.5 text-[#626965]">{job.status}</span>
+                      <div className="min-w-0">
+                        <p className="truncate font-medium text-[#1f2937]">{asset.filename}</p>
+                        <p className="mt-0.5 text-[#626965]">
+                          {assetKindLabel[asset.kind]} · {formatBytes(asset.size)}
+                        </p>
+                      </div>
+                      <span className="shrink-0 rounded-full border border-[#d9d9d6] px-2 py-0.5 text-[#626965]">
+                        {rawAssetStatusLabel[asset.status]}
+                      </span>
                     </div>
-                    {job.error ? <p className="mt-1 text-[#b42318]">{job.error}</p> : null}
+                    {asset.error ? <p className="mt-1 text-[#b42318]">{asset.error}</p> : null}
                   </div>
                 ))
               )}
             </div>
+            {ingestJobs.length > 0 ? (
+              <p className="mt-3 text-xs text-[#626965]">
+                文本摄入队列：{ingestJobs.filter((job) => job.status === 'pending').length} 个待处理， 最近{' '}
+                {ingestJobs.length} 条有记录。
+              </p>
+            ) : null}
           </section>
         </section>
 
@@ -975,6 +1045,12 @@ function Select({
       ))}
     </select>
   );
+}
+
+function formatBytes(size: number) {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function Field({ label, children }: { label: string; children: ReactNode }) {

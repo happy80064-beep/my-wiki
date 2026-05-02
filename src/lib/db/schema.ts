@@ -6,6 +6,7 @@ import type {
   GraphInsightDismissal,
   IngestCacheRecord,
   IngestJob,
+  RawAsset,
   Relationship,
   Task,
 } from '@/types';
@@ -19,6 +20,7 @@ export class MyWikiDatabase extends Dexie {
   ingestJobs!: Table<IngestJob, string>;
   ingestCache!: Table<IngestCacheRecord, string>;
   graphInsightDismissals!: Table<GraphInsightDismissal, string>;
+  rawAssets!: Table<RawAsset, string>;
 
   constructor() {
     super('mywiki');
@@ -47,6 +49,18 @@ export class MyWikiDatabase extends Dexie {
       ingestJobs: 'id, status, contentHash, createdAt, updatedAt',
       ingestCache: '&contentHash, updatedAt, *entryIds',
       graphInsightDismissals: 'id, type, dismissedAt',
+    });
+
+    this.version(4).stores({
+      entries: 'id, capturedAt, processed, source',
+      entities: 'id, type, title, *tags, *scenes, createdAt, updatedAt',
+      relationships: 'id, from, to, type, createdAt, *evidence',
+      tasks: 'id, owner, status, createdAt, dueDate, source, *linkedTo',
+      compileSuggestions: 'id, &fingerprint, status, entityId, propertyKey, evidenceEntryId, createdAt, updatedAt',
+      ingestJobs: 'id, status, contentHash, createdAt, updatedAt',
+      ingestCache: '&contentHash, updatedAt, *entryIds',
+      graphInsightDismissals: 'id, type, dismissedAt',
+      rawAssets: 'id, status, kind, contentHash, filename, createdAt, updatedAt',
     });
   }
 }

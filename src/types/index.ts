@@ -186,3 +186,26 @@ export type GraphInsightDismissal = {
   type: string;
   dismissedAt: number;
 };
+
+export type RawAssetKind = 'text' | 'word' | 'pdf' | 'image';
+
+export type RawAssetStatus = 'raw' | 'extracting' | 'compiling' | 'compiled' | 'skipped' | 'failed';
+
+export type RawAsset = {
+  id: ID;
+  filename: string;
+  mimeType: string;
+  kind: RawAssetKind;
+  size: number;
+  contentHash: string;
+  blob: Blob;
+  dataBase64?: string;
+  status: RawAssetStatus;
+  error?: string;
+  extractedText?: string;
+  ingestJobId?: ID;
+  entryId?: ID;
+  createdAt: number;
+  updatedAt: number;
+  compiledAt?: number;
+};

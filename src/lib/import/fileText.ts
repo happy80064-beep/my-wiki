@@ -14,6 +14,13 @@ export type FileExtractProgress = {
   label: string;
 };
 
+export type ExtractImportBlobInput = {
+  blob: Blob;
+  filename: string;
+  mimeType?: string;
+  kind?: ImportFileKind;
+};
+
 const textExtensions = new Set(['txt', 'md', 'markdown']);
 const wordExtensions = new Set(['doc', 'docx']);
 const imageExtensions = new Set(['png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif', 'tif', 'tiff']);
@@ -46,34 +53,56 @@ export async function extractImportFileText(
 ): Promise<ImportFileExtraction> {
   const kind = getImportFileKind(file.name, file.type);
   if (!kind) {
-    throw new Error(`暂不支持 ${file.name} 的文件格式。`);
+    throw new Error(`${file.name} 的格式暂不支持。`);
   }
 
-  onProgress?.({ percent: 8, label: `读取 ${file.name}` });
+  const text = await extractImportBlobText(
+    {
+      blob: file,
+      filename: file.name,
+      mimeType: file.type,
+      kind,
+    },
+    onProgress,
+  );
+
+  return {
+    filename: file.name,
+    kind,
+    source: kind === 'image' ? 'image' : 'file',
+    text,
+  };
+}
+
+export async function extractImportBlobText(
+  input: ExtractImportBlobInput,
+  onProgress?: (progress: FileExtractProgress) => void,
+) {
+  const kind = input.kind ?? getImportFileKind(input.filename, input.mimeType);
+  if (!kind) {
+    throw new Error(`${input.filename} 的格式暂不支持。`);
+  }
+
+  onProgress?.({ percent: 8, label: `读取 ${input.filename}` });
 
   if (kind === 'text') {
-    const text = await file.text();
-    onProgress?.({ percent: 100, label: `${file.name} 已读取` });
-    return {
-      filename: file.name,
-      kind,
-      source: 'file',
-      text: text.trim(),
-    };
+    const text = await readBlobAsText(input.blob);
+    onProgress?.({ percent: 100, label: `${input.filename} 已读取` });
+    return text.trim();
   }
 
-  const dataBase64 = await readFileAsBase64(file, (percent) => {
+  const dataBase64 = await readBlobAsBase64(input.blob, (percent) => {
     onProgress?.({
       percent: Math.min(42, 8 + Math.round(percent * 0.34)),
-      label: `读取 ${file.name}`,
+      label: `读取 ${input.filename}`,
     });
   });
 
-  onProgress?.({ percent: 48, label: `解析 ${file.name}` });
+  onProgress?.({ percent: 48, label: `解析 ${input.filename}` });
   let simulatedPercent = 48;
   const timer = window.setInterval(() => {
     simulatedPercent = Math.min(92, simulatedPercent + 3);
-    onProgress?.({ percent: simulatedPercent, label: `解析 ${file.name}` });
+    onProgress?.({ percent: simulatedPercent, label: `解析 ${input.filename}` });
   }, 800);
 
   let payload: { text?: string; error?: string };
@@ -82,27 +111,22 @@ export async function extractImportFileText(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        filename: file.name,
-        mimeType: file.type,
+        filename: input.filename,
+        mimeType: input.mimeType ?? input.blob.type,
         dataBase64,
       }),
     });
 
     payload = (await response.json()) as { text?: string; error?: string };
     if (!response.ok || !payload.text?.trim()) {
-      throw new Error(payload.error || `${file.name} 没有提取到可用文本。`);
+      throw new Error(payload.error || `${input.filename} 没有提取到可用文本。`);
     }
   } finally {
     window.clearInterval(timer);
   }
 
-  onProgress?.({ percent: 100, label: `${file.name} 已解析` });
-  return {
-    filename: file.name,
-    kind,
-    source: kind === 'image' ? 'image' : 'file',
-    text: payload.text.trim(),
-  };
+  onProgress?.({ percent: 100, label: `${input.filename} 已解析` });
+  return payload.text.trim();
 }
 
 export function buildImportedContent(extraction: ImportFileExtraction) {
@@ -115,7 +139,7 @@ export function buildImportedContent(extraction: ImportFileExtraction) {
   ].join('\n');
 }
 
-function readFileAsBase64(file: File, onProgress?: (percent: number) => void) {
+function readBlobAsBase64(blob: Blob, onProgress?: (percent: number) => void) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.onprogress = (event) => {
@@ -128,7 +152,24 @@ function readFileAsBase64(file: File, onProgress?: (percent: number) => void) {
       const result = String(reader.result ?? '');
       resolve(result.includes(',') ? result.split(',').at(-1) ?? '' : result);
     };
-    reader.readAsDataURL(file);
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function readBlobAsText(blob: Blob) {
+  if (typeof blob.text === 'function') {
+    return blob.text();
+  }
+
+  if (typeof blob.arrayBuffer === 'function') {
+    return new TextDecoder().decode(await blob.arrayBuffer());
+  }
+
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error ?? new Error('文件读取失败。'));
+    reader.onload = () => resolve(String(reader.result ?? ''));
+    reader.readAsText(blob);
   });
 }
 
@@ -141,5 +182,5 @@ const kindLabels: Record<ImportFileKind, string> = {
   text: '文本',
   word: 'Word',
   pdf: 'PDF',
-  image: '图片 OCR',
+  image: '图片解析',
 };
