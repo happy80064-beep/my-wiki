@@ -577,6 +577,13 @@ type EvidenceHit = {
   score: number;
 };
 
+type MetricAnswer = {
+  label: string;
+  value: string;
+  confidence: 'high' | 'medium';
+  reason: string;
+};
+
 type QueryContextBudget = {
   maxContextChars: number;
   responseReserve: number;
@@ -1007,7 +1014,11 @@ function formatWikiReadAnswer(question: string, document: EntityDocument) {
   if (queriedPropertyKey && propertyValue) {
     lines.push(`${entity.title}的${propertyLabel(queriedPropertyKey)}是${propertyValue}。`);
   } else if (metricAnswer) {
-    lines.push(`${entity.title}的${metricAnswer.label}是${metricAnswer.value}。`);
+    if (metricAnswer.confidence === 'high') {
+      lines.push(`${entity.title}的${metricAnswer.label}约为 ${metricAnswer.value}。`);
+    } else {
+      lines.push(`材料中提到 ${metricAnswer.value}，可能与${entity.title}的${metricAnswer.label}相关，建议打开来源确认。`);
+    }
   } else {
     lines.push(`${entity.title}（${entityTypeLabel(entity.type)}）`);
   }
@@ -1040,6 +1051,7 @@ function formatWikiReadAnswer(question: string, document: EntityDocument) {
     lines.push(`${propertyLabel(queriedPropertyKey)}：${propertyValue}（${sourceHint}）`);
   } else if (metricAnswer) {
     lines.push(`${metricAnswer.label}：${metricAnswer.value}（来源材料命中，待编译回 Wiki）`);
+    lines.push(`规则置信度：${metricConfidenceLabel(metricAnswer.confidence)}（${metricAnswer.reason}）`);
   }
 
   const openTasks = tasks.filter((task) => task.status !== 'done' && task.status !== 'cancelled');
@@ -1471,7 +1483,8 @@ async function composeResultIfRequested(
 
   try {
     const composed = await composeQueryAnswer(payload);
-    if (composedContradictsConcreteDraft(payload.draftAnswer, composed.answer)) {
+    const correction = isExplicitFastAnswerCorrection(composed.answer);
+    if (!correction && composedContradictsConcreteDraft(payload.draftAnswer, composed.answer)) {
       return {
         ...result,
         trace: [
@@ -1484,7 +1497,7 @@ async function composeResultIfRequested(
         ],
       };
     }
-    if (composedDriftsFromFastAnswer(payload.draftAnswer, composed.answer)) {
+    if (!correction && composedDriftsFromFastAnswer(payload.draftAnswer, composed.answer)) {
       return {
         ...result,
         trace: [
@@ -1509,8 +1522,10 @@ async function composeResultIfRequested(
         ...(result.trace ?? []),
         {
           layer: 'answer',
-          label: 'LLM 表达',
-          detail: `${providerLabel(composed.provider)} · ${composed.model} 已基于结构化召回材料优化回答。`,
+          label: correction ? 'LLM 修正' : 'LLM 表达',
+          detail: correction
+            ? `${providerLabel(composed.provider)} · ${composed.model} 明确修正了快速答案，并已在正文标注。`
+            : `${providerLabel(composed.provider)} · ${composed.model} 已基于结构化召回材料优化回答。`,
         },
       ],
     };
@@ -1535,6 +1550,10 @@ function composedContradictsConcreteDraft(draftAnswer: string, composedAnswer: s
     /(没有|未|暂未|尚未).{0,18}(找到|记录|明确|确认|披露|解析|提取|编译)|无法确认|不能确认|不确定/.test(composedAnswer) ||
     /未被完整披露|未完整披露|未能解析|未解析出来|没有完整披露/.test(composedAnswer)
   );
+}
+
+function isExplicitFastAnswerCorrection(answer: string) {
+  return /^已修正快速答案[:：]/.test(answer.trim());
 }
 
 function composedDriftsFromFastAnswer(draftAnswer: string, composedAnswer: string) {
@@ -1855,17 +1874,23 @@ function extractMetricAnswer(question: string, hits: EvidenceHit[]) {
   const terms = buildMetricTerms(question);
   if (terms.length === 0) return undefined;
 
+  let mediumCandidate: MetricAnswer | undefined;
   for (const hit of hits) {
-    const value = extractMetricValueFromText(hit.entry.content || hit.snippet, terms);
-    if (value) {
-      return {
-        label: normalizeMetricLabel(terms[0] ?? '相关数值'),
-        value,
-      };
+    const extraction = extractMetricValueFromText(hit.entry.content || hit.snippet, terms);
+    if (!extraction) continue;
+    const answer = {
+      label: normalizeMetricLabel(terms[0] ?? '相关数值'),
+      value: extraction.value,
+      confidence: extraction.confidence,
+      reason: extraction.reason,
+    } satisfies MetricAnswer;
+    if (answer.confidence === 'high') {
+      return answer;
     }
+    mediumCandidate ??= answer;
   }
 
-  return undefined;
+  return mediumCandidate;
 }
 
 function extractMetricValueFromText(text: string, terms: string[]) {
@@ -1877,14 +1902,48 @@ function extractMetricValueFromText(text: string, terms: string[]) {
   const matchedSentences = sentences.filter((sentence) =>
     terms.some((term) => evidenceTextMatches(sentence, term)),
   );
-  const candidates = matchedSentences.length > 0 ? matchedSentences : sentences;
 
-  for (const sentence of candidates) {
+  for (const sentence of matchedSentences) {
     const value = extractCurrencyLikeValue(sentence);
-    if (value) return value;
+    if (value) {
+      return {
+        value,
+        confidence: metricSentenceConfidence(sentence, terms),
+        reason: metricSentenceConfidence(sentence, terms) === 'high'
+          ? '来源句同时包含指标词和金额单位'
+          : '来源句包含部分指标词和金额单位，但上下文仍需确认',
+      } satisfies Omit<MetricAnswer, 'label'>;
+    }
+  }
+
+  if (matchedSentences.length > 0) {
+    for (const sentence of sentences) {
+      const value = extractCurrencyLikeValue(sentence);
+      if (value) {
+        return {
+          value,
+          confidence: 'medium',
+          reason: '同一来源中找到问题指标词和金额，但金额不在同一句中',
+        } satisfies Omit<MetricAnswer, 'label'>;
+      }
+    }
   }
 
   return undefined;
+}
+
+function metricSentenceConfidence(sentence: string, terms: string[]): MetricAnswer['confidence'] {
+  const normalizedSentence = normalize(sentence);
+  const strongTermHit = terms.some((term) => {
+    const normalizedTerm = normalize(term);
+    return normalizedTerm.length >= 4 && normalizedSentence.includes(normalizedTerm);
+  });
+  const metricVerbHit = /(为|约|达到|合计|总计|预计|测算|收入|营收)/.test(sentence);
+  return strongTermHit && metricVerbHit ? 'high' : 'medium';
+}
+
+function metricConfidenceLabel(confidence: MetricAnswer['confidence']) {
+  return confidence === 'high' ? '高' : '中';
 }
 
 function extractCurrencyLikeValue(text: string) {

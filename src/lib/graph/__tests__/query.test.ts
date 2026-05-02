@@ -214,10 +214,31 @@ describe('structured query', () => {
 
     const result = await runStructuredQuery('福瑞科技园三期稳定运营期的年均项目总收入是多少？');
 
-    expect(result.answer).toContain('年均项目总收入是1,234.56万元');
+    expect(result.answer).toContain('年均项目总收入约为 1,234.56万元');
+    expect(result.answer).toContain('规则置信度：高');
     expect(result.answer).toContain('来源材料命中');
     expect(result.answer).not.toContain('短视频爆款元素');
     expect(result.sources.some((source) => source.id === entry.id)).toBe(true);
+  });
+
+  it('marks numeric metric answers as medium confidence when the number is contextually ambiguous', async () => {
+    const entry = await createEntry({
+      content:
+        '福瑞科技园三期稳定运营期的年均项目总收入仍在测算。运营测算附件中出现 7,825 万元这一数字，但未明确标注为年均收入。',
+      source: 'text',
+    });
+    await createEntity({
+      type: 'topic',
+      title: '福瑞健康科技园',
+      summary: '园区项目。',
+      tags: ['福瑞科技园', '三期'],
+      sourceEntries: [entry.id],
+    });
+
+    const result = await runStructuredQuery('福瑞科技园三期稳定运营期的年均项目总收入是多少？');
+
+    expect(result.answer).toContain('材料中提到 7,825万元，可能与福瑞健康科技园的年均项目总收入相关');
+    expect(result.answer).toContain('规则置信度：中');
   });
 
   it('filters blank source titles from query sources', async () => {
@@ -486,6 +507,38 @@ describe('structured query', () => {
     expect(result.answer).not.toContain('小李');
     expect(result.llm).toBeUndefined();
     expect(result.trace?.some((step) => step.detail.includes('偏离快速答案骨架'))).toBe(true);
+  });
+
+  it('allows an LLM answer to correct the fast answer only when the correction is explicit', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(
+        JSON.stringify({
+          answer: '已修正快速答案：桌面数字生命体的唤醒词应为“小李”，因为完整证据里后续配置覆盖了早期记录。',
+          provider: 'minimax',
+          model: 'MiniMax-M2.7',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )),
+    );
+
+    const entry = await createEntry({
+      content: '语音输入部分持续优化，主唤醒词是“小林”。',
+      source: 'text',
+    });
+    await createEntity({
+      type: 'project',
+      title: '桌面数字生命体',
+      summary: '一个本地桌面智能体原型。',
+      sourceEntries: [entry.id],
+    });
+
+    const result = await runStructuredQuery('桌面生命体的唤醒词是什么', { composeWithLlm: true });
+
+    expect(result.answer).toContain('已修正快速答案');
+    expect(result.answer).toContain('小李');
+    expect(result.llm?.provider).toBe('minimax');
+    expect(result.trace?.some((step) => step.label === 'LLM 修正')).toBe(true);
   });
 
   it('extracts property values from the full source entry when the matched snippet is too narrow', async () => {

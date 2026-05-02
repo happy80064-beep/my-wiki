@@ -17,7 +17,7 @@ export function QueryPage() {
     | { status: 'saved'; message: string; href: string }
     | { status: 'error'; message: string }
   >({ status: 'idle' });
-  const answerPhase = result?.llm ? 'optimized' : isRefining ? 'refining' : result ? 'fast' : 'idle';
+  const answerPhase = isLoading ? 'analyzing' : result?.llm ? 'optimized' : isRefining ? 'refining' : result ? 'fast' : 'idle';
 
   async function handleAsk() {
     if (!question.trim()) return;
@@ -25,13 +25,17 @@ export function QueryPage() {
     requestIdRef.current = requestId;
     setIsLoading(true);
     setIsRefining(false);
+    setResult(null);
     setSaveState({ status: 'idle' });
     const currentQuestion = question.trim();
-    const fastResult = await runStructuredQuery(currentQuestion, {
-      composeWithLlm: false,
-      planWithAgent: false,
-      useCache: false,
-    });
+    const [fastResult] = await Promise.all([
+      runStructuredQuery(currentQuestion, {
+        composeWithLlm: false,
+        planWithAgent: false,
+        useCache: false,
+      }),
+      wait(220),
+    ]);
     if (requestIdRef.current !== requestId) return;
     setResult(fastResult);
     setIsLoading(false);
@@ -118,7 +122,14 @@ export function QueryPage() {
           </div>
           {!result ? (
             <div className="mt-5 rounded-[12px] border border-dashed border-[#d9d9d6] bg-[#fbfbfa] p-6 text-sm leading-6 text-[#626965]">
-              输入问题后，这里会展示结构化过滤后的答案和来源。
+              {isLoading ? (
+                <span className="inline-flex items-center gap-2 text-[#155eef]">
+                  <Loader2 size={14} className="animate-spin" />
+                  正在分析问题类型、读取索引和高相关来源...
+                </span>
+              ) : (
+                '输入问题后，这里会展示结构化过滤后的答案和来源。'
+              )}
             </div>
           ) : (
             <div className="mt-5 space-y-5">
@@ -292,8 +303,12 @@ export function QueryPage() {
   );
 }
 
-function AnswerPhaseBadge({ phase }: { phase: 'fast' | 'refining' | 'optimized' }) {
+function AnswerPhaseBadge({ phase }: { phase: 'analyzing' | 'fast' | 'refining' | 'optimized' }) {
   const config = {
+    analyzing: {
+      label: '快速分析中',
+      className: 'border-[#d9e5ff] bg-[#f4f8ff] text-[#155eef]',
+    },
     fast: {
       label: '快速答案',
       className: 'border-[#d9d9d6] bg-[#fbfbfa] text-[#626965]',
@@ -310,11 +325,17 @@ function AnswerPhaseBadge({ phase }: { phase: 'fast' | 'refining' | 'optimized' 
 
   return (
     <span className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs font-medium ${config.className}`}>
-      {phase === 'refining' ? <Loader2 size={12} className="animate-spin" /> : null}
+      {phase === 'analyzing' || phase === 'refining' ? <Loader2 size={12} className="animate-spin" /> : null}
       {phase === 'optimized' ? <CheckCircle2 size={12} /> : null}
       {config.label}
     </span>
   );
+}
+
+function wait(ms: number) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
 }
 
 const sourceTypeLabel: Record<StructuredQueryResult['sources'][number]['type'], string> = {
