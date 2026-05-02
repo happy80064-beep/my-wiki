@@ -532,19 +532,21 @@ export function CapturePage() {
                 <p className="text-xs text-[#626965]">暂无 Raw 文件。可以批量选择或拖入文件后先放入收件箱。</p>
               ) : (
                 rawAssets.map((asset) => (
-                  <div key={asset.id} className="rounded-[10px] border border-[#e5e5e4] bg-white px-3 py-2 text-xs">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="truncate font-medium text-[#1f2937]">{asset.filename}</p>
+                  <div key={asset.id} className="min-w-0 rounded-[10px] border border-[#e5e5e4] bg-white px-3 py-2 text-xs">
+                    <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+                      <div className="min-w-0 flex-1 basis-48">
+                        <p className="max-w-full overflow-hidden text-ellipsis whitespace-nowrap font-medium text-[#1f2937]">
+                          {asset.filename}
+                        </p>
                         <p className="mt-0.5 text-[#626965]">
                           {assetKindLabel[asset.kind]} · {formatBytes(asset.size)}
                         </p>
                       </div>
-                      <span className="shrink-0 rounded-full border border-[#d9d9d6] px-2 py-0.5 text-[#626965]">
+                      <span className="max-w-full shrink-0 rounded-full border border-[#d9d9d6] px-2 py-0.5 text-[#626965]">
                         {rawAssetStatusLabel[asset.status]}
                       </span>
                     </div>
-                    {asset.error ? <p className="mt-1 text-[#b42318]">{asset.error}</p> : null}
+                    {asset.error ? <p className="mt-1 break-words text-[#b42318]">{asset.error}</p> : null}
                   </div>
                 ))
               )}
