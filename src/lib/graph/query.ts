@@ -1010,18 +1010,14 @@ function formatWikiReadAnswer(question: string, document: EntityDocument) {
   const evidencePropertyValue = queriedPropertyKey ? extractEvidencePropertyValue(queriedPropertyKey, evidenceHits) : undefined;
   const propertyValue = compiledPropertyValue ?? evidencePropertyValue;
   const metricAnswer = !propertyValue ? extractMetricAnswer(question, evidenceHits) : undefined;
-
-  if (queriedPropertyKey && propertyValue) {
-    lines.push(`${entity.title}的${propertyLabel(queriedPropertyKey)}是${propertyValue}。`);
-  } else if (metricAnswer) {
-    if (metricAnswer.confidence === 'high') {
-      lines.push(`${entity.title}的${metricAnswer.label}约为 ${metricAnswer.value}。`);
-    } else {
-      lines.push(`材料中提到 ${metricAnswer.value}，可能与${entity.title}的${metricAnswer.label}相关，建议打开来源确认。`);
-    }
-  } else {
-    lines.push(`${entity.title}（${entityTypeLabel(entity.type)}）`);
+  if (metricAnswer) {
+    return formatMetricFastAnswer(entity, metricAnswer);
   }
+  if (queriedPropertyKey && propertyValue) {
+    return formatAttributeFastAnswer(entity, queriedPropertyKey, propertyValue, Boolean(compiledPropertyValue));
+  }
+
+  lines.push(`${entity.title}（${entityTypeLabel(entity.type)}）`);
 
   const overview = profile?.overview && profile.overview !== `${entity.title} 相关记录。` ? profile.overview : entity.summary;
   if (overview) {
@@ -1046,14 +1042,6 @@ function formatWikiReadAnswer(question: string, document: EntityDocument) {
     lines.push(`当前状态：${status}`);
   }
 
-  if (queriedPropertyKey && propertyValue) {
-    const sourceHint = compiledPropertyValue ? '已写入 Wiki' : '来源材料命中，待编译回 Wiki';
-    lines.push(`${propertyLabel(queriedPropertyKey)}：${propertyValue}（${sourceHint}）`);
-  } else if (metricAnswer) {
-    lines.push(`${metricAnswer.label}：${metricAnswer.value}（来源材料命中，待编译回 Wiki）`);
-    lines.push(`规则置信度：${metricConfidenceLabel(metricAnswer.confidence)}（${metricAnswer.reason}）`);
-  }
-
   const openTasks = tasks.filter((task) => task.status !== 'done' && task.status !== 'cancelled');
   if (openTasks.length > 0 && /(任务|待办|优化|推进|下一阶段|后续|优先级)/.test(question)) {
     lines.push(`未完成任务：\n${openTasks.slice(0, 5).map((task, index) => `${index + 1}. ${task.description}`).join('\n')}`);
@@ -1062,21 +1050,6 @@ function formatWikiReadAnswer(question: string, document: EntityDocument) {
   const relatedTitles = readableRelatedTitles(relatedEntities);
   if (relatedTitles.length > 0) {
     lines.push(`${isRelationshipOrToolQuestion(question) ? '直接关联' : '相关实体'}：${relatedTitles.slice(0, 8).join('、')}`);
-  }
-
-  if (relationships.length > 0 && isRelationshipOrToolQuestion(question)) {
-    lines.push(`关系证据：已读取 ${relationships.length} 条一跳关系。`);
-  }
-
-  if (evidenceHits.length > 0) {
-    lines.push(formatEvidenceHitLines(evidenceHits, {
-      includeSnippet: Boolean(queriedPropertyKey && propertyValue),
-      maxSnippets: 1,
-    }));
-  }
-
-  if (entries.length > 0) {
-    lines.push(`来源：${entries.length} 条原始捕获可追溯。`);
   }
 
   return lines.join('\n\n');
@@ -1869,6 +1842,29 @@ function isRelationshipOrToolQuestion(question: string) {
   return /(关系|关联|相关|依赖|基于|来源|源自|工具|模型|组件|用了哪些|使用哪些|和.+什么关系)/.test(question);
 }
 
+function formatAttributeFastAnswer(entity: Entity, propertyKey: string, value: string, isCompiled: boolean) {
+  return [
+    `${entity.title}的${propertyLabel(propertyKey)}是${value}。`,
+    isCompiled
+      ? '提示：该信息已经写入 Wiki。'
+      : '提示：该信息来自来源材料命中，建议确认后编译回 Wiki。',
+  ].join('\n\n');
+}
+
+function formatMetricFastAnswer(entity: Entity, answer: MetricAnswer) {
+  if (answer.confidence === 'high') {
+    return [
+      `${entity.title}的${answer.label}约为 ${answer.value}。`,
+      '提示：该数字来自来源材料命中，建议打开来源核对原文。后续确认后可以编译回 Wiki，避免下次再从原文临时抽取。',
+    ].join('\n\n');
+  }
+
+  return [
+    `我没有找到能直接确认${entity.title}的${answer.label}的高置信数字。`,
+    `待确认线索：来源材料里出现了 ${answer.value}，但它和“${answer.label}”的对应关系还不够明确，暂不建议直接作为结论。`,
+  ].join('\n\n');
+}
+
 function extractMetricAnswer(question: string, hits: EvidenceHit[]) {
   if (!isMetricQuestion(question)) return undefined;
   const terms = buildMetricTerms(question);
@@ -1906,12 +1902,13 @@ function extractMetricValueFromText(text: string, terms: string[]) {
   for (const sentence of matchedSentences) {
     const value = extractCurrencyLikeValue(sentence);
     if (value) {
+      const confidence = adjustMetricConfidence(metricSentenceConfidence(sentence, terms), value, sentence, terms);
       return {
         value,
-        confidence: metricSentenceConfidence(sentence, terms),
-        reason: metricSentenceConfidence(sentence, terms) === 'high'
+        confidence,
+        reason: confidence === 'high'
           ? '来源句同时包含指标词和金额单位'
-          : '来源句包含部分指标词和金额单位，但上下文仍需确认',
+          : metricMediumReason(value, sentence, terms),
       } satisfies Omit<MetricAnswer, 'label'>;
     }
   }
@@ -1942,8 +1939,31 @@ function metricSentenceConfidence(sentence: string, terms: string[]): MetricAnsw
   return strongTermHit && metricVerbHit ? 'high' : 'medium';
 }
 
-function metricConfidenceLabel(confidence: MetricAnswer['confidence']) {
-  return confidence === 'high' ? '高' : '中';
+function adjustMetricConfidence(
+  confidence: MetricAnswer['confidence'],
+  value: string,
+  sentence: string,
+  terms: string[],
+): MetricAnswer['confidence'] {
+  if (confidence !== 'high') return confidence;
+  if (isYuanOnlyRevenueValue(value, sentence, terms)) return 'medium';
+  return confidence;
+}
+
+function metricMediumReason(value: string, sentence: string, terms: string[]) {
+  if (isYuanOnlyRevenueValue(value, sentence, terms)) {
+    return '金额单位为元，且问题是收入/营收类指标，可能存在表格单位或 OCR 单位丢失';
+  }
+  return '来源句包含部分指标词和金额单位，但上下文仍需确认';
+}
+
+function isYuanOnlyRevenueValue(value: string, sentence: string, terms: string[]) {
+  const normalizedValue = value.replace(/\s+/g, '');
+  if (!/元$/.test(normalizedValue) || /(万元|亿元)$/.test(normalizedValue)) return false;
+  const normalizedTerms = terms.join('');
+  const revenueLike = /(收入|营收|年均|年收入|总收入|合计)/.test(`${normalizedTerms}${sentence}`);
+  const explicitSmallUnit = /(单价|价格|费用|成本|每次|每人|每平|元\/|元每)/.test(sentence);
+  return revenueLike && !explicitSmallUnit;
 }
 
 function extractCurrencyLikeValue(text: string) {
@@ -1970,6 +1990,8 @@ function normalizeMetricValue(value: string) {
 function normalizeEvidenceForMetric(value: string) {
   return value
     .replace(/[`>#*_]+/g, ' ')
+    .replace(/万\s+元/g, '万元')
+    .replace(/亿\s+元/g, '亿元')
     .replace(/([一-龥])\s+(?=[一-龥])/g, '$1')
     .replace(/([0-9])\s+(?=[0-9])/g, '$1')
     .replace(/\s+/g, ' ')

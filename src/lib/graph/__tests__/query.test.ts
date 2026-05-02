@@ -192,7 +192,8 @@ describe('structured query', () => {
     const result = await runStructuredQuery('中国长寿行业都有哪些类型的机构？');
 
     expect(result.answer).toContain('中国长寿诊疗机构主要包括');
-    expect(result.answer).toContain('原始材料命中');
+    expect(result.answer).not.toContain('原始材料命中');
+    expect(result.answer).not.toContain('来源：');
     expect(result.answer).not.toContain('短视频爆款元素');
     expect(result.answer).not.toContain('>>>');
     expect(result.sources.some((source) => source.id === noisyEntry.id)).toBe(true);
@@ -215,8 +216,11 @@ describe('structured query', () => {
     const result = await runStructuredQuery('福瑞科技园三期稳定运营期的年均项目总收入是多少？');
 
     expect(result.answer).toContain('年均项目总收入约为 1,234.56万元');
-    expect(result.answer).toContain('规则置信度：高');
-    expect(result.answer).toContain('来源材料命中');
+    expect(result.answer).toContain('建议打开来源核对原文');
+    expect(result.answer).not.toContain('规则置信度');
+    expect(result.answer).not.toContain('原始材料命中');
+    expect(result.answer).not.toContain('来源：');
+    expect(result.answer).not.toContain('关键信息');
     expect(result.answer).not.toContain('短视频爆款元素');
     expect(result.sources.some((source) => source.id === entry.id)).toBe(true);
   });
@@ -237,8 +241,51 @@ describe('structured query', () => {
 
     const result = await runStructuredQuery('福瑞科技园三期稳定运营期的年均项目总收入是多少？');
 
-    expect(result.answer).toContain('材料中提到 7,825万元，可能与福瑞健康科技园的年均项目总收入相关');
-    expect(result.answer).toContain('规则置信度：中');
+    expect(result.answer).toContain('我没有找到能直接确认福瑞健康科技园的年均项目总收入的高置信数字');
+    expect(result.answer).toContain('待确认线索：来源材料里出现了 7,825万元');
+    expect(result.answer).not.toContain('规则置信度');
+    expect(result.answer).not.toContain('原始材料命中');
+  });
+
+  it('does not present parsed table-like currency fragments as confirmed metric answers', async () => {
+    const entry = await createEntry({
+      content:
+        '福瑞健康科技园三期稳定运营期项目平均年收入合计详见测算表。测算表附近出现 30000.00元，但单位表头和字段对应关系未解析清楚。',
+      source: 'text',
+    });
+    await createEntity({
+      type: 'topic',
+      title: '福瑞健康科技园',
+      summary: '园区项目。',
+      tags: ['福瑞科技园', '三期'],
+      sourceEntries: [entry.id],
+    });
+
+    const result = await runStructuredQuery('福瑞健康科技园三期稳定运营期的项目平均年收入合计是多少？');
+
+    expect(result.answer).toContain('我没有找到能直接确认福瑞健康科技园的项目平均年收入合计的高置信数字');
+    expect(result.answer).toContain('待确认线索：来源材料里出现了 30000.00元');
+    expect(result.answer).not.toContain('项目平均年收入合计约为 30000.00元');
+    expect(result.answer).not.toContain('规则置信度');
+  });
+
+  it('downgrades yuan-only revenue values even when they appear in the same metric sentence', async () => {
+    const entry = await createEntry({
+      content: '福瑞健康科技园三期稳定运营期项目平均年收入合计为 30000.00元。',
+      source: 'text',
+    });
+    await createEntity({
+      type: 'topic',
+      title: '福瑞健康科技园',
+      summary: '园区项目。',
+      tags: ['福瑞科技园', '三期'],
+      sourceEntries: [entry.id],
+    });
+
+    const result = await runStructuredQuery('福瑞健康科技园三期稳定运营期的项目平均年收入合计是多少？');
+
+    expect(result.answer).toContain('待确认线索：来源材料里出现了 30000.00元');
+    expect(result.answer).not.toContain('项目平均年收入合计约为 30000.00元');
   });
 
   it('filters blank source titles from query sources', async () => {
@@ -438,9 +485,9 @@ describe('structured query', () => {
 
     const result = await runStructuredQuery('桌面生命体的唤醒词是什么');
 
-    expect(result.answer).toContain('唤醒词：小林');
-    expect(result.answer).toContain('主唤醒词是“小林”');
-    expect(result.answer).toContain('原始材料命中');
+    expect(result.answer).toContain('唤醒词是小林');
+    expect(result.answer).toContain('建议确认后编译回 Wiki');
+    expect(result.answer).not.toContain('原始材料命中');
     expect(result.sources.some((source) => source.type === 'entry' && source.id === entry.id)).toBe(true);
     expect(result.trace?.some((step) => step.label === '原始材料兜底扫描')).toBe(true);
   });
@@ -471,10 +518,10 @@ describe('structured query', () => {
 
     const result = await runStructuredQuery('桌面生命体的唤醒词是什么', { composeWithLlm: true });
 
-    expect(result.answer).toContain('唤醒词：小林');
+    expect(result.answer).toContain('唤醒词是小林');
     expect(result.answer).not.toContain('未被完整披露');
     expect(result.llm).toBeUndefined();
-    expect(result.trace?.some((step) => step.detail.includes('结构化属性结论冲突'))).toBe(true);
+    expect(result.trace?.some((step) => step.detail.includes('偏离快速答案骨架'))).toBe(true);
   });
 
   it('keeps the fast answer when the LLM expression drifts from its factual skeleton', async () => {
@@ -503,7 +550,7 @@ describe('structured query', () => {
 
     const result = await runStructuredQuery('桌面生命体的唤醒词是什么', { composeWithLlm: true });
 
-    expect(result.answer).toContain('唤醒词：小林');
+    expect(result.answer).toContain('唤醒词是小林');
     expect(result.answer).not.toContain('小李');
     expect(result.llm).toBeUndefined();
     expect(result.trace?.some((step) => step.detail.includes('偏离快速答案骨架'))).toBe(true);
@@ -559,7 +606,7 @@ describe('structured query', () => {
 
     const result = await runStructuredQuery('桌面生命体的唤醒词是什么');
 
-    expect(result.answer).toContain('唤醒词：小林');
+    expect(result.answer).toContain('唤醒词是小林');
     expect(result.compileSuggestions?.[0]).toEqual(
       expect.objectContaining({
         propertyKey: 'wakeWord',
@@ -588,7 +635,8 @@ describe('structured query', () => {
     const result = await runStructuredQuery('桌面生命体的终止词是什么');
 
     expect(result.answer).toContain('miki / mi ki / 米基 / 米奇');
-    expect(result.answer).toContain('全库原始材料兜底');
+    expect(result.answer).not.toContain('全库原始材料兜底');
+    expect(result.answer).toContain('建议确认后编译回 Wiki');
     expect(result.sources.some((source) => source.type === 'entry' && source.id === globalEntry.id)).toBe(true);
   });
 
@@ -881,7 +929,7 @@ describe('structured query', () => {
 
     const secondResult = await runStructuredQuery('OpenMaic是开源的吗？', { planWithAgent: true });
 
-    expect(secondResult.answer).toContain('开源状态：开源项目');
+    expect(secondResult.answer).toContain('开源状态是开源项目');
     expect(secondResult.compileSuggestions ?? []).toEqual([]);
   });
 
