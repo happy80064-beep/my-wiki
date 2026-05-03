@@ -205,12 +205,17 @@ describe('structured query', () => {
         '福瑞科技园三期稳定运营期测算：年均项目总收入为 1,234.56 万元，相关收入来自园区运营、展示和服务配套。短视频爆款元素汇总不应进入答案。',
       source: 'text',
     });
+    const unrelatedEntry = await createEntry({
+      content:
+        '福瑞科技园三期资料索引：yaml-language-server 配置记录。短视频爆款元素汇总，成本元素、情绪强度、标题模板。',
+      source: 'text',
+    });
     await createEntity({
       type: 'topic',
       title: '福瑞健康科技园',
       summary: '提供首批B端客户资源和线下展示场景。',
       tags: ['福瑞科技园', '三期'],
-      sourceEntries: [entry.id],
+      sourceEntries: [entry.id, unrelatedEntry.id],
     });
 
     const result = await runStructuredQuery('福瑞科技园三期稳定运营期的年均项目总收入是多少？');
@@ -223,6 +228,7 @@ describe('structured query', () => {
     expect(result.answer).not.toContain('关键信息');
     expect(result.answer).not.toContain('短视频爆款元素');
     expect(result.sources.some((source) => source.id === entry.id)).toBe(true);
+    expect(result.sources.some((source) => source.id === unrelatedEntry.id)).toBe(false);
   });
 
   it('marks numeric metric answers as medium confidence when the number is contextually ambiguous', async () => {

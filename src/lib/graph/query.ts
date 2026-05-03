@@ -540,7 +540,7 @@ async function answerWikiRead(
   const result: StructuredQueryResult = {
     answer: draftAnswer,
     candidates: [entity],
-    sources: buildWikiReadSources(document),
+    sources: buildWikiReadSources(document, draftAnswer, question),
     suggestions: buildEntitySuggestions(entity),
     trace,
     compileSuggestions: await materializeCompileSuggestions(buildCompileSuggestions(document, plan), question),
@@ -1055,13 +1055,29 @@ function formatWikiReadAnswer(question: string, document: EntityDocument) {
   return lines.join('\n\n');
 }
 
-function buildWikiReadSources(document: EntityDocument): QuerySource[] {
+function buildWikiReadSources(document: EntityDocument, answer: string, question: string): QuerySource[] {
+  const adoptedEntryIds = new Set<string>();
+  const adoptedEvidenceHits = document.evidenceHits
+    .filter((hit) => evidenceHitSupportsAnswer(hit, answer, question))
+    .slice(0, 4);
+  for (const hit of adoptedEvidenceHits) adoptedEntryIds.add(hit.entry.id);
+
+  const adoptedContextEntries = document.entries
+    .filter((entry) => !adoptedEntryIds.has(entry.id) && sourceTextSupportsAnswer(entry.content, answer, question))
+    .slice(0, Math.max(0, 4 - adoptedEvidenceHits.length));
+
   return dedupeSources([
     entitySource(document.entity),
-    ...document.tasks.slice(0, 6).map(taskSource),
-    ...document.relatedEntities.slice(0, 8).map(entitySource),
-    ...document.evidenceHits.map((hit) => entrySource(hit.entry)),
-    ...document.entries.slice(0, 6).map(entrySource),
+    ...document.tasks
+      .filter((task) => sourceTextSupportsAnswer(task.description, answer, question))
+      .slice(0, 4)
+      .map(taskSource),
+    ...document.relatedEntities
+      .filter((entity) => sourceTitleMentioned(entity.title, answer))
+      .slice(0, 6)
+      .map(entitySource),
+    ...adoptedEvidenceHits.map((hit) => entrySource(hit.entry)),
+    ...adoptedContextEntries.map(entrySource),
   ]);
 }
 
@@ -1486,6 +1502,7 @@ async function composeResultIfRequested(
     return {
       ...result,
       answer: composed.answer.trim() || result.answer,
+      sources: filterSourcesForComposedAnswer(result.sources, composed.answer.trim() || result.answer, payload, result.candidates?.[0]?.id),
       llm: {
         provider: composed.provider,
         model: composed.model,
@@ -1863,6 +1880,130 @@ function formatMetricFastAnswer(entity: Entity, answer: MetricAnswer) {
     `我没有找到能直接确认${entity.title}的${answer.label}的高置信数字。`,
     `待确认线索：来源材料里出现了 ${answer.value}，但它和“${answer.label}”的对应关系还不够明确，暂不建议直接作为结论。`,
   ].join('\n\n');
+}
+
+function evidenceHitSupportsAnswer(hit: EvidenceHit, answer: string, question: string) {
+  return sourceTextSupportsAnswer(`${hit.snippet}\n${hit.entry.content}`, answer, question);
+}
+
+function filterSourcesForComposedAnswer(
+  sources: QuerySource[],
+  answer: string,
+  payload: QueryComposePayload,
+  primaryEntityId?: string,
+) {
+  const entryContentById = new Map(payload.entries.map((entry) => [entry.id, entry.content]));
+  const filtered = sources.filter((source) => {
+    if (source.type === 'entity') {
+      return source.id === primaryEntityId || sourceTitleMentioned(source.title, answer);
+    }
+    if (source.type === 'task') {
+      return sourceTextSupportsAnswer(source.title, answer, payload.question);
+    }
+    const entryContent = entryContentById.get(source.id);
+    return entryContent ? sourceTextSupportsAnswer(entryContent, answer, payload.question) : false;
+  });
+
+  return filtered.length > 0 ? filtered : sources.filter((source) => source.type === 'entity').slice(0, 1);
+}
+
+function sourceTitleMentioned(title: string, answer: string) {
+  const normalizedTitle = normalize(title);
+  if (normalizedTitle.length < 2) return false;
+  const normalizedAnswer = normalize(answer);
+  return normalizedAnswer.includes(normalizedTitle) || titleAliases(title).some((alias) => normalize(alias).length >= 2 && normalizedAnswer.includes(normalize(alias)));
+}
+
+function titleAliases(title: string) {
+  return uniqueStrings([
+    title,
+    title.replace(/项目|主题|事项|公司|有限公司|股份/g, ''),
+    ...title.split(/[、/，,；;\s-]+/),
+  ].filter((alias) => alias.trim().length >= 2));
+}
+
+function sourceTextSupportsAnswer(text: string, answer: string, question: string) {
+  const normalizedText = normalize(text);
+  if (!normalizedText) return false;
+
+  const metricValues = extractComparableMetricValues(answer);
+  if (metricValues.length > 0) {
+    return metricValues.some((value) => normalizedText.includes(normalize(normalizeMetricComparable(value))));
+  }
+
+  const directValues = extractDirectAnswerValues(answer);
+  if (directValues.some((value) => normalizedText.includes(normalize(value)))) {
+    return true;
+  }
+
+  const anchors = extractAnswerSourceAnchors(answer, question);
+  if (anchors.length === 0) return false;
+
+  const matched = anchors.filter((anchor) => normalizedText.includes(normalize(anchor)));
+  if (matched.some((anchor) => normalize(anchor).length >= 6)) return true;
+  const hasStrongMatch = matched.some((anchor) => normalize(anchor).length >= 4);
+  return hasStrongMatch && matched.length >= Math.min(2, anchors.length);
+}
+
+function extractComparableMetricValues(answer: string) {
+  const values = [
+    ...answer.matchAll(/[0-9][0-9,，]*(?:\.[0-9]+)?\s*(?:亿元|万元|元|%|平方米|㎡|人|家|个)/g),
+    ...answer.matchAll(/[0-9][0-9,，]*(?:\.[0-9]+)?\s*(?:亿|万)(?![\u4e00-\u9fa5A-Za-z0-9])/g),
+  ].map((match) => match[0]);
+  return uniqueStrings(values);
+}
+
+function normalizeMetricComparable(value: string) {
+  return value.replace(/，/g, ',').replace(/\s+/g, '');
+}
+
+function extractDirectAnswerValues(answer: string) {
+  const values: string[] = [];
+  for (const match of answer.matchAll(/(?:是|为|叫|设定为|设置为)\s*([^。\n；;]+)/g)) {
+    values.push(...(match[1] ?? '').split(/[、/，,；;\s]+/));
+  }
+  for (const match of answer.matchAll(/「([^」]{1,40})」|“([^”]{1,40})”|\*\*([^*]{1,40})\*\*/g)) {
+    values.push(match[1] ?? match[2] ?? match[3] ?? '');
+  }
+  return uniqueStrings(
+    values
+      .map((value) => value.replace(/^(约|大约|预计|当前|目前)/, '').trim())
+      .filter((value) => normalize(value).length >= 2 && !/^(提示|建议|来源材料|知识库)$/.test(value)),
+  ).slice(0, 12);
+}
+
+function extractAnswerSourceAnchors(answer: string, question: string) {
+  const questionTerms = new Set([
+    ...buildMetricTerms(question),
+    ...buildAttributeTerms(question),
+    ...cjkBigrams(question),
+  ].map(normalize));
+  const ignored = new Set([
+    '主要依据',
+    '提示',
+    '建议',
+    '目前',
+    '知识库',
+    '来源材料',
+    '可以确认',
+    '无法确认',
+    '相关信息',
+    '直接作为结论',
+  ].map(normalize));
+
+  const quoted = [...answer.matchAll(/[「“]([^」”]{2,40})[」”]/g)].map((match) => match[1] ?? '');
+  const phraseCandidates = answer
+    .split(/[。\n；;：:，,、（）()\[\]【】\s]+/)
+    .map((item) => item.trim())
+    .filter((item) => item.length >= 3 && item.length <= 24);
+
+  return uniqueStrings([...quoted, ...phraseCandidates])
+    .filter((term) => {
+      const normalized = normalize(term);
+      if (normalized.length < 3 || ignored.has(normalized) || questionTerms.has(normalized)) return false;
+      return !/^(第?[一二三四五六七八九十0-9]+|这些|其中|包括|分别|相关|具体|如下)$/.test(term);
+    })
+    .slice(0, 16);
 }
 
 function extractMetricAnswer(question: string, hits: EvidenceHit[]) {
