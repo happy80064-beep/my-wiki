@@ -148,7 +148,7 @@ function extractProjectName(question: string) {
 function cleanupName(value: string) {
   return value
     .replace(/^(关于|项目|事项|这个|该)/, '')
-    .replace(/(项目|事项|的)$/g, '')
+    .replace(/(项目|事项|的|都)$/g, '')
     .replace(/\s+/g, '')
     .trim();
 }

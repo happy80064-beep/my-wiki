@@ -24,6 +24,7 @@ export async function buildWikiIndex(limit = 200): Promise<WikiIndexEntry[]> {
   }
 
   return entities
+    .filter((entity) => !isQueryInsightEntity(entity))
     .map((entity) => {
       const relationshipCount = relationshipCountByEntity.get(entity.id) ?? 0;
       const sourceCount = entity.sourceEntries.length;
@@ -41,6 +42,10 @@ export async function buildWikiIndex(limit = 200): Promise<WikiIndexEntry[]> {
     })
     .sort((a, b) => b.importance - a.importance || b.updatedAt - a.updatedAt)
     .slice(0, limit);
+}
+
+function isQueryInsightEntity(entity: Entity) {
+  return entity.type === 'topic' && entity.tags.includes('query-insight');
 }
 
 export async function refreshCompiledProfile(entityId: string) {

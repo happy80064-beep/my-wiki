@@ -772,6 +772,7 @@ async function findWikiEntityCandidates(
   }
 
   return entities
+    .filter((entity) => !isQueryInsightEntity(entity) || selectedIds.has(entity.id))
     .map((entity) => {
       const baseScore = terms.length > 0 ? Math.max(...terms.map((term) => scoreEntityForTerm(entity, term))) : 0;
       const agentBoost = selectedIds.has(entity.id) ? 120 : 0;
@@ -843,17 +844,22 @@ async function readEntityDocument(
     getSubgraph(entity.id, 2),
   ]);
 
-  const relationships = subgraph.edges;
+  const queryInsightIds = new Set(subgraph.nodes.filter(isQueryInsightEntity).map((node) => node.id));
+  const relationships = subgraph.edges.filter(
+    (relationship) => !queryInsightIds.has(relationship.from) && !queryInsightIds.has(relationship.to),
+  );
   const graphRelatedEntities = rankRelatedEntities(
     entity,
-    subgraph.nodes.filter((node) => node.id !== entity.id),
+    subgraph.nodes.filter((node) => node.id !== entity.id && !isQueryInsightEntity(node)),
     relationships,
   )
     .slice(0, 12)
     .map((ranked) => ranked.entity);
-  const normalizedRetrievalEntities = mergeUniqueEntities(retrievalEntities.filter((candidate) => candidate.id !== entity.id));
+  const normalizedRetrievalEntities = mergeUniqueEntities(
+    retrievalEntities.filter((candidate) => candidate.id !== entity.id && !isQueryInsightEntity(candidate)),
+  );
   const relatedEntities = mergeUniqueEntities([
-    ...agentSelectedEntities,
+    ...agentSelectedEntities.filter((candidate) => !isQueryInsightEntity(candidate)),
     ...normalizedRetrievalEntities,
     ...graphRelatedEntities,
   ]).slice(0, 12);
@@ -1016,6 +1022,9 @@ function formatWikiReadAnswer(question: string, document: EntityDocument) {
   if (queriedPropertyKey && propertyValue) {
     return formatAttributeFastAnswer(entity, queriedPropertyKey, propertyValue, Boolean(compiledPropertyValue));
   }
+  if (isListDetailQuestion(question) && evidenceHits.length > 0) {
+    return formatListDetailFastAnswer(question, document);
+  }
 
   lines.push(`${entity.title}（${entityTypeLabel(entity.type)}）`);
 
@@ -1079,6 +1088,10 @@ function buildWikiReadSources(document: EntityDocument, answer: string, question
     ...adoptedEvidenceHits.map((hit) => entrySource(hit.entry)),
     ...adoptedContextEntries.map(entrySource),
   ]);
+}
+
+function isQueryInsightEntity(entity: Entity) {
+  return entity.type === 'topic' && entity.tags.includes('query-insight');
 }
 
 function formatRelationshipPathAnswer(from: Entity, to: Entity, paths: Relationship[][], pathEntities: Entity[]) {
@@ -1644,6 +1657,7 @@ function cleanupSearchText(value: string) {
       /(下一阶段|当前|短期优先级|优先级|推荐后续|后续|需要|有哪些|有什么|用了哪些|使用哪些|用了|使用|关联|相关|状态|进展|进度|任务|待办|未完成|没完成|重点问题|问题|叫什么|叫啥|名字|名称|是谁|是什么|介绍|讲讲|档案|信息|概况|总结|吗|呢|的)/g,
       '',
     )
+    .replace(/都/g, '')
     .replace(/(能否|是否|能不能|可不可以|可以不|可以吗|在|环境|运行|平台|支持|windows|Windows)/g, '')
     .replace(/(是不是|是否|是|不是|开源项目|开源|opensource|open source)/gi, '')
     .replace(/\s+/g, '')
@@ -1880,6 +1894,111 @@ function formatMetricFastAnswer(entity: Entity, answer: MetricAnswer) {
     `我没有找到能直接确认${entity.title}的${answer.label}的高置信数字。`,
     `待确认线索：来源材料里出现了 ${answer.value}，但它和“${answer.label}”的对应关系还不够明确，暂不建议直接作为结论。`,
   ].join('\n\n');
+}
+
+function isListDetailQuestion(question: string) {
+  const hasDimension = /(业态|版块|板块|业务线|子分类|子类)/.test(question);
+  const asksItemList = /(有哪些|都有哪些|包含哪些|包括哪些|列出|清单)/.test(question) &&
+    /(项目|服务|产品|机构|科室|门诊|中心|疗法)/.test(question);
+  return hasDimension && asksItemList;
+}
+
+function formatListDetailFastAnswer(question: string, document: EntityDocument) {
+  const focus = extractListQuestionFocus(question, document.entity);
+  const items = extractListItemsFromEvidence(question, document.evidenceHits);
+  if (items.length > 0) {
+    return [
+      `${document.entity.title}中与「${focus}」相关的项目包括：`,
+      items.slice(0, 8).map((item, index) => `${index + 1}. ${item}`).join('\n'),
+      '',
+      '提示：以上来自命中的来源材料片段，建议打开来源核对原文表格或章节，确认后可编译回 Wiki。',
+    ].join('\n');
+  }
+
+  const overview = document.entity.compiledProfile?.overview || document.entity.summary;
+  const evidenceLine = document.evidenceHits[0]?.snippet ? cleanEvidenceSnippet(document.evidenceHits[0].snippet) : '';
+  return [
+    `我没有找到能直接展开「${focus}」的明确项目清单。`,
+    overview ? `当前只能确认：${overview}` : '',
+    evidenceLine ? `相关来源片段：${evidenceLine}` : '',
+    '建议继续打开来源报告中对应的业态/版块章节，确认后再编译回 Wiki，避免把上一级业态列表误当作具体项目清单。',
+  ].filter(Boolean).join('\n\n');
+}
+
+function extractListQuestionFocus(question: string, entity: Entity) {
+  let focus = question;
+  for (const alias of buildEntityAliases(entity)) {
+    focus = focus.replace(new RegExp(escapeRegExp(alias), 'gi'), '');
+  }
+  focus = focus
+    .replace(/(都有哪些|有哪些|包含哪些|包括哪些|列出|清单|是什么|多少|的|？|\?)/g, '')
+    .replace(/\s+/g, '')
+    .trim();
+  return focus || '相关项目';
+}
+
+function extractListItemsFromEvidence(question: string, hits: EvidenceHit[]) {
+  const focusTerms = buildListFocusTerms(question);
+  const items: string[] = [];
+  for (const hit of hits) {
+    const text = normalizeEvidenceForMetric(`${hit.snippet}\n${hit.entry.content}`);
+    const sentences = text
+      .split(/[。\n；;]/)
+      .map((sentence) => sentence.trim())
+      .filter((sentence) => sentence.length > 0);
+    for (const sentence of sentences) {
+      if (!focusTerms.some((term) => evidenceTextMatches(sentence, term))) continue;
+      items.push(...extractItemsFromSentence(sentence, focusTerms));
+    }
+  }
+
+  return uniqueStrings(items)
+    .filter((item) => isUsefulListItem(item, focusTerms))
+    .slice(0, 12);
+}
+
+function buildListFocusTerms(question: string) {
+  const terms = uniqueStrings([
+    ...buildMetricTerms(question),
+    ...buildAttributeTerms(question),
+    ...question
+      .replace(/[？?。！!，,、：:；;]/g, '')
+      .split(/(?:都有哪些|有哪些|包含哪些|包括哪些|列出|清单|的|和|与)/)
+      .map((part) => part.trim())
+      .filter((part) => part.length >= 2),
+  ]);
+  return terms.length > 0 ? terms : [question];
+}
+
+function extractItemsFromSentence(sentence: string, focusTerms: string[]) {
+  const afterTrigger =
+    sentence.match(/(?:包括|包含|涵盖|细分为|分为|设有|设置|建设|配置|规划|项目有|项目包括)[：:\s]*([^。；;]+)/)?.[1] ??
+    sentence.match(/(?:医疗项目|项目|业态|版块|板块)[^。；;：:]{0,12}[：:]\s*([^。；;]+)/)?.[1] ??
+    sentence;
+  return afterTrigger
+    .split(/[、，,；;\/]/)
+    .map((item) => cleanupListItem(item, focusTerms))
+    .filter(Boolean);
+}
+
+function cleanupListItem(item: string, focusTerms: string[]) {
+  let cleaned = item
+    .replace(/^[\d一二三四五六七八九十]+[.、\s-]*/, '')
+    .replace(/^(医疗业态|医疗项目|项目|业态|版块|板块|包括|包含|涵盖|以及|和|与)/, '')
+    .replace(/[。；;：:]+$/g, '')
+    .trim();
+  for (const term of focusTerms) {
+    if (normalize(cleaned) === normalize(term)) cleaned = '';
+  }
+  return cleaned;
+}
+
+function isUsefulListItem(item: string, focusTerms: string[]) {
+  const normalized = normalize(item);
+  if (normalized.length < 2 || normalized.length > 36) return false;
+  if (focusTerms.some((term) => normalize(term) === normalized)) return false;
+  if (/^(项目|业态|版块|板块|类型|服务|包括|包含|相关|具体|如下|其中|以及|和|与|都)$/.test(item)) return false;
+  return /[\u4e00-\u9fa5A-Za-z]/.test(item);
 }
 
 function evidenceHitSupportsAnswer(hit: EvidenceHit, answer: string, question: string) {

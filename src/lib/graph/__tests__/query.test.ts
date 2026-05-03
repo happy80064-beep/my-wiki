@@ -310,6 +310,41 @@ describe('structured query', () => {
     expect(result.sources.every((source) => source.title.trim().length > 0)).toBe(true);
   });
 
+  it('answers sub-list questions from adopted evidence instead of previous query insights', async () => {
+    const projectEntry = await createEntry({
+      content:
+        '福瑞健康科技园三期项目规划五大业态：医疗、康养、住宅、研发、文旅。医疗业态包含的医疗项目包括中医康复中心、抗衰专病门诊、细胞治疗服务中心。',
+      source: 'text',
+    });
+    const insightEntry = await createEntry({
+      content: '查询洞察：福瑞健康科技园三期有哪些业态？答案：五大业态包括医疗、康养、住宅、研发、文旅。',
+      source: 'text',
+    });
+    const project = await createEntity({
+      type: 'project',
+      title: '福瑞健康科技园三期项目',
+      summary: '福瑞健康科技园三期项目聚焦医疗、康养、住宅、研发、文旅五大业态。',
+      tags: ['福瑞健康科技园', '福瑞科技园', '三期'],
+      sourceEntries: [projectEntry.id],
+    });
+    const queryInsight = await createEntity({
+      type: 'topic',
+      title: '查询洞察：福瑞健康科技园三期有哪些业态？',
+      summary: '五大业态包括医疗、康养、住宅、研发、文旅。',
+      tags: ['query-insight', 'question:福瑞健康科技园三期有哪些业态'],
+      sourceEntries: [insightEntry.id],
+    });
+    await createRelationship({ from: queryInsight.id, to: project.id, type: 'about', evidence: [insightEntry.id] });
+
+    const result = await runStructuredQuery('福瑞健康科技园三期医疗业态都有哪些医疗项目');
+
+    expect(result.answer).toContain('中医康复中心');
+    expect(result.answer).toContain('抗衰专病门诊');
+    expect(result.answer).toContain('细胞治疗服务中心');
+    expect(result.sources.some((source) => source.id === projectEntry.id)).toBe(true);
+    expect(result.sources.some((source) => source.id === queryInsight.id || source.id === insightEntry.id)).toBe(false);
+  });
+
   it('expands wiki reads through two-hop graph relevance', async () => {
     const entry = await createEntry({
       content: '桌面数字生命体需要稳定唤醒方案和语音交互主链。',
