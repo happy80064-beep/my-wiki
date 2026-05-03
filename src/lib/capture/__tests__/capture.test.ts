@@ -129,4 +129,42 @@ describe('capture flow', () => {
       }),
     );
   });
+
+  it('persists and merges hierarchical entity categories', async () => {
+    const existing = await createEntity({
+      type: 'project',
+      title: '福瑞健康科技园三期项目',
+      categories: [
+        {
+          name: '医疗业态',
+          aliases: ['医疗'],
+          items: [{ title: '中医康复中心' }],
+          updatedAt: 1,
+        },
+      ],
+    });
+    const draft = createLocalCaptureDraft('福瑞健康科技园三期项目医疗业态包含抗衰专病门诊、细胞治疗服务中心。');
+    draft.primaryEntity.type = 'project';
+    draft.primaryEntity.title = '福瑞健康科技园三期项目';
+    draft.primaryEntity.categories = [
+      {
+        name: '医疗业态',
+        aliases: ['医疗'],
+        items: [
+          { title: '抗衰专病门诊', kind: 'service' },
+          { title: '细胞治疗服务中心', kind: 'service' },
+        ],
+        evidence: '医疗业态包含抗衰专病门诊、细胞治疗服务中心。',
+      },
+    ];
+
+    await persistCaptureDraft('福瑞健康科技园三期项目医疗业态包含抗衰专病门诊、细胞治疗服务中心。', draft);
+    const updated = await db.entities.get(existing.id);
+
+    expect(updated?.categories?.[0].items.map((item) => item.title)).toEqual([
+      '中医康复中心',
+      '抗衰专病门诊',
+      '细胞治疗服务中心',
+    ]);
+  });
 });

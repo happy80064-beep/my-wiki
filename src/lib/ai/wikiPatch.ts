@@ -4,6 +4,7 @@ import { createDraftId } from '../capture/draft';
 
 export type WikiPatchType =
   | 'CREATE_ENTITY'
+  | 'UPDATE_ENTITY_CATEGORIES'
   | 'UPDATE_ENTITY_PROPERTY'
   | 'CREATE_RELATIONSHIP'
   | 'CREATE_TASK'
@@ -28,6 +29,17 @@ export type CaptureAnalysis = {
     evidence: string;
     confidence: 'high' | 'medium' | 'low';
   }>;
+  hierarchies: Array<{
+    parentTitle: string;
+    categoryName: string;
+    items: Array<{
+      title: string;
+      kind?: string;
+      evidence: string;
+    }>;
+    evidence: string;
+    confidence: 'high' | 'medium' | 'low';
+  }>;
   contradictions: Array<{
     title: string;
     evidence: string;
@@ -48,6 +60,23 @@ export type WikiPatch =
       tags: string[];
       scenes: Scene[];
       evidence: string;
+    }
+  | {
+      type: 'UPDATE_ENTITY_CATEGORIES';
+      entityTitle: string;
+      categories: Array<{
+        name: string;
+        aliases?: string[];
+        items: Array<{
+          title: string;
+          kind?: string;
+          summary?: string;
+          evidence?: string;
+        }>;
+        evidence?: string;
+      }>;
+      evidence: string;
+      confidence: number;
     }
   | {
       type: 'UPDATE_ENTITY_PROPERTY';
@@ -172,6 +201,7 @@ ${entityIndexJson}
   "entities": [{"title": "", "type": "person|project|event|topic", "aliases": [], "evidence": "", "existsLikely": false}],
   "concepts": [{"title": "", "evidence": ""}],
   "claims": [{"subject": "", "predicate": "", "object": "", "evidence": "", "confidence": "high|medium|low"}],
+  "hierarchies": [{"parentTitle": "", "categoryName": "", "items": [{"title": "", "kind": "", "evidence": ""}], "evidence": "", "confidence": "high|medium|low"}],
   "contradictions": [{"title": "", "evidence": ""}],
   "recommendedUpdates": [{"targetTitle": "", "action": "CREATE_ENTITY|UPDATE_ENTITY_PROPERTY|CREATE_RELATIONSHIP|CREATE_TASK|REVIEW_REQUIRED", "reason": ""}]
 }
@@ -181,7 +211,9 @@ ${entityIndexJson}
 - entities 必须对照当前 Wiki 目录判断 existsLikely；名称相近、别名相近、摘要相近都应视为可能已存在。
 - concepts 用来记录重要概念、方法、技术路线或主题，不要把所有普通名词都列进去。
 - claims 必须是可写入 Wiki 的事实属性或关系事实，例如 runtimeEnvironment、wakeWord、stopWord、localPath、models、ownerNote、derivedFrom、openSourceStatus。
+- hierarchies 用来记录层级结构，例如“福瑞三期 -> 医疗业态 -> FMT 疗法 / 中蒙医院”。只在材料明确出现“业态/版块/板块/业务线/模块/分类”及其下属项目、服务、机构或方法时输出。
 - 每条 claim 的 evidence 必须是原文中能支撑 subject / predicate / object 的短片段，不要只给关键词。
+- hierarchy.items 不能放目录标题、页码、章节号、点线、宣传口号或无法归类的碎片。
 - contradictions 只放真正冲突或张力，不要把普通不确定都放进去。
 - recommendedUpdates 要明确建议创建或更新哪些实体、关系、任务或待审核项。
 - 不确定、冲突或需要用户判断的内容放入 contradictions 或 recommendedUpdates。
@@ -205,6 +237,7 @@ ${JSON.stringify(analysis, null, 2)}
 
 patches 中每一项必须符合以下 patch 类型之一：
 - CREATE_ENTITY
+- UPDATE_ENTITY_CATEGORIES
 - UPDATE_ENTITY_PROPERTY
 - CREATE_RELATIONSHIP
 - CREATE_TASK
@@ -215,6 +248,8 @@ patches 中每一项必须符合以下 patch 类型之一：
 - REVIEW_REQUIRED.options 只能从 Create Page / Update Existing / Skip 中选择。
 - 每个 patch 都必须带 evidence，evidence 必须是原文中的短证据片段。
 - CREATE_ENTITY 只在分析认为实体不存在或值得新建时使用；可能已存在的实体优先 UPDATE_ENTITY_PROPERTY、CREATE_RELATIONSHIP 或 REVIEW_REQUIRED。
+- UPDATE_ENTITY_CATEGORIES 用于写入父实体内部层级结构，格式为 {"type":"UPDATE_ENTITY_CATEGORIES","entityTitle":"父实体","categories":[{"name":"医疗业态","aliases":["医疗"],"items":[{"title":"FMT 疗法","kind":"method","evidence":"..."}]}],"evidence":"...","confidence":0.8}。
+- UPDATE_ENTITY_CATEGORIES 只能在原文明确给出“某维度下包含哪些项目/服务/机构/方法”时生成；不要把目录、页码、章节标题或上一级业态列表当成 items。
 - UPDATE_ENTITY_PROPERTY 的 propertyValue 必须是完整值，不要用“开源”“方案”“模型”等泛词代替具体对象；例如“OpenMaic 开源项目”“小林”“Windows”。
 - CREATE_RELATIONSHIP 必须同时有 fromTitle、toTitle、relationshipType 和能证明二者关系的 evidence。
 - REVIEW_REQUIRED 只用于冲突、疑似重复、重要但缺页、需要用户判断的内容；不要创建琐碎 review。
@@ -250,6 +285,21 @@ export function normalizeCaptureAnalysis(rawText: string): CaptureAnalysis {
         confidence: pickEnum(claim.confidence, confidenceLevels, 'medium'),
       }))
       .filter((claim) => claim.subject && claim.predicate && claim.object && claim.evidence),
+    hierarchies: toArray<Record<string, unknown>>((parsed as Partial<CaptureAnalysis>).hierarchies)
+      .map((hierarchy) => ({
+        parentTitle: stringValue(hierarchy.parentTitle),
+        categoryName: stringValue(hierarchy.categoryName),
+        items: toArray<Record<string, unknown>>(hierarchy.items)
+          .map((item) => ({
+            title: stringValue(item.title),
+            kind: stringValue(item.kind) || undefined,
+            evidence: stringValue(item.evidence),
+          }))
+          .filter((item) => item.title && item.evidence && !isLikelyListNoise(item.title)),
+        evidence: stringValue(hierarchy.evidence),
+        confidence: pickEnum(hierarchy.confidence, confidenceLevels, 'medium'),
+      }))
+      .filter((hierarchy) => hierarchy.parentTitle && hierarchy.categoryName && hierarchy.items.length > 0 && hierarchy.evidence),
     contradictions: toArray<Record<string, unknown>>(parsed.contradictions)
       .map((item) => ({
         title: stringValue(item.title),
@@ -300,6 +350,10 @@ export function normalizeWikiPatchesToCaptureDraft(patches: WikiPatch[], content
     }
     if (patch.type === 'UPDATE_ENTITY_PROPERTY') {
       ensureEntity(patch.entityTitle, inferEntityTypeFromPropertyPatch(patch), patch.evidence);
+    }
+    if (patch.type === 'UPDATE_ENTITY_CATEGORIES') {
+      const entity = ensureEntity(patch.entityTitle, 'project', patch.evidence);
+      entity.categories = mergeDraftCategories(entity.categories ?? [], patch.categories);
     }
     if (patch.type === 'CREATE_RELATIONSHIP') {
       ensureEntity(patch.fromTitle);
@@ -382,6 +436,10 @@ export function validateWikiPatch(patch: WikiPatch) {
     );
   }
 
+  if (patch.type === 'UPDATE_ENTITY_CATEGORIES') {
+    return patch.entityTitle.trim() && patch.categories.length > 0;
+  }
+
   if (patch.type === 'REVIEW_REQUIRED') {
     return patch.options.every((option) => ['Create Page', 'Update Existing', 'Skip'].includes(option));
   }
@@ -412,6 +470,33 @@ function normalizeWikiPatch(value: unknown): WikiPatch | undefined {
       entityTitle: stringValue(raw.entityTitle),
       propertyKey: stringValue(raw.propertyKey),
       propertyValue: stringValue(raw.propertyValue),
+      evidence: stringValue(raw.evidence),
+      confidence: clamp(Number(raw.confidence) || 0.65, 0, 1),
+    };
+  }
+
+  if (type === 'UPDATE_ENTITY_CATEGORIES') {
+    return {
+      type,
+      entityTitle: stringValue(raw.entityTitle),
+      categories: toArray<Record<string, unknown>>(raw.categories)
+        .map((category) => ({
+          name: stringValue(category.name),
+          aliases: toArray(category.aliases).map((alias) => String(alias).trim()).filter(Boolean),
+          items: toArray<Record<string, unknown> | string>(category.items)
+            .map((item) => {
+              if (typeof item === 'string') return { title: item.trim() };
+              return {
+                title: stringValue(item.title),
+                kind: stringValue(item.kind) || undefined,
+                summary: stringValue(item.summary) || undefined,
+                evidence: stringValue(item.evidence) || undefined,
+              };
+            })
+            .filter((item) => item.title && !isLikelyListNoise(item.title)),
+          evidence: stringValue(category.evidence) || undefined,
+        }))
+        .filter((category) => category.name && category.items.length > 0),
       evidence: stringValue(raw.evidence),
       confidence: clamp(Number(raw.confidence) || 0.65, 0, 1),
     };
@@ -470,6 +555,41 @@ function propertyLabel(propertyKey: string) {
     openSourceStatus: '开源状态',
   };
   return labels[propertyKey] ?? propertyKey;
+}
+
+function mergeDraftCategories(
+  existing: NonNullable<DraftEntity['categories']>,
+  incoming: NonNullable<DraftEntity['categories']>,
+) {
+  const byName = new Map<string, NonNullable<DraftEntity['categories']>[number]>();
+  for (const category of existing) byName.set(normalizeTitle(category.name), category);
+  for (const category of incoming) {
+    const key = normalizeTitle(category.name);
+    const current = byName.get(key);
+    byName.set(key, {
+      ...current,
+      ...category,
+      aliases: Array.from(new Set([...(current?.aliases ?? []), ...(category.aliases ?? []), category.name].filter(Boolean))),
+      items: mergeDraftCategoryItems([...(current?.items ?? []), ...(category.items ?? [])]),
+      evidence: category.evidence ?? current?.evidence,
+    });
+  }
+  return Array.from(byName.values());
+}
+
+function mergeDraftCategoryItems(items: NonNullable<DraftEntity['categories']>[number]['items']) {
+  const byTitle = new Map<string, NonNullable<DraftEntity['categories']>[number]['items'][number]>();
+  for (const item of items) {
+    const title = item.title.trim();
+    if (!title || isLikelyListNoise(title)) continue;
+    const key = normalizeTitle(title);
+    byTitle.set(key, { ...byTitle.get(key), ...item, title });
+  }
+  return Array.from(byTitle.values());
+}
+
+function isLikelyListNoise(value: string) {
+  return /(\.{3,}|…{2,}|-{2,}|\bof\s+\d+\b|目录|页码|第\s*\d+\s*页)/i.test(value);
 }
 
 function parseBestJson(text: string) {
@@ -535,6 +655,7 @@ const scenes = ['work', 'life', 'social', 'personal'] as const;
 const confidenceLevels = ['high', 'medium', 'low'] as const;
 const wikiPatchTypes: WikiPatchType[] = [
   'CREATE_ENTITY',
+  'UPDATE_ENTITY_CATEGORIES',
   'UPDATE_ENTITY_PROPERTY',
   'CREATE_RELATIONSHIP',
   'CREATE_TASK',

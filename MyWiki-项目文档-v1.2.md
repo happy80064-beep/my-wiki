@@ -1533,6 +1533,7 @@ v1.2 · 2025-04-28
 
 变更记录：
 - v1.2 补充：新增查询加速 MVP，包括实体 compiledProfile、轻量 Wiki Index、查询缓存、查询洞察命中，以及查询页先快答再后台优化的两段式体验
+- v1.2 补充：新增层级结构建模路线，实体可选 `categories` 保存“父实体 -> 业态/版块 -> 项目/服务/机构”结构；摄入层提取 categories，查询层优先用确定性 `drillDown(parent, category)` 下钻，缺失时才原文扫描并进入待编译回 Wiki，避免把上一级业态列表或历史查询洞察误当具体项目清单
 - v1.2 补充：Raw Inbox 升级为 Raw Entry First，文件导入后立即生成未编译原始 Entry；长文本摄入改为分块 Markdown 摘要再 WikiPatch，避免长 PDF 一次性严格 JSON 崩溃
 - v1.2 补充：新增 Raw Inbox 异步采集/批量编译机制，明确文件先原样收件、hash 去重、状态队列、进度展示和稍后编译，避免用户捕获时间与 LLM 处理时间耦合
 - v1.2 补充：除第三优先级 RRF 外，按优先级补齐 Review 队列、摄入队列与缓存、DeepSeek 两步摄入兜底、图谱筛选/缩放/一跳高亮/dismiss、Lint 扩展、Save-to-Wiki 再编译队列和 Markdown/Obsidian zip 导出

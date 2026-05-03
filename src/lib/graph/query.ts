@@ -1022,8 +1022,14 @@ function formatWikiReadAnswer(question: string, document: EntityDocument) {
   if (queriedPropertyKey && propertyValue) {
     return formatAttributeFastAnswer(entity, queriedPropertyKey, propertyValue, Boolean(compiledPropertyValue));
   }
-  if (isListDetailQuestion(question) && evidenceHits.length > 0) {
-    return formatListDetailFastAnswer(question, document);
+  if (isListDetailQuestion(question)) {
+    const drillDown = drillDownEntityCategory(entity, question);
+    if (drillDown) {
+      return formatCategoryDrillDownAnswer(entity, drillDown);
+    }
+    if (evidenceHits.length > 0) {
+      return formatListDetailFastAnswer(question, document);
+    }
   }
 
   lines.push(`${entity.title}（${entityTypeLabel(entity.type)}）`);
@@ -1782,6 +1788,15 @@ function scoreEntityForTerm(entity: Entity, term: string) {
     ...(entity.compiledProfile?.keyFacts ?? []),
     ...(entity.compiledProfile?.relationshipSummary ?? []),
   ].filter(Boolean).join(' '));
+  const categories = normalize(
+    (entity.categories ?? [])
+      .flatMap((category) => [
+        category.name,
+        ...(category.aliases ?? []),
+        ...category.items.map((item) => `${item.title} ${item.summary ?? ''}`),
+      ])
+      .join(' '),
+  );
   const tags = normalize(entity.tags.join(''));
   const scenes = normalize(entity.scenes.join(''));
 
@@ -1791,6 +1806,7 @@ function scoreEntityForTerm(entity: Entity, term: string) {
   if (isSubsequence(title, normalizedTerm)) return 58;
   if (summary.includes(normalizedTerm) || tags.includes(normalizedTerm) || scenes.includes(normalizedTerm)) return 42;
   if (compiledProfile.includes(normalizedTerm)) return 48;
+  if (categories.includes(normalizedTerm)) return 52;
 
   const overlap = overlapRatio(normalizedTerm, title);
   if (overlap >= 0.75) return 56;
@@ -1896,6 +1912,51 @@ function formatMetricFastAnswer(entity: Entity, answer: MetricAnswer) {
   ].join('\n\n');
 }
 
+function drillDownEntityCategory(entity: Entity, question: string) {
+  const categories = entity.categories ?? [];
+  if (categories.length === 0) return undefined;
+
+  const focus = extractListQuestionFocus(question, entity);
+  const normalizedQuestion = normalize(question);
+  const normalizedFocus = normalize(focus);
+  const category = categories.find((item) => {
+    const aliases = [item.name, ...(item.aliases ?? []), item.name.replace(/(业态|版块|板块|业务线|子分类|子类)$/g, '')];
+    return aliases.some((alias) => {
+      const normalizedAlias = normalize(alias);
+      return normalizedAlias.length >= 2 &&
+        (normalizedQuestion.includes(normalizedAlias) ||
+          normalizedFocus.includes(normalizedAlias) ||
+          normalizedAlias.includes(normalizedFocus));
+    });
+  });
+
+  if (!category || category.items.length === 0) return undefined;
+  return {
+    category,
+    focus: category.name,
+    items: category.items.filter((item) => !isTocOrOcrNoise(item.title)).slice(0, 12),
+  };
+}
+
+function formatCategoryDrillDownAnswer(
+  entity: Entity,
+  drillDown: NonNullable<ReturnType<typeof drillDownEntityCategory>>,
+) {
+  if (drillDown.items.length === 0) {
+    return `我找到了「${drillDown.focus}」这个层级，但其中还没有可用项目清单。建议补充或重新编译该业态下的项目。`;
+  }
+
+  return [
+    `${entity.title}的「${drillDown.focus}」下已结构化的项目包括：`,
+    drillDown.items.map((item, index) => {
+      const suffix = item.summary ? `：${item.summary}` : '';
+      return `${index + 1}. ${item.title}${suffix}`;
+    }).join('\n'),
+    '',
+    '提示：该结果来自 Wiki 已编译的层级结构。后续如果某个业态被频繁深入查询，可以再把它升级为独立实体页。',
+  ].join('\n');
+}
+
 function isListDetailQuestion(question: string) {
   const hasDimension = /(业态|版块|板块|业务线|子分类|子类)/.test(question);
   const asksItemList = /(有哪些|都有哪些|包含哪些|包括哪些|列出|清单)/.test(question) &&
@@ -1916,11 +1977,10 @@ function formatListDetailFastAnswer(question: string, document: EntityDocument) 
   }
 
   const overview = document.entity.compiledProfile?.overview || document.entity.summary;
-  const evidenceLine = document.evidenceHits[0]?.snippet ? cleanEvidenceSnippet(document.evidenceHits[0].snippet) : '';
   return [
     `我没有找到能直接展开「${focus}」的明确项目清单。`,
     overview ? `当前只能确认：${overview}` : '',
-    evidenceLine ? `相关来源片段：${evidenceLine}` : '',
+    document.evidenceHits.length > 0 ? '命中的来源材料更像目录、章节摘要或上一级业态说明，暂不适合直接当作项目清单。' : '',
     '建议继续打开来源报告中对应的业态/版块章节，确认后再编译回 Wiki，避免把上一级业态列表误当作具体项目清单。',
   ].filter(Boolean).join('\n\n');
 }
@@ -1947,38 +2007,70 @@ function extractListItemsFromEvidence(question: string, hits: EvidenceHit[]) {
       .map((sentence) => sentence.trim())
       .filter((sentence) => sentence.length > 0);
     for (const sentence of sentences) {
-      if (!focusTerms.some((term) => evidenceTextMatches(sentence, term))) continue;
+      if (!sentenceMatchesListFocus(sentence, focusTerms)) continue;
+      if (!hasListItemTrigger(sentence)) continue;
       items.push(...extractItemsFromSentence(sentence, focusTerms));
     }
   }
 
   return uniqueStrings(items)
-    .filter((item) => isUsefulListItem(item, focusTerms))
+    .filter((item) => isUsefulListItem(item, focusTerms) && itemMatchesFocus(item, focusTerms))
     .slice(0, 12);
 }
 
 function buildListFocusTerms(question: string) {
-  const terms = uniqueStrings([
-    ...buildMetricTerms(question),
-    ...buildAttributeTerms(question),
-    ...question
-      .replace(/[？?。！!，,、：:；;]/g, '')
-      .split(/(?:都有哪些|有哪些|包含哪些|包括哪些|列出|清单|的|和|与)/)
-      .map((part) => part.trim())
-      .filter((part) => part.length >= 2),
+  const dimensionTerms = [...question.matchAll(/([\u4e00-\u9fa5A-Za-z0-9]{1,12}(?:业态|版块|板块|业务线|子分类|子类))/g)]
+    .map((match) => match[1] ?? '');
+  const commonDimensionBases = ['医疗', '康养', '研发', '文旅', '住宅', '医养', '养老', '商业', '教育']
+    .filter((base) => question.includes(base));
+  const dimensionBases = uniqueStrings([
+    ...dimensionTerms.map((term) => term.replace(/(业态|版块|板块|业务线|子分类|子类)$/g, '')),
+    ...dimensionTerms.map((term) => term.replace(/(业态|版块|板块|业务线|子分类|子类)$/g, '').slice(-2)),
+    ...commonDimensionBases,
+  ]).filter((term) => term.length >= 2);
+  const targetTerms = dimensionBases.flatMap((base) => [
+    `${base}业态`,
+    base,
+    `${base}项目`,
+    `${base}服务`,
+    `${base}机构`,
+    `${base}中心`,
   ]);
+  const terms = uniqueStrings([...dimensionTerms, ...targetTerms].filter((term) => term.trim().length >= 2));
   return terms.length > 0 ? terms : [question];
 }
 
 function extractItemsFromSentence(sentence: string, focusTerms: string[]) {
+  const specificTargetMatch = sentence.match(/(?:项目|服务|机构|方法|疗法|中心|门诊)(?:包括|包含|有|为|如下)[：:\s]*([^。；;]+)/);
+  if (specificTargetMatch?.[1]) {
+    return splitListItems(specificTargetMatch[1], focusTerms);
+  }
+
   const afterTrigger =
     sentence.match(/(?:包括|包含|涵盖|细分为|分为|设有|设置|建设|配置|规划|项目有|项目包括)[：:\s]*([^。；;]+)/)?.[1] ??
-    sentence.match(/(?:医疗项目|项目|业态|版块|板块)[^。；;：:]{0,12}[：:]\s*([^。；;]+)/)?.[1] ??
-    sentence;
-  return afterTrigger
+    sentence.match(/(?:医疗项目|项目|业态|版块|板块)[^。；;：:]{0,12}[：:]\s*([^。；;]+)/)?.[1];
+  if (!afterTrigger) return [];
+  return splitListItems(afterTrigger, focusTerms);
+}
+
+function splitListItems(value: string, focusTerms: string[]) {
+  return value
+    .replace(/^(?:的)?(?:项目|服务|机构|方法|疗法|中心|门诊)(?:包括|包含|有|为|如下)?[：:\s]*/, '')
     .split(/[、，,；;\/]/)
     .map((item) => cleanupListItem(item, focusTerms))
     .filter(Boolean);
+}
+
+function sentenceMatchesListFocus(sentence: string, focusTerms: string[]) {
+  const normalizedSentence = normalize(sentence);
+  return focusTerms.some((term) => {
+    const normalizedTerm = normalize(term);
+    if (normalizedTerm.length < 2) return false;
+    if (normalizedSentence.includes(normalizedTerm)) return true;
+    const base = normalizedTerm.replace(/(业态|版块|板块|业务线|子分类|子类|项目|服务|机构|中心)$/g, '');
+    if (base.length < 2) return false;
+    return new RegExp(`${escapeRegExp(base)}.{0,10}(业态|版块|板块|业务线|项目|服务|机构|中心|疗法|门诊)`).test(sentence);
+  });
 }
 
 function cleanupListItem(item: string, focusTerms: string[]) {
@@ -1998,7 +2090,34 @@ function isUsefulListItem(item: string, focusTerms: string[]) {
   if (normalized.length < 2 || normalized.length > 36) return false;
   if (focusTerms.some((term) => normalize(term) === normalized)) return false;
   if (/^(项目|业态|版块|板块|类型|服务|包括|包含|相关|具体|如下|其中|以及|和|与|都)$/.test(item)) return false;
+  if (isTocOrOcrNoise(item)) return false;
   return /[\u4e00-\u9fa5A-Za-z]/.test(item);
+}
+
+function hasListItemTrigger(sentence: string) {
+  return /(包括|包含|涵盖|细分为|分为|设有|设置|建设|配置|规划|项目有|项目包括|清单|如下|：|:)/.test(sentence);
+}
+
+function itemMatchesFocus(item: string, focusTerms: string[]) {
+  const focus = focusTerms.join('');
+  if (/医疗|医养|诊疗|医院|门诊/.test(focus)) {
+    return /(医|医疗|医养|诊疗|医院|门诊|疗法|细胞|康复|抗衰|科室|中心|护理|体检|健康|中蒙|中医|专病)/.test(item);
+  }
+  if (/康养|养老|养生/.test(focus)) {
+    return /(康养|养老|养生|康复|护理|健康|中心|社区|公寓|照护)/.test(item);
+  }
+  return true;
+}
+
+function isTocOrOcrNoise(item: string) {
+  const compact = item.replace(/\s+/g, ' ').trim();
+  if (/(\.{3,}|…{2,}|-{2,}|_{2,})/.test(compact)) return true;
+  if (/\bof\s+\d+\b/i.test(compact)) return true;
+  if (/^\s*(?:[IVX]+|\d+)(?:[.．]\d+){1,}/i.test(compact)) return true;
+  if (/第\s*\d+\s*页|页码|目录|附录/.test(compact)) return true;
+  const digitCount = (compact.match(/\d/g) ?? []).length;
+  if (digitCount >= 3 && digitCount / Math.max(compact.length, 1) > 0.2) return true;
+  return false;
 }
 
 function evidenceHitSupportsAnswer(hit: EvidenceHit, answer: string, question: string) {

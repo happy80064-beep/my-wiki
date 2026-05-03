@@ -345,6 +345,63 @@ describe('structured query', () => {
     expect(result.sources.some((source) => source.id === queryInsight.id || source.id === insightEntry.id)).toBe(false);
   });
 
+  it('drills down compiled entity categories before scanning raw evidence', async () => {
+    const noisyEntry = await createEntry({
+      content: '医疗业态章节目录：实现业务协同................ 92 -- 3 of 149 --',
+      source: 'text',
+    });
+    const project = await createEntity({
+      type: 'project',
+      title: '福瑞健康科技园三期项目',
+      summary: '福瑞健康科技园三期项目。',
+      tags: ['福瑞科技园', '三期'],
+      sourceEntries: [noisyEntry.id],
+      categories: [
+        {
+          name: '医疗业态',
+          aliases: ['医疗'],
+          items: [
+            { title: 'FMT疗法', kind: 'method' },
+            { title: '个体化巨噬细胞疗法', kind: 'method' },
+            { title: '集宁区中蒙医院', kind: 'institution' },
+          ],
+          updatedAt: Date.now(),
+        },
+      ],
+    });
+
+    const result = await runStructuredQuery('福瑞健康科技园三期项目中的医疗业态中都有哪些项目？');
+
+    expect(result.answer).toContain('已结构化的项目包括');
+    expect(result.answer).toContain('FMT疗法');
+    expect(result.answer).toContain('个体化巨噬细胞疗法');
+    expect(result.answer).toContain('集宁区中蒙医院');
+    expect(result.answer).not.toContain('实现业务协同');
+    expect(result.sources.some((source) => source.id === project.id)).toBe(true);
+  });
+
+  it('does not turn PDF table-of-contents noise into sub-list answers', async () => {
+    const noisyEntry = await createEntry({
+      content:
+        '福瑞健康科技园三期项目医疗业态章节目录：实现业务协同................ 92 4.2 创新商业模式 -- 3 of 149 -- II.4.3 最大化园区资产价值。项目愿景与定位项目以“呵护健康，温暖永生”为特色，“医”为核心，“康”养生息，待三期项目建成后。',
+      source: 'text',
+    });
+    await createEntity({
+      type: 'project',
+      title: '福瑞健康科技园三期项目',
+      summary: '福瑞健康科技园三期项目聚焦医疗、康养、住宅、研发、文旅五大业态。',
+      tags: ['福瑞健康科技园', '福瑞科技园', '三期'],
+      sourceEntries: [noisyEntry.id],
+    });
+
+    const result = await runStructuredQuery('福瑞健康科技园三期项目中的医疗业态中都有哪些项目？');
+
+    expect(result.answer).toContain('没有找到能直接展开');
+    expect(result.answer).not.toContain('实现业务协同');
+    expect(result.answer).not.toContain('3 of 149');
+    expect(result.answer).not.toContain('温暖永生');
+  });
+
   it('expands wiki reads through two-hop graph relevance', async () => {
     const entry = await createEntry({
       content: '桌面数字生命体需要稳定唤醒方案和语音交互主链。',

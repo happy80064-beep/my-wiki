@@ -18,6 +18,7 @@ export type CreateEntityInput = {
   tags?: string[];
   scenes?: Scene[];
   properties?: EntityProperties;
+  categories?: Entity['categories'];
   sourceEntries?: string[];
   createdAt?: number;
   updatedAt?: number;
@@ -48,6 +49,7 @@ export async function createEntity(input: CreateEntityInput) {
     tags: input.tags ?? [],
     scenes: input.scenes ?? [],
     properties: input.properties ?? defaultEntityProperties(input.type),
+    categories: input.categories,
     sourceEntries: input.sourceEntries ?? [],
     createdAt: input.createdAt ?? now,
     updatedAt: input.updatedAt ?? now,

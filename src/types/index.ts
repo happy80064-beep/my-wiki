@@ -65,6 +65,22 @@ export type TopicProps = {
 
 export type EntityProperties = PersonProps | ProjectProps | EventProps | TopicProps;
 
+export type EntityCategoryItem = {
+  title: string;
+  entityId?: ID;
+  kind?: string;
+  summary?: string;
+  evidence?: string;
+};
+
+export type EntityCategory = {
+  name: string;
+  aliases?: string[];
+  items: EntityCategoryItem[];
+  evidence?: string;
+  updatedAt: number;
+};
+
 export type BaseEntity<TType extends EntityType, TProps extends EntityProperties> = {
   id: ID;
   type: TType;
@@ -73,6 +89,7 @@ export type BaseEntity<TType extends EntityType, TProps extends EntityProperties
   tags: string[];
   scenes: Scene[];
   properties: TProps;
+  categories?: EntityCategory[];
   compiledProfile?: CompiledEntityProfile;
   sourceEntries: ID[];
   createdAt: number;

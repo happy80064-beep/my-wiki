@@ -33,7 +33,10 @@ export async function buildWikiIndex(limit = 200): Promise<WikiIndexEntry[]> {
         type: entity.type,
         title: entity.title,
         aliases: buildWikiIndexAliases(entity),
-        shortSummary: compact(entity.compiledProfile?.overview || entity.summary, 80),
+        shortSummary: compact([
+          entity.compiledProfile?.overview || entity.summary,
+          categorySummary(entity),
+        ].filter(Boolean).join(' '), 120),
         importance: sourceCount * 2 + relationshipCount * 3 + Math.min(entity.tags.length, 5),
         sourceCount,
         relationshipCount,
@@ -185,6 +188,9 @@ function buildKeyFacts(entity: Entity) {
     const display = Array.isArray(value) ? value.join('、') : typeof value === 'string' ? value : undefined;
     if (display?.trim()) facts.push(`${label}：${display.trim()}`);
   }
+  for (const category of entity.categories ?? []) {
+    facts.push(`${category.name}：${category.items.slice(0, 6).map((item) => item.title).join('、')}`);
+  }
   if (entity.tags.length > 0) facts.push(`标签：${entity.tags.join('、')}`);
   return facts.slice(0, 10);
 }
@@ -194,8 +200,22 @@ function buildWikiIndexAliases(entity: Entity) {
     entity.title,
     entity.title.replace(/数字/g, ''),
     entity.title.replace(/项目/g, ''),
+    ...(entity.categories ?? []).flatMap((category) => [
+      category.name,
+      ...(category.aliases ?? []),
+      ...category.items.slice(0, 8).map((item) => item.title),
+    ]),
     ...entity.tags,
   ].filter((alias) => alias.trim().length >= 2)));
+}
+
+function categorySummary(entity: Entity) {
+  const categories = entity.categories ?? [];
+  if (categories.length === 0) return '';
+  return categories
+    .slice(0, 4)
+    .map((category) => `${category.name}：${category.items.slice(0, 4).map((item) => item.title).join('、')}`)
+    .join('；');
 }
 
 function compact(value: string, maxLength: number) {

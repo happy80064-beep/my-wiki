@@ -167,6 +167,7 @@ async function resolveCaptureEntity(draftEntity: DraftEntity, entryId: string, c
       summary: draftEntity.summary,
       tags: draftEntity.tags,
       scenes: draftEntity.scenes,
+      categories: stampDraftCategories(draftEntity, capturedAt),
       properties: compileEntityProperties(defaultEntityProperties(draftEntity.type), draftEntity.type, entryId, capturedAt),
       sourceEntries: [entryId],
     });
@@ -177,6 +178,7 @@ async function resolveCaptureEntity(draftEntity: DraftEntity, entryId: string, c
     summary: reusableEntity.summary.trim() ? reusableEntity.summary : draftEntity.summary,
     tags: mergeUnique(reusableEntity.tags, draftEntity.tags),
     scenes: mergeUnique(reusableEntity.scenes, draftEntity.scenes),
+    categories: mergeEntityCategories(reusableEntity.categories ?? [], stampDraftCategories(draftEntity, capturedAt)),
     properties: compileEntityProperties(reusableEntity.properties, reusableEntity.type, entryId, capturedAt),
     sourceEntries: mergeUnique(reusableEntity.sourceEntries, [entryId]),
   });
@@ -252,6 +254,66 @@ function compileEntityProperties(
 
 function mergeUnique<T>(left: T[], right: T[]) {
   return Array.from(new Set([...left, ...right]));
+}
+
+function stampDraftCategories(draftEntity: DraftEntity, updatedAt: number) {
+  return (draftEntity.categories ?? [])
+    .map((category) => ({
+      name: category.name.trim(),
+      aliases: mergeUnique(category.aliases ?? [], [category.name]).filter(Boolean),
+      items: mergeCategoryItems(category.items ?? []),
+      evidence: category.evidence?.trim(),
+      updatedAt,
+    }))
+    .filter((category) => category.name && category.items.length > 0);
+}
+
+function mergeEntityCategories(
+  existing: NonNullable<Entity['categories']>,
+  incoming: NonNullable<Entity['categories']>,
+) {
+  const byName = new Map<string, NonNullable<Entity['categories']>[number]>();
+
+  for (const category of existing) {
+    byName.set(normalizeTitle(category.name), category);
+  }
+
+  for (const category of incoming) {
+    const key = normalizeTitle(category.name);
+    const current = byName.get(key);
+    if (!current) {
+      byName.set(key, category);
+      continue;
+    }
+
+    byName.set(key, {
+      ...current,
+      aliases: mergeUnique(current.aliases ?? [], category.aliases ?? []),
+      items: mergeCategoryItems([...(current.items ?? []), ...(category.items ?? [])]),
+      evidence: category.evidence ?? current.evidence,
+      updatedAt: Math.max(current.updatedAt, category.updatedAt),
+    });
+  }
+
+  return Array.from(byName.values());
+}
+
+function mergeCategoryItems(items: NonNullable<Entity['categories']>[number]['items']) {
+  const byTitle = new Map<string, NonNullable<Entity['categories']>[number]['items'][number]>();
+  for (const item of items) {
+    const title = item.title.trim();
+    if (!title) continue;
+    const key = normalizeTitle(title);
+    const current = byTitle.get(key);
+    byTitle.set(key, {
+      ...current,
+      ...item,
+      title,
+      summary: item.summary?.trim() || current?.summary,
+      evidence: item.evidence?.trim() || current?.evidence,
+    });
+  }
+  return Array.from(byTitle.values());
 }
 
 function normalizeTitle(value: string) {

@@ -36,6 +36,7 @@ describe('wiki patch prompts', () => {
           confidence: 'high',
         },
       ],
+      hierarchies: [],
       contradictions: [],
       recommendedUpdates: [
         {

@@ -33,6 +33,21 @@ type AiEntity = {
   summary?: string;
   tags?: unknown;
   scenes?: unknown;
+  categories?: unknown;
+};
+
+type AiCategory = {
+  name?: string;
+  aliases?: unknown;
+  items?: unknown;
+  evidence?: string;
+};
+
+type AiCategoryItem = {
+  title?: string;
+  kind?: string;
+  summary?: string;
+  evidence?: string;
 };
 
 type AiRelationship = {
@@ -75,7 +90,17 @@ JSON schema:
     "title": "不超过 30 字",
     "summary": "2-3 句摘要",
     "tags": ["2-4 个中文标签"],
-    "scenes": ["work | life | social | personal"]
+    "scenes": ["work | life | social | personal"],
+    "categories": [
+      {
+        "name": "内部维度名，例如 医疗业态 / 康养业态 / 研发板块",
+        "aliases": ["维度别名"],
+        "items": [
+          {"title": "该维度下的具体项目/服务/机构", "kind": "project|service|institution|method|topic", "summary": "一句说明", "evidence": "原文证据短句"}
+        ],
+        "evidence": "能证明该层级结构的原文短句"
+      }
+    ]
   },
   "relatedEntities": [
     {
@@ -114,6 +139,9 @@ JSON schema:
 - owner / participant / stakeholder / decision-maker 只能用于 person -> project；工具、模型、框架、技术组件不能作为“负责人”。
 - Gemini、SenseVoice-Small、OpenCLI、OpenClaw、Fish Audio S2、Live2D/Pixi、Electron、Whisper.cpp 等技术实体的 type 应为 topic，不应为 person。
 - 项目与工具、模型、框架、技术组件的关系应优先使用 depends-on 或 related-to，不要使用 owner。
+- 对项目、主题中出现“业态 / 版块 / 板块 / 业务线 / 模块 / 分类”且其下有具体项目、服务、机构或方法时，必须写入 primaryEntity.categories 或对应 relatedEntities.categories。
+- categories 表示“父实体内部的层级结构”，不要用它替代 relationships；扁平实体关系仍照常输出。
+- category.items 只能放该维度下面的具体项目、服务、机构、方法或产品，不要放目录标题、页码、章节号、标点点线或宣传口号。
 - 输出中的人名、项目名、任务内容必须来自用户输入或由用户输入直接概括，不能照抄 schema 或示例词。
 `;
 }
@@ -261,7 +289,33 @@ function normalizeEntity(entity: AiEntity | undefined, fallbackType: EntityType)
     scenes: toArray<string>(entity?.scenes)
       .map((scene) => pickEnum(scene, scenes, undefined))
       .filter((scene): scene is Scene => Boolean(scene)),
+    categories: normalizeAiCategories(entity?.categories),
   };
+}
+
+function normalizeAiCategories(value: unknown): DraftEntity['categories'] {
+  return toArray<AiCategory>(value)
+    .map((category) => ({
+      name: category.name?.trim() ?? '',
+      aliases: toArray<string>(category.aliases).map((alias) => String(alias).trim()).filter(Boolean),
+      items: toArray<AiCategoryItem | string>(category.items)
+        .map((item) => {
+          if (typeof item === 'string') return { title: item.trim() };
+          return {
+            title: item.title?.trim() ?? '',
+            kind: item.kind?.trim(),
+            summary: item.summary?.trim(),
+            evidence: item.evidence?.trim(),
+          };
+        })
+        .filter((item) => item.title && !isLikelyListNoise(item.title)),
+      evidence: category.evidence?.trim(),
+    }))
+    .filter((category) => category.name && category.items.length > 0);
+}
+
+function isLikelyListNoise(value: string) {
+  return /(\.{3,}|…{2,}|-{2,}|\bof\s+\d+\b|目录|页码|第\s*\d+\s*页)/i.test(value);
 }
 
 function parseBestCaptureJson(text: string) {
