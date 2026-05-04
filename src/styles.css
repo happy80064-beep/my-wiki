@@ -72,12 +72,7 @@ body {
 
 .mywiki-tech-graph {
   display: block;
-  cursor: grab;
   touch-action: none;
-}
-
-.mywiki-tech-graph:active {
-  cursor: grabbing;
 }
 
 .mywiki-tech-link {

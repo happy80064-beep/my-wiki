@@ -1,7 +1,9 @@
 import {
   Activity,
   AlertTriangle,
+  Box,
   GitBranch,
+  Map as MapIcon,
   Minus,
   Network,
   Plus,
@@ -73,6 +75,7 @@ type Rotation = {
 };
 
 type TimeScope = 'all' | '30d' | '90d' | '365d';
+type GraphViewMode = 'map' | 'space';
 
 type GraphFilters = {
   activeTypes: Set<EntityType>;
@@ -135,13 +138,15 @@ const insightTypeLabels = {
 
 const GRAPH_WIDTH = 1240;
 const GRAPH_HEIGHT = 760;
-const defaultRotation: Rotation = { x: -0.38, y: 0.44 };
+const flatRotation: Rotation = { x: 0, y: 0 };
+const spaceRotation: Rotation = { x: -0.38, y: 0.44 };
 
 export function GraphPage() {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const nodeWasDraggedRef = useRef(false);
   const [layoutSalt, setLayoutSalt] = useState(0);
-  const [rotation, setRotation] = useState<Rotation>(defaultRotation);
+  const [viewMode, setViewMode] = useState<GraphViewMode>('map');
+  const [rotation, setRotation] = useState<Rotation>(flatRotation);
   const [nodeOverrides, setNodeOverrides] = useState<Record<string, NodeOverride>>({});
   const [dragState, setDragState] = useState<DragState | null>(null);
   const [floatTime, setFloatTime] = useState(0);
@@ -187,8 +192,8 @@ export function GraphPage() {
     [filteredEntities, filteredRelationships, layoutSalt, nodeOverrides],
   );
   const projectedScene = useMemo(
-    () => projectGraphScene(scene, rotation, floatTime, zoom),
-    [scene, rotation, floatTime, zoom],
+    () => projectGraphScene(scene, viewMode === 'space' ? rotation : flatRotation, floatTime, zoom, viewMode),
+    [scene, viewMode, rotation, floatTime, zoom],
   );
   const highlightedNodeIds = useMemo(
     () => buildHighlightedNodeIds(scene, hoveredNodeId),
@@ -220,8 +225,13 @@ export function GraphPage() {
   function handleResetLayout() {
     setLayoutSalt((value) => value + 1);
     setNodeOverrides({});
-    setRotation(defaultRotation);
+    setRotation(viewMode === 'space' ? spaceRotation : flatRotation);
     setZoom(1);
+  }
+
+  function changeViewMode(mode: GraphViewMode) {
+    setViewMode(mode);
+    setRotation(mode === 'space' ? spaceRotation : flatRotation);
   }
 
   function toggleType(type: EntityType) {
@@ -250,6 +260,7 @@ export function GraphPage() {
 
   function handleCanvasPointerDown(event: ReactPointerEvent<SVGSVGElement>) {
     if (event.button !== 0) return;
+    if (viewMode !== 'space') return;
     event.currentTarget.setPointerCapture(event.pointerId);
     setDragState({
       mode: 'rotate',
@@ -369,6 +380,32 @@ export function GraphPage() {
             <RotateCcw size={16} />
             重排
           </button>
+          <div className="inline-flex rounded-full border border-[#d9d9d6] bg-white p-1 text-xs">
+            <button
+              type="button"
+              onClick={() => changeViewMode('map')}
+              className={[
+                'inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 transition',
+                viewMode === 'map' ? 'bg-[#155eef] text-white' : 'text-[#4b5563] hover:text-[#155eef]',
+              ].join(' ')}
+              title="平面视角"
+            >
+              <MapIcon size={14} />
+              平面
+            </button>
+            <button
+              type="button"
+              onClick={() => changeViewMode('space')}
+              className={[
+                'inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 transition',
+                viewMode === 'space' ? 'bg-[#155eef] text-white' : 'text-[#4b5563] hover:text-[#155eef]',
+              ].join(' ')}
+              title="空间视角"
+            >
+              <Box size={14} />
+              空间
+            </button>
+          </div>
         </div>
       </div>
 
@@ -445,7 +482,10 @@ export function GraphPage() {
               <svg
                 ref={svgRef}
                 viewBox={`0 0 ${GRAPH_WIDTH} ${GRAPH_HEIGHT}`}
-                className="mywiki-tech-graph h-[640px] w-full cursor-grab active:cursor-grabbing"
+                className={[
+                  'mywiki-tech-graph h-[640px] w-full',
+                  viewMode === 'space' ? 'cursor-grab active:cursor-grabbing' : 'cursor-default',
+                ].join(' ')}
                 role="img"
                 aria-label="MyWiki 关系图谱"
                 onPointerDown={handleCanvasPointerDown}
@@ -879,9 +919,15 @@ function fitLayoutToViewport(nodes: SceneNode[], width: number, height: number) 
   }));
 }
 
-function projectGraphScene(scene: GraphScene, rotation: Rotation, time: number, zoom: number): ProjectedScene {
+function projectGraphScene(
+  scene: GraphScene,
+  rotation: Rotation,
+  time: number,
+  zoom: number,
+  viewMode: GraphViewMode,
+): ProjectedScene {
   const projectedNodes = scene.nodes
-    .map((node) => projectNode(node, rotation, time, zoom))
+    .map((node) => projectNode(node, rotation, time, zoom, viewMode))
     .sort((a, b) => a.depth - b.depth);
   const projectedById = new Map(projectedNodes.map((node) => [node.node.entity.id, node]));
   const links = scene.links
@@ -893,23 +939,45 @@ function projectGraphScene(scene: GraphScene, rotation: Rotation, time: number, 
         relationship: link.relationship,
         from,
         to,
-        opacity: clamp(0.36 + (from.scale + to.scale) * 0.17, 0.38, 0.78),
+        opacity: viewMode === 'space'
+          ? clamp(0.36 + (from.scale + to.scale) * 0.17, 0.38, 0.78)
+          : clamp(0.34 + Math.min(link.from.degree + link.to.degree, 12) * 0.018, 0.36, 0.62),
       };
     })
     .filter((link): link is ProjectedLink => Boolean(link));
 
-  return { nodes: projectedNodes, links, visibleLabelIds: buildVisibleLabelIds(projectedNodes, zoom) };
+  return { nodes: projectedNodes, links, visibleLabelIds: buildVisibleLabelIds(projectedNodes, zoom, viewMode) };
 }
 
-function projectNode(node: SceneNode, rotation: Rotation, time: number, zoom: number): ProjectedNode {
+function projectNode(
+  node: SceneNode,
+  rotation: Rotation,
+  time: number,
+  zoom: number,
+  viewMode: GraphViewMode,
+): ProjectedNode {
   const width = GRAPH_WIDTH;
   const height = GRAPH_HEIGHT;
-  const floatX = Math.sin(time * 0.75 + node.phase) * node.drift;
-  const floatY = Math.cos(time * 0.64 + node.phase * 0.8) * node.drift * 0.72;
-  const floatZ = Math.sin(time * 0.52 + node.phase * 1.4) * node.drift * 2.2;
+  const floatStrength = viewMode === 'space' ? 1 : 0.32;
+  const floatX = Math.sin(time * 0.75 + node.phase) * node.drift * floatStrength;
+  const floatY = Math.cos(time * 0.64 + node.phase * 0.8) * node.drift * 0.72 * floatStrength;
+  const floatZ = viewMode === 'space' ? Math.sin(time * 0.52 + node.phase * 1.4) * node.drift * 2.2 : 0;
   const centeredX = node.x - width / 2 + floatX;
   const centeredY = node.y - height / 2 + floatY;
   const centeredZ = node.z + floatZ;
+
+  if (viewMode === 'map') {
+    const radius = nodeRadius(node.degree) * clamp(Math.sqrt(zoom), 0.8, 1.18);
+    return {
+      node,
+      x: width / 2 + centeredX * zoom,
+      y: height / 2 + centeredY * zoom,
+      radius,
+      scale: 1,
+      depth: node.degree,
+      opacity: 0.95,
+    };
+  }
 
   const cosY = Math.cos(rotation.y);
   const sinY = Math.sin(rotation.y);
@@ -940,13 +1008,19 @@ function nodeRadius(degree: number) {
   return Math.min(15.5, 6.5 + degree * 1.05);
 }
 
-function buildVisibleLabelIds(nodes: ProjectedNode[], zoom: number) {
+function buildVisibleLabelIds(nodes: ProjectedNode[], zoom: number, viewMode: GraphViewMode) {
   const boxes: Array<{ left: number; right: number; top: number; bottom: number }> = [];
   const visible = new Set<string>();
-  const maxLabels = zoom >= 1.45 ? 72 : zoom >= 1.15 ? 46 : 28;
+  const maxLabels = viewMode === 'map'
+    ? zoom >= 1.35 ? 74 : zoom >= 1.08 ? 54 : 38
+    : zoom >= 1.45 ? 72 : zoom >= 1.15 ? 46 : 28;
   const candidates = nodes
     .filter((node) => node.x > 24 && node.x < GRAPH_WIDTH - 24 && node.y > 24 && node.y < GRAPH_HEIGHT - 38)
-    .filter((node) => zoom >= 1.35 || node.node.degree >= 4 || (node.scale > 1.08 && node.node.degree >= 2))
+    .filter((node) =>
+      viewMode === 'map'
+        ? zoom >= 1.22 || node.node.degree >= 3
+        : zoom >= 1.35 || node.node.degree >= 4 || (node.scale > 1.08 && node.node.degree >= 2),
+    )
     .sort(
       (a, b) =>
         b.node.degree - a.node.degree ||
