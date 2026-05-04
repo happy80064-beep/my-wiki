@@ -543,7 +543,7 @@ async function answerWikiRead(
     sources: buildWikiReadSources(document, draftAnswer, question),
     suggestions: buildEntitySuggestions(entity),
     trace,
-    compileSuggestions: await materializeCompileSuggestions(buildCompileSuggestions(document, plan), question),
+    compileSuggestions: await materializeCompileSuggestions(buildCompileSuggestions(document, plan, question), question),
   };
 
   return composeResultIfRequested(
@@ -582,6 +582,8 @@ type MetricAnswer = {
   value: string;
   confidence: 'high' | 'medium';
   reason: string;
+  hit: EvidenceHit;
+  evidenceSnippet: string;
 };
 
 type QueryContextBudget = {
@@ -1245,12 +1247,14 @@ function buildComposeEntries(document: EntityDocument, budget: QueryContextBudge
   return [...evidenceEntries, ...contextEntries];
 }
 
-function buildCompileSuggestions(document: EntityDocument, plan: QueryPlan): CompileSuggestionDraft[] {
+function buildCompileSuggestions(document: EntityDocument, plan: QueryPlan, question?: string): CompileSuggestionDraft[] {
   const propertyKey = normalizePropertyKey(plan.attribute ?? inferAttribute(plan.evidenceTerms.join(' ')));
-  if (!propertyKey || document.evidenceHits.length === 0) return [];
+  const metricSuggestions = question ? buildMetricCompileSuggestions(document, question) : [];
+  if ((!propertyKey || document.evidenceHits.length === 0) && metricSuggestions.length === 0) return [];
 
   const suggestions = document.evidenceHits
-    .map((hit, index) => {
+    .map((hit) => {
+      if (!propertyKey) return undefined;
       const evidenceText = hit.entry.content || hit.snippet;
       const propertyValue = extractPropertyValue(propertyKey, evidenceText, hit.matchedTerms);
       if (!propertyValue) return undefined;
@@ -1270,7 +1274,30 @@ function buildCompileSuggestions(document: EntityDocument, plan: QueryPlan): Com
     })
     .filter((suggestion): suggestion is CompileSuggestionDraft => Boolean(suggestion));
 
-  return dedupeCompileSuggestions(suggestions).slice(0, 3);
+  return dedupeCompileSuggestions([...metricSuggestions, ...suggestions]).slice(0, 3);
+}
+
+function buildMetricCompileSuggestions(document: EntityDocument, question: string): CompileSuggestionDraft[] {
+  const metricAnswer = extractMetricAnswer(question, document.evidenceHits);
+  if (!metricAnswer) return [];
+
+  const propertyLabel = metricAnswer.label;
+  const propertyValue = metricAnswer.confidence === 'high'
+    ? metricAnswer.value
+    : `${metricAnswer.value}（疑似，需核对原文）`;
+  const suggestion = {
+    entityId: document.entity.id,
+    entityTitle: document.entity.title,
+    propertyKey: metricPropertyKey(propertyLabel),
+    propertyLabel,
+    propertyValue,
+    evidenceEntryId: metricAnswer.hit.entry.id,
+    evidenceSnippet: metricAnswer.evidenceSnippet,
+    evidenceScope: metricAnswer.hit.scope,
+    confidence: metricAnswer.confidence === 'high' ? 0.82 : 0.62,
+  } satisfies CompileSuggestionDraft;
+
+  return validateCompileSuggestionByRule(suggestion) ? [suggestion] : [];
 }
 
 function buildPropertyEvidenceSnippet(evidenceText: string, propertyValue: string, hit: EvidenceHit) {
@@ -1307,6 +1334,15 @@ function propertyLabel(propertyKey: string) {
     openSourceStatus: '开源状态',
   };
   return labels[propertyKey] ?? propertyKey;
+}
+
+function metricPropertyKey(label: string) {
+  const encoded = Array.from(normalize(label) || 'metric')
+    .map((char) => char.codePointAt(0)?.toString(36) ?? '')
+    .filter(Boolean)
+    .join('_')
+    .slice(0, 72);
+  return `metric_${encoded || 'value'}`;
 }
 
 function extractPropertyValue(propertyKey: string, text: string, matchedTerms: string[]) {
@@ -1467,6 +1503,7 @@ function compileEvidenceHasTrigger(propertyKey: string, text: string) {
 
 function compileValueCandidates(value: string) {
   const base = value.trim();
+  const noteFree = base.replace(/[（(][^）)]*[）)]/g, '').trim();
   const descriptorFree = base
     .replace(/开源项目|项目|平台|方案|路线|方向|近音组/g, '')
     .trim();
@@ -1475,7 +1512,7 @@ function compileValueCandidates(value: string) {
     /开源/.test(base) ? '开源' : '',
     /非开源|闭源/.test(base) ? '闭源' : '',
   ];
-  return uniqueStrings([base, descriptorFree, ...splitValues, ...semanticAliases].filter(Boolean));
+  return uniqueStrings([base, noteFree, descriptorFree, ...splitValues, ...semanticAliases].filter(Boolean));
 }
 
 function normalizeCompileKey(value: string) {
@@ -1899,9 +1936,11 @@ function formatAttributeFastAnswer(entity: Entity, propertyKey: string, value: s
 }
 
 function formatMetricFastAnswer(entity: Entity, answer: MetricAnswer) {
+  const evidenceLine = `证据摘录：${cleanEvidenceSnippet(answer.evidenceSnippet)}`;
   if (answer.confidence === 'high') {
     return [
       `${entity.title}的${answer.label}约为 ${answer.value}。`,
+      evidenceLine,
       '提示：该数字来自来源材料命中，建议打开来源核对原文。后续确认后可以编译回 Wiki，避免下次再从原文临时抽取。',
     ].join('\n\n');
   }
@@ -1909,6 +1948,7 @@ function formatMetricFastAnswer(entity: Entity, answer: MetricAnswer) {
   return [
     `我没有找到能直接确认${entity.title}的${answer.label}的高置信数字。`,
     `待确认线索：来源材料里出现了 ${answer.value}，但它和“${answer.label}”的对应关系还不够明确，暂不建议直接作为结论。`,
+    evidenceLine,
   ].join('\n\n');
 }
 
@@ -2288,13 +2328,17 @@ function extractMetricAnswer(question: string, hits: EvidenceHit[]) {
 
   let mediumCandidate: MetricAnswer | undefined;
   for (const hit of hits) {
-    const extraction = extractMetricValueFromText(hit.entry.content || hit.snippet, terms);
+    const evidenceText = hit.entry.content || hit.snippet;
+    const extraction = extractMetricValueFromText(evidenceText, terms);
     if (!extraction) continue;
+    const evidenceSnippet = buildMetricEvidenceSnippet(evidenceText, extraction.value, terms, hit);
     const answer = {
       label: normalizeMetricLabel(terms[0] ?? '相关数值'),
       value: extraction.value,
       confidence: extraction.confidence,
       reason: extraction.reason,
+      hit,
+      evidenceSnippet,
     } satisfies MetricAnswer;
     if (answer.confidence === 'high') {
       return answer;
@@ -2303,6 +2347,27 @@ function extractMetricAnswer(question: string, hits: EvidenceHit[]) {
   }
 
   return mediumCandidate;
+}
+
+function buildMetricEvidenceSnippet(text: string, value: string, terms: string[], hit: EvidenceHit) {
+  const sentence = findSentenceContaining(text, metricValueCandidates(value));
+  if (sentence) return snippet(sentence, 180);
+
+  const valueIndex = findFirstTermIndex(text, metricValueCandidates(value));
+  if (valueIndex >= 0) return snippetAround(text, valueIndex, 180);
+
+  const termIndex = findFirstTermIndex(text, terms);
+  if (termIndex >= 0) return snippetAround(text, termIndex, 180);
+
+  return hit.snippet;
+}
+
+function findSentenceContaining(text: string, terms: string[]) {
+  const sentences = text
+    .split(/[。；;\n]/)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
+  return sentences.find((sentence) => terms.some((term) => evidenceTextMatches(sentence, term)));
 }
 
 function extractMetricValueFromText(text: string, terms: string[]) {
@@ -2325,7 +2390,7 @@ function extractMetricValueFromText(text: string, terms: string[]) {
         reason: confidence === 'high'
           ? '来源句同时包含指标词和金额单位'
           : metricMediumReason(value, sentence, terms),
-      } satisfies Omit<MetricAnswer, 'label'>;
+      } satisfies Pick<MetricAnswer, 'value' | 'confidence' | 'reason'>;
     }
   }
 
@@ -2337,7 +2402,7 @@ function extractMetricValueFromText(text: string, terms: string[]) {
           value,
           confidence: 'medium',
           reason: '同一来源中找到问题指标词和金额，但金额不在同一句中',
-        } satisfies Omit<MetricAnswer, 'label'>;
+        } satisfies Pick<MetricAnswer, 'value' | 'confidence' | 'reason'>;
       }
     }
   }
@@ -2363,12 +2428,16 @@ function adjustMetricConfidence(
 ): MetricAnswer['confidence'] {
   if (confidence !== 'high') return confidence;
   if (isYuanOnlyRevenueValue(value, sentence, terms)) return 'medium';
+  if (isLooseWanMetricValue(value, sentence, terms)) return 'medium';
   return confidence;
 }
 
 function metricMediumReason(value: string, sentence: string, terms: string[]) {
   if (isYuanOnlyRevenueValue(value, sentence, terms)) {
     return '金额单位为元，且问题是收入/营收类指标，可能存在表格单位或 OCR 单位丢失';
+  }
+  if (isLooseWanMetricValue(value, sentence, terms)) {
+    return '数值只出现“万”这类量级词，缺少平方米、亩、万元等明确单位，上下文仍需确认';
   }
   return '来源句包含部分指标词和金额单位，但上下文仍需确认';
 }
@@ -2382,9 +2451,22 @@ function isYuanOnlyRevenueValue(value: string, sentence: string, terms: string[]
   return revenueLike && !explicitSmallUnit;
 }
 
+function isLooseWanMetricValue(value: string, sentence: string, terms: string[]) {
+  const normalizedValue = value.replace(/\s+/g, '');
+  if (!/^[0-9][0-9,]*(?:\.[0-9]+)?万$/.test(normalizedValue)) return false;
+  const metricLike = /(面积|土地|规模|收入|营收|总额|合计|数量|人数)/.test(`${terms.join('')}${sentence}`);
+  return metricLike;
+}
+
 function extractCurrencyLikeValue(text: string) {
   const currencyMatch = text.match(/(?:人民币|RMB)?\s*([0-9][0-9,，]*(?:\.[0-9]+)?\s*(?:亿元|万元|元))/i);
   if (currencyMatch?.[1]) return normalizeMetricValue(currencyMatch[1]);
+
+  const areaMatch = text.match(/([0-9][0-9,，]*(?:\.[0-9]+)?\s*(?:万平方米|平方米|平米|㎡|亩|公顷))/);
+  if (areaMatch?.[1]) return normalizeMetricValue(areaMatch[1]);
+
+  const genericUnitMatch = text.match(/([0-9][0-9,，]*(?:\.[0-9]+)?\s*(?:人|家|个|套|间|床|户|%))/);
+  if (genericUnitMatch?.[1]) return normalizeMetricValue(genericUnitMatch[1]);
 
   const looseMatch = text.match(/([0-9][0-9,，]*(?:\.[0-9]+)?\s*(?:亿|万))/);
   if (looseMatch?.[1]) return normalizeMetricValue(looseMatch[1]);
@@ -2401,6 +2483,15 @@ function normalizeMetricLabel(label: string) {
 
 function normalizeMetricValue(value: string) {
   return value.replace(/，/g, ',').replace(/\s+/g, '');
+}
+
+function metricValueCandidates(value: string) {
+  const normalized = normalizeMetricValue(value);
+  const spacedWan = normalized.replace(/(万)(元|平方米)?$/, ' $1$2');
+  const compactUnit = normalized
+    .replace(/平方米$/, '㎡')
+    .replace(/平米$/, '㎡');
+  return uniqueStrings([normalized, spacedWan, compactUnit, normalized.replace(/㎡$/, '平方米')]);
 }
 
 function normalizeEvidenceForMetric(value: string) {

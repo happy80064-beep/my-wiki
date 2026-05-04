@@ -15,7 +15,7 @@ const allowedCompilePropertyKeys = new Set([
 ]);
 
 export function isAllowedCompilePropertyKey(propertyKey: string) {
-  return allowedCompilePropertyKeys.has(propertyKey);
+  return allowedCompilePropertyKeys.has(propertyKey) || /^metric_[a-z0-9_]{3,80}$/.test(propertyKey);
 }
 
 export function createCompileSuggestionFingerprint(suggestion: Pick<CompileSuggestionDraft, 'entityId' | 'propertyKey' | 'propertyValue'>) {

@@ -237,7 +237,7 @@ describe('structured query', () => {
         '福瑞科技园三期稳定运营期的年均项目总收入仍在测算。运营测算附件中出现 7,825 万元这一数字，但未明确标注为年均收入。',
       source: 'text',
     });
-    await createEntity({
+    const project = await createEntity({
       type: 'topic',
       title: '福瑞健康科技园',
       summary: '园区项目。',
@@ -249,8 +249,19 @@ describe('structured query', () => {
 
     expect(result.answer).toContain('我没有找到能直接确认福瑞健康科技园的年均项目总收入的高置信数字');
     expect(result.answer).toContain('待确认线索：来源材料里出现了 7,825万元');
+    expect(result.answer).toContain('证据摘录');
+    expect(result.answer).toContain('运营测算附件中出现 7,825 万元这一数字');
     expect(result.answer).not.toContain('规则置信度');
     expect(result.answer).not.toContain('原始材料命中');
+    expect(result.compileSuggestions?.[0]).toEqual(
+      expect.objectContaining({
+        entityId: project.id,
+        propertyLabel: '年均项目总收入',
+        propertyValue: '7,825万元（疑似，需核对原文）',
+        evidenceEntryId: entry.id,
+      }),
+    );
+    expect(result.compileSuggestions?.[0]?.evidenceSnippet).toContain('7,825 万元');
   });
 
   it('does not present parsed table-like currency fragments as confirmed metric answers', async () => {
@@ -292,6 +303,37 @@ describe('structured query', () => {
 
     expect(result.answer).toContain('待确认线索：来源材料里出现了 30000.00元');
     expect(result.answer).not.toContain('项目平均年收入合计约为 30000.00元');
+  });
+
+  it('turns ambiguous area metric clues into reviewable wiki suggestions', async () => {
+    const entry = await createEntry({
+      content:
+        '福瑞健康科技园三期项目资料：住宅业态包括适老住宅和配套服务。住宅业态的土地面积一共出现 21 万这一线索，但原表格没有完整解析单位，需核对是否为万平方米或亩。',
+      source: 'text',
+    });
+    const project = await createEntity({
+      type: 'project',
+      title: '福瑞健康科技园三期项目',
+      summary: '园区项目。',
+      tags: ['福瑞科技园', '三期', '住宅业态'],
+      sourceEntries: [entry.id],
+    });
+
+    const result = await runStructuredQuery('福瑞健康科技园三期项目住宅业态的土地面积一共是多少？');
+
+    expect(result.answer).toContain('待确认线索：来源材料里出现了 21万');
+    expect(result.answer).toContain('证据摘录');
+    expect(result.answer).toContain('住宅业态的土地面积一共出现 21 万这一线索');
+    expect(result.compileSuggestions?.[0]).toEqual(
+      expect.objectContaining({
+        entityId: project.id,
+        propertyLabel: '土地面积一共',
+        propertyValue: '21万（疑似，需核对原文）',
+        evidenceEntryId: entry.id,
+        evidenceScope: 'entity-source',
+      }),
+    );
+    expect(result.sources.some((source) => source.id === entry.id)).toBe(true);
   });
 
   it('filters blank source titles from query sources', async () => {
