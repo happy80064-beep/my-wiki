@@ -2007,7 +2007,9 @@ function extractListItemsFromEvidence(question: string, hits: EvidenceHit[]) {
       .map((sentence) => sentence.trim())
       .filter((sentence) => sentence.length > 0);
     for (const sentence of sentences) {
+      if (isLikelyTocOrNavigationSentence(sentence)) continue;
       if (!sentenceMatchesListFocus(sentence, focusTerms)) continue;
+      if (!hasFocusedListAnswerSignal(sentence, focusTerms)) continue;
       if (!hasListItemTrigger(sentence)) continue;
       items.push(...extractItemsFromSentence(sentence, focusTerms));
     }
@@ -2091,7 +2093,23 @@ function isUsefulListItem(item: string, focusTerms: string[]) {
   if (focusTerms.some((term) => normalize(term) === normalized)) return false;
   if (/^(项目|业态|版块|板块|类型|服务|包括|包含|相关|具体|如下|其中|以及|和|与|都)$/.test(item)) return false;
   if (isTocOrOcrNoise(item)) return false;
+  if (isLikelyNarrativeOrHeadingItem(item)) return false;
   return /[\u4e00-\u9fa5A-Za-z]/.test(item);
+}
+
+function hasFocusedListAnswerSignal(sentence: string, focusTerms: string[]) {
+  const hasListSeparator = /[、,，；;]/.test(sentence);
+  const hasExplicitTarget =
+    /(项目|服务|产品|机构|科室|门诊|中心|疗法|方法).{0,12}(包括|包含|有|设有|设置|建设|配置|规划|清单|如下|为)/.test(sentence) ||
+    /(包括|包含|设有|设置|建设|配置|规划).{0,18}(项目|服务|产品|机构|科室|门诊|中心|疗法|方法)/.test(sentence);
+  const hasDimensionList =
+    /(业态|版块|板块|业务线|子分类|子类).{0,24}(包括|包含|有|设有|设置|建设|配置|规划|清单|如下|[:：])/.test(sentence) &&
+    hasListSeparator;
+  const focus = focusTerms.join('');
+  const isMedicalFocus = /(医疗|医养|诊疗|医院|门诊|疗法|科室)/.test(focus);
+  const hasMedicalItemSignal = isMedicalFocus && /(医院|门诊|科室|中心|疗法|治疗|康复|抗衰|细胞|中医|医养|诊疗)/.test(sentence);
+
+  return hasExplicitTarget || hasDimensionList || (hasMedicalItemSignal && hasListSeparator);
 }
 
 function hasListItemTrigger(sentence: string) {
@@ -2118,6 +2136,25 @@ function isTocOrOcrNoise(item: string) {
   const digitCount = (compact.match(/\d/g) ?? []).length;
   if (digitCount >= 3 && digitCount / Math.max(compact.length, 1) > 0.2) return true;
   return false;
+}
+
+function isLikelyTocOrNavigationSentence(sentence: string) {
+  const compact = sentence.replace(/\s+/g, ' ').trim();
+  if (isTocOrOcrNoise(compact)) return true;
+  if (/[.·•]{3,}\s*\d/.test(compact)) return true;
+  if (/--\s*\d+\s+of\s+\d+\s*--/i.test(compact)) return true;
+  if (/(目录|页码|章节|附录|图目录|表目录)/.test(compact)) return true;
+
+  const headingWords = /(业务协同|增长极|创新商业模式|资产价值|项目愿景|项目定位|温暖永生|为特色|为核心|养生息|消费场景|待.*建成后)/;
+  const hasConcreteList =
+    /(包括|包含|设有|设置|建设|配置|规划).{0,24}(项目|服务|机构|科室|门诊|中心|疗法|方法)/.test(compact) ||
+    /(项目|服务|机构|科室|门诊|中心|疗法|方法).{0,12}(包括|包含|有|设有|设置|建设|配置|规划)/.test(compact);
+
+  return headingWords.test(compact) && !hasConcreteList;
+}
+
+function isLikelyNarrativeOrHeadingItem(item: string) {
+  return /(业务协同|增长极|创新商业模式|资产价值|项目愿景|项目定位|温暖永生|为特色|为核心|养生息|消费场景|待.*建成后|第\s*\d+\s*页|页码|目录)/.test(item);
 }
 
 function evidenceHitSupportsAnswer(hit: EvidenceHit, answer: string, question: string) {

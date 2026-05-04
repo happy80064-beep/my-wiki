@@ -383,7 +383,7 @@ describe('structured query', () => {
   it('does not turn PDF table-of-contents noise into sub-list answers', async () => {
     const noisyEntry = await createEntry({
       content:
-        '福瑞健康科技园三期项目医疗业态章节目录：实现业务协同................ 92 4.2 创新商业模式 -- 3 of 149 -- II.4.3 最大化园区资产价值。项目愿景与定位项目以“呵护健康，温暖永生”为特色，“医”为核心，“康”养生息，待三期项目建成后。',
+        '福瑞健康科技园三期项目医疗业态章节目录：实现业务协同................ 92.4.2 创新商业模式。打造新的增长极................ 9 -- 3 of 149 -- II.2.4.3 最大化园区资产价值。项目愿景与定位项目以“呵护健康，温暖永生”为特色，“医”为核心，“康”养生息，通过健康数“旅”再造健康消费场景，待三期项目建成后。',
       source: 'text',
     });
     await createEntity({
@@ -398,8 +398,10 @@ describe('structured query', () => {
 
     expect(result.answer).toContain('没有找到能直接展开');
     expect(result.answer).not.toContain('实现业务协同');
+    expect(result.answer).not.toContain('打造新的增长极');
     expect(result.answer).not.toContain('3 of 149');
     expect(result.answer).not.toContain('温暖永生');
+    expect(result.answer).not.toContain('医”为核心');
   });
 
   it('expands wiki reads through two-hop graph relevance', async () => {
