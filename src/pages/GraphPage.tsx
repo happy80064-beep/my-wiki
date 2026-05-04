@@ -58,6 +58,7 @@ type ProjectedLink = {
 type ProjectedScene = {
   nodes: ProjectedNode[];
   links: ProjectedLink[];
+  visibleLabelIds: Set<string>;
 };
 
 type NodeOverride = {
@@ -132,6 +133,8 @@ const insightTypeLabels = {
   'dense-hub': '高密',
 } as const;
 
+const GRAPH_WIDTH = 1240;
+const GRAPH_HEIGHT = 760;
 const defaultRotation: Rotation = { x: -0.38, y: 0.44 };
 
 export function GraphPage() {
@@ -302,8 +305,8 @@ export function GraphPage() {
       return {
         ...current,
         [dragState.nodeId]: {
-          x: clamp(base.x + dx / zoom, 40, 960),
-          y: clamp(base.y + dy / zoom, 40, 580),
+          x: clamp(base.x + dx / zoom, 48, GRAPH_WIDTH - 48),
+          y: clamp(base.y + dy / zoom, 48, GRAPH_HEIGHT - 48),
           z: clamp(base.z + (dy / zoom) * 0.18 * Math.sin(rotation.x), -260, 260),
         },
       };
@@ -321,8 +324,8 @@ export function GraphPage() {
     const rect = svgRef.current?.getBoundingClientRect();
     if (!rect) return { x: 0, y: 0 };
     return {
-      x: ((event.clientX - rect.left) / Math.max(rect.width, 1)) * 1000,
-      y: ((event.clientY - rect.top) / Math.max(rect.height, 1)) * 620,
+      x: ((event.clientX - rect.left) / Math.max(rect.width, 1)) * GRAPH_WIDTH,
+      y: ((event.clientY - rect.top) / Math.max(rect.height, 1)) * GRAPH_HEIGHT,
     };
   }
 
@@ -335,7 +338,7 @@ export function GraphPage() {
   }
 
   return (
-    <section className="mx-auto max-w-6xl px-5 py-8">
+    <section className="mx-auto max-w-7xl px-5 py-8">
       <div className="mb-5 flex flex-wrap items-end justify-between gap-4">
         <div>
           <p className="text-xs font-medium text-[#155eef]">Graph</p>
@@ -369,7 +372,7 @@ export function GraphPage() {
         </div>
       </div>
 
-      <div className="grid gap-5 lg:grid-cols-[minmax(0,1.55fr)_minmax(320px,0.75fr)]">
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1.9fr)_minmax(320px,0.72fr)]">
         <section className="overflow-hidden rounded-[12px] border border-[#d9d9d6] bg-white">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#e5e5e4] px-5 py-4">
             <div className="flex items-center gap-3 text-[#1f2937]">
@@ -379,7 +382,7 @@ export function GraphPage() {
               <div>
                 <h3 className="text-sm font-semibold">Knowledge Network</h3>
                 <p className="text-xs text-[#626965]">
-                  {overview.entityCount} nodes / {overview.relationshipCount} links / {Math.round(zoom * 100)}%
+                  {scene.nodes.length}/{overview.entityCount} nodes / {scene.links.length}/{overview.relationshipCount} links / {Math.round(zoom * 100)}%
                 </p>
               </div>
             </div>
@@ -433,16 +436,16 @@ export function GraphPage() {
             </div>
           </div>
 
-          <div className="relative min-h-[520px] bg-[#fbfbfa]">
+          <div className="relative min-h-[640px] bg-[#fbfbfa]">
             {scene.nodes.length === 0 ? (
-              <div className="flex min-h-[520px] items-center justify-center px-6 text-center text-sm text-[#626965]">
+              <div className="flex min-h-[640px] items-center justify-center px-6 text-center text-sm text-[#626965]">
                 当前筛选范围内没有可展示实体。可以放宽类型、场景或时间条件。
               </div>
             ) : (
               <svg
                 ref={svgRef}
-                viewBox="0 0 1000 620"
-                className="mywiki-tech-graph h-[520px] w-full cursor-grab active:cursor-grabbing"
+                viewBox={`0 0 ${GRAPH_WIDTH} ${GRAPH_HEIGHT}`}
+                className="mywiki-tech-graph h-[640px] w-full cursor-grab active:cursor-grabbing"
                 role="img"
                 aria-label="MyWiki 关系图谱"
                 onPointerDown={handleCanvasPointerDown}
@@ -455,8 +458,8 @@ export function GraphPage() {
                     <path d="M 42 0 L 0 0 0 42" fill="none" stroke="rgba(148, 163, 184, 0.11)" strokeWidth="1" />
                   </pattern>
                 </defs>
-                <rect width="1000" height="620" fill="#fbfbfa" />
-                <rect width="1000" height="620" fill="url(#graph-grid)" />
+                <rect width={GRAPH_WIDTH} height={GRAPH_HEIGHT} fill="#fbfbfa" />
+                <rect width={GRAPH_WIDTH} height={GRAPH_HEIGHT} fill="url(#graph-grid)" />
 
                 {projectedScene.links.map((link) => {
                   const focused =
@@ -484,6 +487,8 @@ export function GraphPage() {
                   const node = projected.node;
                   const color = nodeColors[node.entity.type];
                   const focused = !highlightedNodeIds || highlightedNodeIds.has(node.entity.id);
+                  const isHovered = hoveredNodeId === node.entity.id;
+                  const showLabel = isHovered || projectedScene.visibleLabelIds.has(node.entity.id);
                   return (
                     <a
                       key={node.entity.id}
@@ -502,6 +507,13 @@ export function GraphPage() {
                         onPointerEnter={() => setHoveredNodeId(node.entity.id)}
                         onPointerLeave={() => setHoveredNodeId(null)}
                       >
+                        <circle
+                          cx={projected.x}
+                          cy={projected.y}
+                          r={projected.radius + 14}
+                          fill="transparent"
+                          pointerEvents="all"
+                        />
                         <circle
                           cx={projected.x}
                           cy={projected.y}
@@ -525,14 +537,16 @@ export function GraphPage() {
                           opacity="0.42"
                           pointerEvents="none"
                         />
-                        <text
-                          x={projected.x}
-                          y={projected.y + projected.radius + 18}
-                          textAnchor="middle"
-                          className="mywiki-tech-label"
-                        >
-                          {shortTitle(node.entity.title)}
-                        </text>
+                        {showLabel ? (
+                          <text
+                            x={projected.x}
+                            y={projected.y + projected.radius + 17}
+                            textAnchor="middle"
+                            className={isHovered ? 'mywiki-tech-label mywiki-tech-label-active' : 'mywiki-tech-label'}
+                          >
+                            {isHovered ? shortTitle(node.entity.title, 24) : shortTitle(node.entity.title)}
+                          </text>
+                        ) : null}
                         <title>
                           {entityTypeLabels[node.entity.type]} / {node.entity.title} / {node.degree} links
                         </title>
@@ -738,19 +752,19 @@ function runForceLayout(
   salt: number,
   nodeOverrides: Record<string, NodeOverride>,
 ): SceneNode[] {
-  const width = 1000;
-  const height = 620;
+  const width = GRAPH_WIDTH;
+  const height = GRAPH_HEIGHT;
   const centerX = width / 2;
   const centerY = height / 2;
   const typeAnchors: Record<EntityType, { x: number; y: number }> = {
-    project: { x: width * 0.42, y: height * 0.44 },
-    topic: { x: width * 0.64, y: height * 0.42 },
-    person: { x: width * 0.35, y: height * 0.64 },
-    event: { x: width * 0.64, y: height * 0.66 },
+    project: { x: width * 0.36, y: height * 0.4 },
+    topic: { x: width * 0.66, y: height * 0.36 },
+    person: { x: width * 0.32, y: height * 0.68 },
+    event: { x: width * 0.68, y: height * 0.68 },
   };
   const nodes = entities.map((entity, index) => {
     const angle = ((index + salt * 3) / Math.max(entities.length, 1)) * Math.PI * 2;
-    const radius = 150 + (hashCode(entity.id) % 90);
+    const radius = 220 + (hashCode(entity.id) % 150);
     return {
       entity,
       x: centerX + Math.cos(angle) * radius + (hashCode(entity.title) % 80) - 40,
@@ -765,7 +779,7 @@ function runForceLayout(
   });
   const nodeById = new Map(nodes.map((node) => [node.entity.id, node]));
 
-  for (let step = 0; step < 180; step += 1) {
+  for (let step = 0; step < 260; step += 1) {
     for (let leftIndex = 0; leftIndex < nodes.length; leftIndex += 1) {
       for (let rightIndex = leftIndex + 1; rightIndex < nodes.length; rightIndex += 1) {
         const left = nodes[leftIndex];
@@ -773,7 +787,9 @@ function runForceLayout(
         const dx = right.x - left.x;
         const dy = right.y - left.y;
         const distanceSq = Math.max(dx * dx + dy * dy, 64);
-        const force = 3800 / distanceSq;
+        const minDistance = 42 + Math.min(left.degree + right.degree, 12) * 2.6;
+        const collisionBoost = distanceSq < minDistance * minDistance ? 4.8 : 1;
+        const force = (9200 * collisionBoost) / distanceSq;
         const distance = Math.sqrt(distanceSq);
         const fx = (dx / distance) * force;
         const fy = (dy / distance) * force;
@@ -791,8 +807,8 @@ function runForceLayout(
       const dx = to.x - from.x;
       const dy = to.y - from.y;
       const distance = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
-      const desired = 120;
-      const force = (distance - desired) * 0.012;
+      const desired = 150 + Math.min(from.degree + to.degree, 12) * 2.5;
+      const force = (distance - desired) * 0.0075;
       const fx = (dx / distance) * force;
       const fy = (dy / distance) * force;
       from.vx += fx;
@@ -803,16 +819,16 @@ function runForceLayout(
 
     for (const node of nodes) {
       const anchor = typeAnchors[node.entity.type];
-      node.vx += (anchor.x - node.x) * 0.004;
-      node.vy += (anchor.y - node.y) * 0.004;
-      node.vx += (centerX - node.x) * 0.0015;
-      node.vy += (centerY - node.y) * 0.0015;
+      node.vx += (anchor.x - node.x) * 0.0024;
+      node.vy += (anchor.y - node.y) * 0.0024;
+      node.vx += (centerX - node.x) * 0.0007;
+      node.vy += (centerY - node.y) * 0.0007;
       node.x += node.vx;
       node.y += node.vy;
-      node.vx *= 0.72;
-      node.vy *= 0.72;
-      node.x = clamp(node.x, 70, width - 70);
-      node.y = clamp(node.y, 70, height - 80);
+      node.vx *= 0.68;
+      node.vy *= 0.68;
+      node.x = clamp(node.x, 64, width - 64);
+      node.y = clamp(node.y, 68, height - 76);
     }
   }
 
@@ -846,9 +862,9 @@ function fitLayoutToViewport(nodes: SceneNode[], width: number, height: number) 
   const spreadX = Math.max(maxX - minX, 1);
   const spreadY = Math.max(maxY - minY, 1);
   const paddingX = 95;
-  const paddingY = 90;
+  const paddingY = 96;
   const scale = Math.min(
-    2.15,
+    1.85,
     (width - paddingX * 2) / spreadX,
     (height - paddingY * 2) / spreadY,
   );
@@ -858,7 +874,7 @@ function fitLayoutToViewport(nodes: SceneNode[], width: number, height: number) 
   return nodes.map((node) => ({
     ...node,
     x: width / 2 + (node.x - graphCenterX) * scale,
-    y: height * 0.45 + (node.y - graphCenterY) * scale,
+    y: height * 0.48 + (node.y - graphCenterY) * scale,
     z: node.z * 1.08,
   }));
 }
@@ -882,12 +898,12 @@ function projectGraphScene(scene: GraphScene, rotation: Rotation, time: number, 
     })
     .filter((link): link is ProjectedLink => Boolean(link));
 
-  return { nodes: projectedNodes, links };
+  return { nodes: projectedNodes, links, visibleLabelIds: buildVisibleLabelIds(projectedNodes, zoom) };
 }
 
 function projectNode(node: SceneNode, rotation: Rotation, time: number, zoom: number): ProjectedNode {
-  const width = 1000;
-  const height = 620;
+  const width = GRAPH_WIDTH;
+  const height = GRAPH_HEIGHT;
   const floatX = Math.sin(time * 0.75 + node.phase) * node.drift;
   const floatY = Math.cos(time * 0.64 + node.phase * 0.8) * node.drift * 0.72;
   const floatZ = Math.sin(time * 0.52 + node.phase * 1.4) * node.drift * 2.2;
@@ -921,11 +937,51 @@ function projectNode(node: SceneNode, rotation: Rotation, time: number, zoom: nu
 }
 
 function nodeRadius(degree: number) {
-  return Math.min(16, 7 + degree * 1.15);
+  return Math.min(15.5, 6.5 + degree * 1.05);
 }
 
-function shortTitle(title: string) {
-  return title.length > 13 ? `${title.slice(0, 12)}...` : title;
+function buildVisibleLabelIds(nodes: ProjectedNode[], zoom: number) {
+  const boxes: Array<{ left: number; right: number; top: number; bottom: number }> = [];
+  const visible = new Set<string>();
+  const maxLabels = zoom >= 1.45 ? 72 : zoom >= 1.15 ? 46 : 28;
+  const candidates = nodes
+    .filter((node) => node.x > 24 && node.x < GRAPH_WIDTH - 24 && node.y > 24 && node.y < GRAPH_HEIGHT - 38)
+    .filter((node) => zoom >= 1.35 || node.node.degree >= 4 || (node.scale > 1.08 && node.node.degree >= 2))
+    .sort(
+      (a, b) =>
+        b.node.degree - a.node.degree ||
+        b.scale - a.scale ||
+        b.node.entity.updatedAt - a.node.entity.updatedAt,
+    );
+
+  for (const node of candidates) {
+    if (visible.size >= maxLabels) break;
+    const label = shortTitle(node.node.entity.title);
+    const width = Math.min(150, Math.max(58, label.length * 9));
+    const box = {
+      left: node.x - width / 2,
+      right: node.x + width / 2,
+      top: node.y + node.radius + 4,
+      bottom: node.y + node.radius + 24,
+    };
+    if (box.left < 6 || box.right > GRAPH_WIDTH - 6 || box.bottom > GRAPH_HEIGHT - 8) continue;
+    if (boxes.some((other) => intersects(box, other))) continue;
+    boxes.push(box);
+    visible.add(node.node.entity.id);
+  }
+
+  return visible;
+}
+
+function intersects(
+  a: { left: number; right: number; top: number; bottom: number },
+  b: { left: number; right: number; top: number; bottom: number },
+) {
+  return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+}
+
+function shortTitle(title: string, maxLength = 13) {
+  return title.length > maxLength ? `${title.slice(0, maxLength - 1)}...` : title;
 }
 
 function clamp(value: number, min: number, max: number) {
