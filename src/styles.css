@@ -120,3 +120,63 @@ body {
   font-weight: 700;
   stroke-width: 6;
 }
+
+.mywiki-local-graph {
+  display: block;
+  touch-action: none;
+}
+
+.mywiki-local-link {
+  stroke: #cbd3da;
+  stroke-linecap: round;
+  stroke-width: 1.15;
+  transition: opacity 140ms ease;
+}
+
+.mywiki-local-edge-label {
+  fill: #6b7280;
+  font-size: 11px;
+  font-weight: 560;
+  letter-spacing: 0;
+  paint-order: stroke;
+  pointer-events: none;
+  stroke: #fbfbfa;
+  stroke-width: 5;
+}
+
+.mywiki-local-node {
+  cursor: grab;
+  transition: opacity 140ms ease, transform 140ms ease;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.mywiki-local-node:hover {
+  transform: scale(1.05);
+}
+
+.mywiki-local-node:active {
+  cursor: grabbing;
+}
+
+.mywiki-local-node-halo {
+  opacity: 0.15;
+}
+
+.mywiki-local-label {
+  fill: #4b5563;
+  font-size: 12px;
+  font-weight: 560;
+  letter-spacing: 0;
+  paint-order: stroke;
+  pointer-events: none;
+  stroke: #fbfbfa;
+  stroke-width: 5;
+}
+
+.mywiki-local-label-active {
+  fill: #111827;
+  font-size: 13px;
+  font-weight: 700;
+  stroke-width: 6;
+}
