@@ -2,6 +2,8 @@ import { db } from '@/lib/db/schema';
 import { relationshipTypeLabel } from '@/lib/graph/answer';
 import type { CompiledEntityProfile, Entity, QueryCacheRecord, Relationship, Task } from '@/types';
 
+const QUERY_CACHE_ALGORITHM_VERSION = 'qa-v5-list-guard';
+
 export type WikiIndexEntry = {
   entityId: string;
   type: Entity['type'];
@@ -110,14 +112,19 @@ export async function putQueryCache(input: Pick<QueryCacheRecord, 'key' | 'quest
 }
 
 export function queryCacheKey(question: string) {
+  const normalized = normalizeQueryQuestion(question).slice(0, 120);
+  return normalized ? `${QUERY_CACHE_ALGORITHM_VERSION}:${normalized}` : '';
+}
+
+function normalizeQueryQuestion(question: string) {
   return question
     .toLowerCase()
     .replace(/[^\u4e00-\u9fa5a-z0-9]/g, '')
-    .slice(0, 120);
+    .trim();
 }
 
 export async function findCachedInsight(question: string) {
-  const normalized = queryCacheKey(question).slice(0, 80);
+  const normalized = normalizeQueryQuestion(question).slice(0, 80);
   if (!normalized) return undefined;
 
   const candidates = await db.entities
