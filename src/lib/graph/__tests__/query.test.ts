@@ -20,6 +20,79 @@ describe('structured query', () => {
     vi.unstubAllGlobals();
   });
 
+  async function createFuruiProjectWithManualCategoriesAndIndicators() {
+    const now = Date.now();
+    const entry = await createEntry({
+      content:
+        '福瑞健康科技园三期项目手工校准数据：医疗业态的用地面积为 248 亩，布局社区门诊、中蒙特色康复理疗。住宅业态的建筑面积在当前材料中未披露。',
+      source: 'text',
+    });
+    const project = await createEntity({
+      type: 'project',
+      title: '福瑞健康科技园三期项目',
+      summary: '园区项目，包含医疗、康养、住宅、研发、文旅等业态。',
+      tags: ['福瑞健康科技园', '福瑞科技园', '福瑞三期', '三期'],
+      sourceEntries: [entry.id],
+      categories: [
+        {
+          name: '医疗业态',
+          aliases: ['医疗', '医疗方面', '医疗板块'],
+          items: [
+            { title: '社区门诊', kind: 'service' },
+            { title: '中蒙特色康复理疗', kind: 'service' },
+          ],
+          evidence: '医疗业态的用地面积为 248 亩，布局社区门诊、中蒙特色康复理疗。',
+          updatedAt: now,
+        },
+        {
+          name: '住宅业态',
+          aliases: ['住宅', '住宅方面', '住宅板块'],
+          items: [
+            { title: '适老住宅', kind: 'product' },
+          ],
+          evidence: '住宅业态的建筑面积在当前材料中未披露。',
+          updatedAt: now,
+        },
+      ],
+      indicators: [
+        {
+          id: 'indicator_medical_land_area_manual',
+          name: '医疗板块用地面积',
+          value: 248,
+          rawValue: '248 亩',
+          unit: '亩',
+          businessLine: '医疗',
+          categoryName: '医疗业态',
+          source: {
+            entryId: entry.id,
+            excerpt: '医疗业态的用地面积为 248 亩，布局社区门诊、中蒙特色康复理疗。',
+          },
+          confidence: 'high',
+          extractedAt: now,
+          updatedAt: now,
+        },
+        {
+          id: 'indicator_residential_building_area_manual_missing',
+          name: '住宅板块建筑面积',
+          value: null,
+          unit: '万平方米',
+          businessLine: '住宅',
+          categoryName: '住宅业态',
+          source: {
+            entryId: entry.id,
+            excerpt: '住宅业态的建筑面积在当前材料中未披露。',
+          },
+          confidence: 'high',
+          note: '当前材料未披露住宅业态建筑面积。',
+          extractedAt: now,
+          updatedAt: now,
+        },
+      ],
+    });
+
+    return { entry, project };
+  }
+
   it('answers pending tasks by exact owner id', async () => {
     const entry = await createEntry({ content: '任务归属测试', source: 'text' });
     const owner = await createEntity({ type: 'person', title: '虾总' });
@@ -480,6 +553,42 @@ describe('structured query', () => {
     expect(result.answer).toContain('医疗板块用地面积为 248 亩');
     expect(result.answer).toContain('Wiki 已编译指标层');
     expect(result.answer).toContain('医疗板块：用地面积 248 亩');
+    expect(result.compileSuggestions ?? []).toEqual([]);
+  });
+
+  it('answers cross-business-line metric comparisons from manually compiled categories and indicators', async () => {
+    await createFuruiProjectWithManualCategoriesAndIndicators();
+
+    const result = await runStructuredQuery('福瑞三期医疗和住宅业态的面积分别是多少？');
+
+    expect(result.answer).toContain('医疗业态：医疗板块用地面积：248 亩');
+    expect(result.answer).toContain('住宅业态：住宅板块建筑面积：未提供明确数值');
+    expect(result.answer).toContain('当前材料未披露住宅业态建筑面积');
+    expect(result.answer).toContain('不会再从原文临时猜数字');
+    expect(result.compileSuggestions ?? []).toEqual([]);
+  });
+
+  it('lists compiled indicators grouped by business category', async () => {
+    await createFuruiProjectWithManualCategoriesAndIndicators();
+
+    const result = await runStructuredQuery('福瑞三期主要指标有哪些？');
+
+    expect(result.answer).toContain('当前已编译的主要指标包括');
+    expect(result.answer).toContain('医疗业态');
+    expect(result.answer).toContain('医疗板块用地面积：248 亩');
+    expect(result.answer).toContain('住宅业态');
+    expect(result.answer).toContain('住宅板块建筑面积：未提供明确数值');
+    expect(result.compileSuggestions ?? []).toEqual([]);
+  });
+
+  it('matches fuzzy dimension words to the compiled category when reading indicators', async () => {
+    await createFuruiProjectWithManualCategoriesAndIndicators();
+
+    const result = await runStructuredQuery('福瑞三期医疗方面的用地面积是多少？');
+
+    expect(result.answer).toContain('医疗板块用地面积为 248 亩');
+    expect(result.answer).toContain('Wiki 已编译指标层');
+    expect(result.answer).toContain('医疗业态的用地面积为 248 亩');
     expect(result.compileSuggestions ?? []).toEqual([]);
   });
 

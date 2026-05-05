@@ -593,6 +593,11 @@ type IndicatorLookupAnswer = {
   missing: boolean;
 };
 
+type IndicatorGroupAnswer = {
+  mode: 'comparison' | 'overview';
+  answers: IndicatorLookupAnswer[];
+};
+
 type QueryContextBudget = {
   maxContextChars: number;
   responseReserve: number;
@@ -1024,6 +1029,10 @@ function formatWikiReadAnswer(question: string, document: EntityDocument) {
   const compiledPropertyValue = queriedPropertyKey ? getEntityPropertyDisplayValue(entity, queriedPropertyKey) : undefined;
   const evidencePropertyValue = queriedPropertyKey ? extractEvidencePropertyValue(queriedPropertyKey, evidenceHits) : undefined;
   const propertyValue = compiledPropertyValue ?? evidencePropertyValue;
+  const indicatorGroupAnswer = !propertyValue ? findIndicatorGroupAnswer(question, entity) : undefined;
+  if (indicatorGroupAnswer) {
+    return formatIndicatorGroupFastAnswer(entity, indicatorGroupAnswer);
+  }
   const indicatorAnswer = !propertyValue ? findIndicatorAnswer(question, entity) : undefined;
   if (indicatorAnswer) {
     return formatIndicatorFastAnswer(entity, indicatorAnswer);
@@ -1283,7 +1292,7 @@ function formatEntityIndicatorsForComposer(entity: Entity) {
 
 function buildCompileSuggestions(document: EntityDocument, plan: QueryPlan, question?: string): CompileSuggestionDraft[] {
   const propertyKey = normalizePropertyKey(plan.attribute ?? inferAttribute(plan.evidenceTerms.join(' ')));
-  if (question && findIndicatorAnswer(question, document.entity)) return [];
+  if (question && (findIndicatorGroupAnswer(question, document.entity) || findIndicatorAnswer(question, document.entity))) return [];
   const metricSuggestions = question ? buildMetricCompileSuggestions(document, question) : [];
   if ((!propertyKey || document.evidenceHits.length === 0) && metricSuggestions.length === 0) return [];
 
@@ -1811,6 +1820,10 @@ function buildMetricTerms(question: string) {
   if (/总收入/.test(question)) terms.push('总收入');
   if (/收入|营收/.test(question)) terms.push('收入', '营收');
   if (/住宅/.test(question)) terms.push('住宅', '住宅业态');
+  if (/医疗/.test(question)) terms.push('医疗', '医疗业态', '医疗板块');
+  if (/康养|养老|养生/.test(question)) terms.push('康养', '康养业态');
+  if (/研发|科研/.test(question)) terms.push('研发', '研发业态');
+  if (/文旅|旅游|旅居/.test(question)) terms.push('文旅', '文旅业态');
   if (/土地|用地|占地|面积|建筑面积/.test(question)) terms.push('土地面积', '面积', '用地', '占地');
   if (/多少/.test(question)) terms.push(...compactQuestion.split(/的/).filter((term) => term.length >= 2).slice(-2));
 
@@ -1818,7 +1831,7 @@ function buildMetricTerms(question: string) {
 }
 
 function isMetricQuestion(question: string) {
-  return /(收入|营收|金额|费用|成本|投资|利润|价格|总额|面积|规模|人数|数量|年均|合计|多少|几多|多少钱)/.test(question);
+  return /(指标|收入|营收|金额|费用|成本|投资|利润|价格|总额|面积|规模|人数|数量|年均|合计|多少|几多|多少钱)/.test(question);
 }
 
 function inferAttribute(question: string) {
@@ -1991,35 +2004,69 @@ function formatAttributeFastAnswer(entity: Entity, propertyKey: string, value: s
   ].join('\n\n');
 }
 
-function findIndicatorAnswer(question: string, entity: Entity): IndicatorLookupAnswer | undefined {
-  if (!isMetricQuestion(question)) return undefined;
+function findIndicatorGroupAnswer(question: string, entity: Entity): IndicatorGroupAnswer | undefined {
   const indicators = entity.indicators ?? [];
   if (indicators.length === 0) return undefined;
 
+  if (isIndicatorOverviewQuestion(question)) {
+    return {
+      mode: 'overview',
+      answers: indicators
+        .slice()
+        .sort((left, right) => indicatorGroupLabel(left).localeCompare(indicatorGroupLabel(right), 'zh-Hans') ||
+          indicatorConfidenceRank(right.confidence) - indicatorConfidenceRank(left.confidence))
+        .map((indicator) => toIndicatorLookupAnswer(indicator, indicator.name)),
+    };
+  }
+
+  if (!isMetricQuestion(question)) return undefined;
+  const scopes = inferMetricScopes(question);
+  if (scopes.length < 2 || !isMetricComparisonQuestion(question)) return undefined;
+
+  const answers = scopes
+    .map((scope) => rankIndicatorsForQuestion(question, entity, scope)[0])
+    .filter((answer): answer is IndicatorLookupAnswer => Boolean(answer));
+
+  return answers.length >= 2 ? { mode: 'comparison', answers } : undefined;
+}
+
+function findIndicatorAnswer(question: string, entity: Entity): IndicatorLookupAnswer | undefined {
+  if (!isMetricQuestion(question)) return undefined;
+  return rankIndicatorsForQuestion(question, entity)[0];
+}
+
+function rankIndicatorsForQuestion(
+  question: string,
+  entity: Entity,
+  forcedScope?: MetricScope,
+): IndicatorLookupAnswer[] {
+  const indicators = entity.indicators ?? [];
+  if (indicators.length === 0) return [];
+
   const terms = buildMetricTerms(question);
   const label = expectedMetricLabel(question);
-  const scope = inferMetricScope(question) ?? inferMetricScope(terms.join(''));
-  const ranked = indicators
+  const scope = forcedScope ?? inferMetricScope(question) ?? inferMetricScope(terms.join(''));
+  return indicators
     .map((indicator) => ({
       indicator,
       score: scoreIndicatorForQuestion(indicator, question, terms, label, scope),
     }))
     .filter((item) => item.score > 0)
-    .sort((left, right) => right.score - left.score || indicatorConfidenceRank(right.indicator.confidence) - indicatorConfidenceRank(left.indicator.confidence));
+    .sort((left, right) => right.score - left.score || indicatorConfidenceRank(right.indicator.confidence) - indicatorConfidenceRank(left.indicator.confidence))
+    .map((item) => toIndicatorLookupAnswer(item.indicator, item.indicator.name || label));
+}
 
-  const best = ranked[0]?.indicator;
-  if (!best) return undefined;
-
+function toIndicatorLookupAnswer(indicator: EntityIndicator, label: string): IndicatorLookupAnswer {
   const valueText =
-    best.value === null
+    indicator.value === null
       ? undefined
-      : best.rawValue?.trim() || `${best.value}${best.unit ? ` ${best.unit}` : ''}`;
+      : indicator.rawValue?.trim() || `${indicator.value}${indicator.unit ? ` ${indicator.unit}` : ''}`;
 
   return {
-    indicator: best,
-    label: best.name || label,
+    indicator,
+    label,
     valueText,
-    missing: best.value === null,
+    missing: indicator.value === null,
   };
 }
 
@@ -2098,6 +2145,57 @@ function indicatorSearchText(indicator: EntityIndicator) {
 function indicatorConfidenceRank(confidence: EntityIndicator['confidence']) {
   const rank = { low: 1, medium: 2, high: 3 } as const;
   return rank[confidence];
+}
+
+function isIndicatorOverviewQuestion(question: string) {
+  return /(指标|关键数据|主要数据|核心数据|主要指标|指标列表)/.test(question) &&
+    /(有哪些|有什么|列出|列表|汇总|总览|主要|核心|分别)/.test(question);
+}
+
+function isMetricComparisonQuestion(question: string) {
+  return /(分别|各自|对比|比较|和|与|及|以及)/.test(question);
+}
+
+function indicatorGroupLabel(indicator: EntityIndicator) {
+  return indicator.categoryName?.trim() ||
+    (indicator.businessLine ? `${indicator.businessLine.replace(/(业态|版块|板块)$/g, '')}业态` : '未分组指标');
+}
+
+function formatIndicatorGroupFastAnswer(entity: Entity, group: IndicatorGroupAnswer) {
+  if (group.mode === 'overview') {
+    const grouped = groupIndicatorsByLabel(group.answers);
+    const lines = [`${entity.title}当前已编译的主要指标包括：`];
+    for (const [label, answers] of grouped) {
+      lines.push(`\n${label}`);
+      lines.push(answers.map((answer, index) => `${index + 1}. ${formatIndicatorItem(answer)}`).join('\n'));
+    }
+    lines.push('\n以上来自 Wiki 已编译的指标层；没有明确数值的指标会标为“未提供明确数值”。');
+    return lines.join('\n');
+  }
+
+  return [
+    `${entity.title}中与该问题相关的指标如下：`,
+    group.answers.map((answer, index) => `${index + 1}. ${indicatorGroupLabel(answer.indicator)}：${formatIndicatorItem(answer)}`).join('\n'),
+    '',
+    '以上来自 Wiki 已编译的指标层，并按业态/板块层级对齐后返回；未提供明确数值的项不会再从原文临时猜数字。',
+  ].join('\n');
+}
+
+function groupIndicatorsByLabel(answers: IndicatorLookupAnswer[]) {
+  const groups = new Map<string, IndicatorLookupAnswer[]>();
+  for (const answer of answers) {
+    const label = indicatorGroupLabel(answer.indicator);
+    groups.set(label, [...(groups.get(label) ?? []), answer]);
+  }
+  return [...groups.entries()];
+}
+
+function formatIndicatorItem(answer: IndicatorLookupAnswer) {
+  if (answer.missing) {
+    return `${answer.label}：未提供明确数值${answer.indicator.note ? `（${answer.indicator.note}）` : ''}`;
+  }
+  const confidenceHint = answer.indicator.confidence === 'high' ? '' : '（需核对来源）';
+  return `${answer.label}：${answer.valueText}${confidenceHint}`;
 }
 
 function formatIndicatorFastAnswer(entity: Entity, answer: IndicatorLookupAnswer) {
@@ -2666,11 +2764,22 @@ const metricScopeTerms: Record<MetricScope, string[]> = {
   cultureTourism: ['文旅', '旅游', '旅居', '消费场景'],
 };
 
-function inferMetricScope(text: string): MetricScope | undefined {
+function inferMetricScopes(text: string): MetricScope[] {
   const normalized = normalize(text);
-  return (Object.entries(metricScopeTerms) as Array<[MetricScope, string[]]>).find(([, terms]) =>
-    terms.some((term) => normalized.includes(normalize(term))),
-  )?.[0];
+  return (Object.entries(metricScopeTerms) as Array<[MetricScope, string[]]>)
+    .map(([scope, terms]) => {
+      const indexes = terms
+        .map((term) => normalized.indexOf(normalize(term)))
+        .filter((index) => index >= 0);
+      return indexes.length > 0 ? { scope, index: Math.min(...indexes) } : undefined;
+    })
+    .filter((item): item is { scope: MetricScope; index: number } => Boolean(item))
+    .sort((left, right) => left.index - right.index)
+    .map((item) => item.scope);
+}
+
+function inferMetricScope(text: string): MetricScope | undefined {
+  return inferMetricScopes(text)[0];
 }
 
 function metricSentenceConfidence(sentence: string, terms: string[]): MetricAnswer['confidence'] {

@@ -321,29 +321,64 @@ function mergeCategoryItems(items: NonNullable<Entity['categories']>[number]['it
 
 function stampDraftIndicators(draftEntity: DraftEntity, updatedAt: number) {
   return (draftEntity.indicators ?? [])
-    .map((indicator) => ({
-      ...indicator,
-      id: createId('indicator'),
-      name: indicator.name.trim(),
-      rawValue: indicator.rawValue?.trim(),
-      unit: indicator.unit?.trim(),
-      businessLine: indicator.businessLine?.trim(),
-      categoryName: indicator.categoryName?.trim(),
-      categoryId: indicator.categoryId?.trim(),
-      source: indicator.source
-        ? {
-            entryId: indicator.source.entryId,
-            section: indicator.source.section?.trim(),
-            page: indicator.source.page,
-            excerpt: indicator.source.excerpt?.trim(),
-          }
-        : undefined,
-      note: indicator.note?.trim(),
-      asOfDate: indicator.asOfDate?.trim(),
-      extractedAt: updatedAt,
-      updatedAt,
-    }))
+    .map((indicator) => {
+      const categoryName = resolveIndicatorCategoryName(indicator, draftEntity);
+      return {
+        ...indicator,
+        id: createId('indicator'),
+        name: indicator.name.trim(),
+        rawValue: indicator.rawValue?.trim(),
+        unit: indicator.unit?.trim(),
+        businessLine: normalizeIndicatorBusinessLine(indicator.businessLine, categoryName),
+        categoryName,
+        categoryId: indicator.categoryId?.trim(),
+        source: indicator.source
+          ? {
+              entryId: indicator.source.entryId,
+              section: indicator.source.section?.trim(),
+              page: indicator.source.page,
+              excerpt: indicator.source.excerpt?.trim(),
+            }
+          : undefined,
+        note: indicator.note?.trim(),
+        asOfDate: indicator.asOfDate?.trim(),
+        extractedAt: updatedAt,
+        updatedAt,
+      };
+    })
     .filter((indicator) => indicator.name && indicator.confidence);
+}
+
+function resolveIndicatorCategoryName(
+  indicator: Pick<NonNullable<Entity['indicators']>[number], 'categoryName' | 'businessLine' | 'name'>,
+  draftEntity: DraftEntity,
+) {
+  const categories = draftEntity.categories ?? [];
+  const rawCategory = indicator.categoryName?.trim();
+  const rawBusinessLine = indicator.businessLine?.trim();
+  const searchText = normalizeTitle([rawCategory, rawBusinessLine, indicator.name].filter(Boolean).join(' '));
+  if (!searchText) return rawCategory;
+
+  const matched = categories.find((category) => {
+    const aliases = [
+      category.name,
+      ...(category.aliases ?? []),
+      category.name.replace(/(业态|版块|板块|业务线|子分类|子类)$/g, ''),
+    ];
+    return aliases.some((alias) => {
+      const normalizedAlias = normalizeTitle(alias);
+      return normalizedAlias.length >= 2 &&
+        (searchText.includes(normalizedAlias) || normalizedAlias.includes(normalizeTitle(rawCategory ?? rawBusinessLine ?? '')));
+    });
+  });
+
+  return matched?.name.trim() || rawCategory;
+}
+
+function normalizeIndicatorBusinessLine(value: string | undefined, categoryName: string | undefined) {
+  const trimmed = value?.trim();
+  if (trimmed) return trimmed;
+  return categoryName?.replace(/(业态|版块|板块|业务线|子分类|子类)$/g, '').trim();
 }
 
 function mergeEntityIndicators(
