@@ -2395,6 +2395,7 @@ function extractMetricValueFromText(text: string, terms: string[]) {
     .filter(Boolean);
   const matchedSentences = sentences.filter((sentence) =>
     !isLikelyTocOrNavigationSentence(sentence) &&
+    metricSentenceMatchesScope(sentence, terms) &&
     terms.some((term) => evidenceTextMatches(sentence, term)),
   );
 
@@ -2415,6 +2416,7 @@ function extractMetricValueFromText(text: string, terms: string[]) {
   if (matchedSentences.length > 0) {
     for (const sentence of sentences) {
       if (isLikelyTocOrNavigationSentence(sentence)) continue;
+      if (!metricSentenceMatchesScope(sentence, terms)) continue;
       const value = extractMetricValueFromSentence(sentence, terms);
       if (value) {
         return {
@@ -2442,6 +2444,7 @@ function inferMetricKind(terms: string[], sentence = ''): MetricKind {
 
 function extractMetricValueFromSentence(sentence: string, terms: string[]) {
   if (isLikelyTocOrNavigationSentence(sentence)) return undefined;
+  if (!metricSentenceMatchesScope(sentence, terms)) return undefined;
 
   const kind = inferMetricKind(terms, sentence);
   if (kind === 'area') return extractAreaLikeValue(sentence);
@@ -2456,6 +2459,34 @@ function extractMetricValueFromSentence(sentence: string, terms: string[]) {
     extractCountLikeValue(sentence) ??
     extractLooseMagnitudeValue(sentence)
   );
+}
+
+type MetricScope = 'residential' | 'medical' | 'eldercare' | 'research' | 'cultureTourism';
+
+function metricSentenceMatchesScope(sentence: string, terms: string[]) {
+  const scope = inferMetricScope(terms.join(''));
+  if (!scope) return true;
+
+  const normalizedSentence = normalize(sentence);
+  const ownTerms = metricScopeTerms[scope];
+  if (ownTerms.some((term) => normalizedSentence.includes(normalize(term)))) return true;
+
+  return false;
+}
+
+const metricScopeTerms: Record<MetricScope, string[]> = {
+  residential: ['住宅', '住宅业态', '住宅项目', '宅地', '居住', '住区', '适老住宅'],
+  medical: ['医疗', '医疗业态', '医疗板块', '医养', '诊疗', '医院', '门诊', '疗法', '细胞治疗'],
+  eldercare: ['康养', '养老', '养生', '康复', '护理', '照护'],
+  research: ['研发', '科研', '实验室', '创新中心'],
+  cultureTourism: ['文旅', '旅游', '旅居', '消费场景'],
+};
+
+function inferMetricScope(text: string): MetricScope | undefined {
+  const normalized = normalize(text);
+  return (Object.entries(metricScopeTerms) as Array<[MetricScope, string[]]>).find(([, terms]) =>
+    terms.some((term) => normalized.includes(normalize(term))),
+  )?.[0];
 }
 
 function metricSentenceConfidence(sentence: string, terms: string[]): MetricAnswer['confidence'] {

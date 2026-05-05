@@ -361,6 +361,55 @@ describe('structured query', () => {
     expect(result.compileSuggestions ?? []).toEqual([]);
   });
 
+  it('does not use medical block land area as residential building area evidence', async () => {
+    const entry = await createEntry({
+      content:
+        '福瑞健康科技园三期项目资料：住宅项目建筑面积总计尚未披露。医疗板块：用地面积 248 亩，布局社区门诊、中蒙特色康复理疗。康养板块另行测算。',
+      source: 'file',
+    });
+    await createEntity({
+      type: 'project',
+      title: '福瑞健康科技园三期项目',
+      summary: '园区项目，包含医疗、康养、住宅等业态。',
+      tags: ['福瑞科技园', '三期', '住宅业态'],
+      sourceEntries: [entry.id],
+    });
+
+    const result = await runStructuredQuery('福瑞健康科技园三期住宅项目的建筑面积总计大概有多少？');
+
+    expect(result.answer).toContain('我没有找到能直接确认');
+    expect(result.answer).toContain('建筑面积总计大概有');
+    expect(result.answer).not.toContain('248亩');
+    expect(result.answer).not.toContain('医疗板块');
+    expect(result.compileSuggestions ?? []).toEqual([]);
+  });
+
+  it('keeps scoped area evidence when the question asks about the same block', async () => {
+    const entry = await createEntry({
+      content:
+        '福瑞健康科技园三期项目资料：医疗板块：用地面积 248 亩，布局社区门诊、中蒙特色康复理疗。住宅项目建筑面积总计尚未披露。',
+      source: 'file',
+    });
+    const project = await createEntity({
+      type: 'project',
+      title: '福瑞健康科技园三期项目',
+      summary: '园区项目，包含医疗、康养、住宅等业态。',
+      tags: ['福瑞科技园', '三期', '医疗业态'],
+      sourceEntries: [entry.id],
+    });
+
+    const result = await runStructuredQuery('福瑞健康科技园三期医疗板块的用地面积是多少？');
+
+    expect(result.answer).toContain('248亩');
+    expect(result.compileSuggestions?.[0]).toEqual(
+      expect.objectContaining({
+        entityId: project.id,
+        propertyValue: '248亩（疑似，需核对原文）',
+        evidenceEntryId: entry.id,
+      }),
+    );
+  });
+
   it('filters blank source titles from query sources', async () => {
     const entry = await createEntry({ content: '福瑞科技园三期收入记录。', source: 'text' });
     const project = await createEntity({
