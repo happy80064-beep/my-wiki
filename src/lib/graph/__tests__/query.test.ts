@@ -384,6 +384,105 @@ describe('structured query', () => {
     expect(result.compileSuggestions ?? []).toEqual([]);
   });
 
+  it('uses compiled null indicators before scanning noisy residential area evidence', async () => {
+    const entry = await createEntry({
+      content:
+        '福瑞健康科技园三期项目资料：医疗板块：用地面积 248 亩，布局社区门诊、中蒙特色康复理疗。住宅项目建筑面积总计尚未在本报告摘录中披露。',
+      source: 'file',
+    });
+    await createEntity({
+      type: 'project',
+      title: '福瑞健康科技园三期项目',
+      summary: '园区项目，包含医疗、康养、住宅等业态。',
+      tags: ['福瑞科技园', '三期', '住宅业态'],
+      sourceEntries: [entry.id],
+      indicators: [
+        {
+          id: 'indicator_residential_building_area_missing',
+          name: '住宅板块建筑面积',
+          value: null,
+          unit: '万平方米',
+          businessLine: '住宅',
+          categoryName: '住宅业态',
+          source: {
+            entryId: entry.id,
+            excerpt: '住宅项目建筑面积总计尚未在本报告摘录中披露。',
+          },
+          confidence: 'high',
+          note: '可研报告摘录未提供住宅板块独立建筑面积。',
+          extractedAt: Date.now(),
+          updatedAt: Date.now(),
+        },
+        {
+          id: 'indicator_medical_land_area',
+          name: '医疗板块用地面积',
+          value: 248,
+          rawValue: '248 亩',
+          unit: '亩',
+          businessLine: '医疗',
+          categoryName: '医疗业态',
+          source: {
+            entryId: entry.id,
+            excerpt: '医疗板块：用地面积 248 亩，布局社区门诊、中蒙特色康复理疗。',
+          },
+          confidence: 'high',
+          extractedAt: Date.now(),
+          updatedAt: Date.now(),
+        },
+      ],
+    });
+
+    const result = await runStructuredQuery('福瑞健康科技园三期住宅项目的建筑面积总计大概有多少？');
+
+    expect(result.answer).toContain('已编译指标显示');
+    expect(result.answer).toContain('住宅板块建筑面积');
+    expect(result.answer).toContain('没有明确数值');
+    expect(result.answer).toContain('可研报告摘录未提供住宅板块独立建筑面积');
+    expect(result.answer).not.toContain('248亩');
+    expect(result.answer).not.toContain('医疗板块');
+    expect(result.compileSuggestions ?? []).toEqual([]);
+  });
+
+  it('answers scoped metric questions directly from compiled indicators', async () => {
+    const entry = await createEntry({
+      content:
+        '福瑞健康科技园三期项目资料：医疗板块：用地面积 248 亩，布局社区门诊、中蒙特色康复理疗。住宅项目建筑面积总计尚未披露。',
+      source: 'file',
+    });
+    await createEntity({
+      type: 'project',
+      title: '福瑞健康科技园三期项目',
+      summary: '园区项目，包含医疗、康养、住宅等业态。',
+      tags: ['福瑞科技园', '三期', '医疗业态'],
+      sourceEntries: [entry.id],
+      indicators: [
+        {
+          id: 'indicator_medical_land_area',
+          name: '医疗板块用地面积',
+          value: 248,
+          rawValue: '248 亩',
+          unit: '亩',
+          businessLine: '医疗',
+          categoryName: '医疗业态',
+          source: {
+            entryId: entry.id,
+            excerpt: '医疗板块：用地面积 248 亩，布局社区门诊、中蒙特色康复理疗。',
+          },
+          confidence: 'high',
+          extractedAt: Date.now(),
+          updatedAt: Date.now(),
+        },
+      ],
+    });
+
+    const result = await runStructuredQuery('福瑞健康科技园三期医疗板块的用地面积是多少？');
+
+    expect(result.answer).toContain('医疗板块用地面积为 248 亩');
+    expect(result.answer).toContain('Wiki 已编译指标层');
+    expect(result.answer).toContain('医疗板块：用地面积 248 亩');
+    expect(result.compileSuggestions ?? []).toEqual([]);
+  });
+
   it('keeps scoped area evidence when the question asks about the same block', async () => {
     const entry = await createEntry({
       content:

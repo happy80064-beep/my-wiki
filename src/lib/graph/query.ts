@@ -24,7 +24,7 @@ import { parseQueryIntent } from './queryIntent';
 import { rankRelatedEntities } from './relevance';
 import { findPaths, getSubgraph } from './traverse';
 import type { QuerySource, QueryTraceStep, StructuredQueryResult, WikiCompileSuggestion } from './types';
-import type { CompileSuggestionDraft, Entity, Entry, Relationship, Task } from '@/types';
+import type { CompileSuggestionDraft, Entity, EntityIndicator, Entry, Relationship, Task } from '@/types';
 import { composeQueryAnswer } from '@/lib/ai/queryComposerClient';
 import type { QueryComposePayload } from '@/lib/ai/queryComposer';
 import { planQueryWithAgent } from '@/lib/ai/queryPlannerClient';
@@ -586,6 +586,13 @@ type MetricAnswer = {
   evidenceSnippet: string;
 };
 
+type IndicatorLookupAnswer = {
+  indicator: EntityIndicator;
+  label: string;
+  valueText?: string;
+  missing: boolean;
+};
+
 type QueryContextBudget = {
   maxContextChars: number;
   responseReserve: number;
@@ -1017,6 +1024,10 @@ function formatWikiReadAnswer(question: string, document: EntityDocument) {
   const compiledPropertyValue = queriedPropertyKey ? getEntityPropertyDisplayValue(entity, queriedPropertyKey) : undefined;
   const evidencePropertyValue = queriedPropertyKey ? extractEvidencePropertyValue(queriedPropertyKey, evidenceHits) : undefined;
   const propertyValue = compiledPropertyValue ?? evidencePropertyValue;
+  const indicatorAnswer = !propertyValue ? findIndicatorAnswer(question, entity) : undefined;
+  if (indicatorAnswer) {
+    return formatIndicatorFastAnswer(entity, indicatorAnswer);
+  }
   const metricAnswer = !propertyValue ? extractMetricAnswer(question, evidenceHits) : undefined;
   if (metricAnswer) {
     return formatMetricFastAnswer(entity, metricAnswer);
@@ -1167,8 +1178,12 @@ function buildQueryComposePayload(
       type: entity.type,
       title: entity.title,
       summary: entity.compiledProfile?.overview
-        ? `${entity.compiledProfile.overview}\n${entity.compiledProfile.keyFacts.slice(0, 5).join('\n')}`
-        : entity.summary,
+        ? [
+            entity.compiledProfile.overview,
+            entity.compiledProfile.keyFacts.slice(0, 5).join('\n'),
+            formatEntityIndicatorsForComposer(entity),
+          ].filter(Boolean).join('\n')
+        : [entity.summary, formatEntityIndicatorsForComposer(entity)].filter(Boolean).join('\n'),
     })),
     tasks: document.tasks.slice(0, 8).map((task) => ({
       id: task.id,
@@ -1250,8 +1265,25 @@ function buildComposeEntries(document: EntityDocument, budget: QueryContextBudge
   return [...evidenceEntries, ...contextEntries];
 }
 
+function formatEntityIndicatorsForComposer(entity: Entity) {
+  const indicators = entity.indicators ?? [];
+  if (indicators.length === 0) return '';
+
+  return [
+    '已编译指标：',
+    ...indicators.slice(0, 12).map((indicator) => {
+      const value = indicator.value === null
+        ? '未提供明确数值'
+        : indicator.rawValue || `${indicator.value}${indicator.unit ? ` ${indicator.unit}` : ''}`;
+      const scope = [indicator.businessLine, indicator.categoryName].filter(Boolean).join('/');
+      return `- ${scope ? `${scope} · ` : ''}${indicator.name}: ${value}${indicator.note ? `（${indicator.note}）` : ''}`;
+    }),
+  ].join('\n');
+}
+
 function buildCompileSuggestions(document: EntityDocument, plan: QueryPlan, question?: string): CompileSuggestionDraft[] {
   const propertyKey = normalizePropertyKey(plan.attribute ?? inferAttribute(plan.evidenceTerms.join(' ')));
+  if (question && findIndicatorAnswer(question, document.entity)) return [];
   const metricSuggestions = question ? buildMetricCompileSuggestions(document, question) : [];
   if ((!propertyKey || document.evidenceHits.length === 0) && metricSuggestions.length === 0) return [];
 
@@ -1632,6 +1664,12 @@ function extractFastAnswerAnchors(answer: string) {
   for (const match of answer.matchAll(/的[^。\n]{1,12}是([^。\n]+)。/g)) {
     add(match[1] ?? '', true);
   }
+  for (const match of answer.matchAll(/的[^。\n]{1,24}为\s*([^。\n]+)。/g)) {
+    add(match[1] ?? '', true);
+  }
+  for (const match of answer.matchAll(/已编译指标显示：([^。\n]+没有明确数值)/g)) {
+    add(match[1] ?? '', true);
+  }
   for (const match of answer.matchAll(/(?:运行环境|唤醒词|终止词|本地路径|相关模型|负责人说明|来源\/基于项目|开源状态)：([^（。\n]+)/g)) {
     add(match[1] ?? '', true);
   }
@@ -1646,7 +1684,7 @@ function extractFastAnswerAnchors(answer: string) {
 }
 
 function hasConcretePropertyLine(answer: string) {
-  return /(运行环境|唤醒词|终止词|本地路径|相关模型|负责人说明|来源\/基于项目|开源状态)：[^。\n]+/.test(answer);
+  return /(运行环境|唤醒词|终止词|本地路径|相关模型|负责人说明|来源\/基于项目|开源状态)：[^。\n]+|已编译指标显示：|的[^。\n]{1,24}为\s*[^。\n]+。/.test(answer);
 }
 
 function providerLabel(provider: 'minimax' | 'deepseek') {
@@ -1839,6 +1877,18 @@ function scoreEntityForTerm(entity: Entity, term: string) {
       ])
       .join(' '),
   );
+  const indicators = normalize(
+    (entity.indicators ?? [])
+      .map((indicator) => [
+        indicator.name,
+        indicator.rawValue,
+        indicator.unit,
+        indicator.businessLine,
+        indicator.categoryName,
+        indicator.note,
+      ].filter(Boolean).join(' '))
+      .join(' '),
+  );
   const tags = normalize(entity.tags.join(''));
   const scenes = normalize(entity.scenes.join(''));
 
@@ -1849,6 +1899,7 @@ function scoreEntityForTerm(entity: Entity, term: string) {
   if (summary.includes(normalizedTerm) || tags.includes(normalizedTerm) || scenes.includes(normalizedTerm)) return 42;
   if (compiledProfile.includes(normalizedTerm)) return 48;
   if (categories.includes(normalizedTerm)) return 52;
+  if (indicators.includes(normalizedTerm)) return 60;
 
   const overlap = overlapRatio(normalizedTerm, title);
   if (overlap >= 0.75) return 56;
@@ -1938,6 +1989,139 @@ function formatAttributeFastAnswer(entity: Entity, propertyKey: string, value: s
       ? '提示：该信息已经写入 Wiki。'
       : '提示：该信息来自来源材料命中，建议确认后编译回 Wiki。',
   ].join('\n\n');
+}
+
+function findIndicatorAnswer(question: string, entity: Entity): IndicatorLookupAnswer | undefined {
+  if (!isMetricQuestion(question)) return undefined;
+  const indicators = entity.indicators ?? [];
+  if (indicators.length === 0) return undefined;
+
+  const terms = buildMetricTerms(question);
+  const label = expectedMetricLabel(question);
+  const scope = inferMetricScope(question) ?? inferMetricScope(terms.join(''));
+  const ranked = indicators
+    .map((indicator) => ({
+      indicator,
+      score: scoreIndicatorForQuestion(indicator, question, terms, label, scope),
+    }))
+    .filter((item) => item.score > 0)
+    .sort((left, right) => right.score - left.score || indicatorConfidenceRank(right.indicator.confidence) - indicatorConfidenceRank(left.indicator.confidence));
+
+  const best = ranked[0]?.indicator;
+  if (!best) return undefined;
+
+  const valueText =
+    best.value === null
+      ? undefined
+      : best.rawValue?.trim() || `${best.value}${best.unit ? ` ${best.unit}` : ''}`;
+
+  return {
+    indicator: best,
+    label: best.name || label,
+    valueText,
+    missing: best.value === null,
+  };
+}
+
+function scoreIndicatorForQuestion(
+  indicator: EntityIndicator,
+  question: string,
+  terms: string[],
+  label: string,
+  scope: MetricScope | undefined,
+) {
+  if (scope && !indicatorMatchesScope(indicator, scope)) return 0;
+  if (!indicatorMetricNameMatches(indicator, question, terms, label)) return 0;
+
+  const indicatorText = indicatorSearchText(indicator);
+  const normalizedIndicator = normalize(indicatorText);
+  let score = 20 + indicatorConfidenceRank(indicator.confidence) * 4;
+
+  if (scope) score += 24;
+  const normalizedLabel = normalize(label);
+  if (normalizedLabel && normalizedIndicator.includes(normalizedLabel)) score += 24;
+
+  for (const term of terms) {
+    const normalizedTerm = normalize(term);
+    if (normalizedTerm.length >= 2 && normalizedIndicator.includes(normalizedTerm)) score += 8;
+  }
+
+  if (indicator.value === null) score += 4;
+  if (indicator.source?.excerpt) score += 3;
+  return score;
+}
+
+function indicatorMetricNameMatches(indicator: EntityIndicator, question: string, terms: string[], label: string) {
+  const normalizedQuestion = normalize(question);
+  const normalizedName = normalize(`${indicator.name} ${indicator.unit ?? ''}`);
+
+  const requiresBuildingArea = normalizedQuestion.includes(normalize('建筑面积'));
+  if (requiresBuildingArea) return normalizedName.includes(normalize('建筑面积'));
+
+  const requiresLandArea = /(土地|用地|占地)/.test(question);
+  if (requiresLandArea) return /(土地|用地|占地)/.test(indicator.name);
+
+  const requiresRevenue = /(收入|营收|年均|年收入|总收入|项目总收入)/.test(question);
+  if (requiresRevenue) return /(收入|营收)/.test(indicator.name);
+
+  const requiresInvestment = /(投资|总投资)/.test(question);
+  if (requiresInvestment) return /投资/.test(indicator.name);
+
+  const requiresCount = /(人数|数量|床位|机构数|项目数|家数|多少个|多少家|多少人)/.test(question);
+  if (requiresCount) return /(人数|数量|床位|机构数|项目数|家数)/.test(indicator.name);
+
+  const normalizedLabel = normalize(label);
+  if (normalizedLabel && normalizedName.includes(normalizedLabel)) return true;
+  return terms.some((term) => {
+    const normalizedTerm = normalize(term);
+    return normalizedTerm.length >= 2 && normalizedName.includes(normalizedTerm);
+  });
+}
+
+function indicatorMatchesScope(indicator: EntityIndicator, scope: MetricScope) {
+  const normalizedText = normalize(indicatorSearchText(indicator));
+  return metricScopeTerms[scope].some((term) => normalizedText.includes(normalize(term)));
+}
+
+function indicatorSearchText(indicator: EntityIndicator) {
+  return [
+    indicator.name,
+    indicator.rawValue,
+    indicator.unit,
+    indicator.businessLine,
+    indicator.categoryName,
+    indicator.note,
+    indicator.source?.excerpt,
+  ].filter(Boolean).join(' ');
+}
+
+function indicatorConfidenceRank(confidence: EntityIndicator['confidence']) {
+  const rank = { low: 1, medium: 2, high: 3 } as const;
+  return rank[confidence];
+}
+
+function formatIndicatorFastAnswer(entity: Entity, answer: IndicatorLookupAnswer) {
+  const { indicator } = answer;
+  const evidenceLine = indicator.source?.excerpt
+    ? `依据：${cleanEvidenceSnippet(indicator.source.excerpt)}`
+    : undefined;
+
+  if (answer.missing) {
+    return [
+      `已编译指标显示：${entity.title}的${answer.label}在当前资料中没有明确数值。`,
+      indicator.note ? `说明：${indicator.note}` : '说明：该指标已进入 Wiki 指标层，但来源没有提供可确认的数值。',
+      evidenceLine,
+      '这类问题不再从目录编号、OCR 碎片或其他板块数字里临时推断。',
+    ].filter(Boolean).join('\n\n');
+  }
+
+  return [
+    `${entity.title}的${answer.label}为 ${answer.valueText}。`,
+    indicator.confidence === 'high'
+      ? '该数字来自 Wiki 已编译指标层。'
+      : '该数字来自 Wiki 已编译指标层，但置信度不是高，建议打开来源核对。',
+    evidenceLine,
+  ].filter(Boolean).join('\n\n');
 }
 
 function formatMetricFastAnswer(entity: Entity, answer: MetricAnswer) {

@@ -1,5 +1,6 @@
 import type { Entity, EntityProperties, EntrySource, PersonProps, TopicProps } from '@/types';
 import {
+  createId,
   createEntity,
   createEntry,
   createRelationship,
@@ -168,6 +169,7 @@ async function resolveCaptureEntity(draftEntity: DraftEntity, entryId: string, c
       tags: draftEntity.tags,
       scenes: draftEntity.scenes,
       categories: stampDraftCategories(draftEntity, capturedAt),
+      indicators: stampDraftIndicators(draftEntity, capturedAt),
       properties: compileEntityProperties(defaultEntityProperties(draftEntity.type), draftEntity.type, entryId, capturedAt),
       sourceEntries: [entryId],
     });
@@ -179,6 +181,7 @@ async function resolveCaptureEntity(draftEntity: DraftEntity, entryId: string, c
     tags: mergeUnique(reusableEntity.tags, draftEntity.tags),
     scenes: mergeUnique(reusableEntity.scenes, draftEntity.scenes),
     categories: mergeEntityCategories(reusableEntity.categories ?? [], stampDraftCategories(draftEntity, capturedAt)),
+    indicators: mergeEntityIndicators(reusableEntity.indicators ?? [], stampDraftIndicators(draftEntity, capturedAt)),
     properties: compileEntityProperties(reusableEntity.properties, reusableEntity.type, entryId, capturedAt),
     sourceEntries: mergeUnique(reusableEntity.sourceEntries, [entryId]),
   });
@@ -314,6 +317,86 @@ function mergeCategoryItems(items: NonNullable<Entity['categories']>[number]['it
     });
   }
   return Array.from(byTitle.values());
+}
+
+function stampDraftIndicators(draftEntity: DraftEntity, updatedAt: number) {
+  return (draftEntity.indicators ?? [])
+    .map((indicator) => ({
+      ...indicator,
+      id: createId('indicator'),
+      name: indicator.name.trim(),
+      rawValue: indicator.rawValue?.trim(),
+      unit: indicator.unit?.trim(),
+      businessLine: indicator.businessLine?.trim(),
+      categoryName: indicator.categoryName?.trim(),
+      categoryId: indicator.categoryId?.trim(),
+      source: indicator.source
+        ? {
+            entryId: indicator.source.entryId,
+            section: indicator.source.section?.trim(),
+            page: indicator.source.page,
+            excerpt: indicator.source.excerpt?.trim(),
+          }
+        : undefined,
+      note: indicator.note?.trim(),
+      asOfDate: indicator.asOfDate?.trim(),
+      extractedAt: updatedAt,
+      updatedAt,
+    }))
+    .filter((indicator) => indicator.name && indicator.confidence);
+}
+
+function mergeEntityIndicators(
+  existing: NonNullable<Entity['indicators']>,
+  incoming: NonNullable<Entity['indicators']>,
+) {
+  const byKey = new Map<string, NonNullable<Entity['indicators']>[number]>();
+
+  for (const indicator of existing) {
+    byKey.set(indicatorMergeKey(indicator), indicator);
+  }
+
+  for (const indicator of incoming) {
+    const key = indicatorMergeKey(indicator);
+    const current = byKey.get(key);
+    if (!current) {
+      byKey.set(key, indicator);
+      continue;
+    }
+
+    const shouldUseIncomingValue = indicator.value !== null || current.value === null;
+    byKey.set(key, {
+      ...current,
+      ...indicator,
+      id: current.id,
+      value: shouldUseIncomingValue ? indicator.value : current.value,
+      rawValue: shouldUseIncomingValue ? indicator.rawValue : current.rawValue,
+      unit: shouldUseIncomingValue ? indicator.unit : current.unit,
+      confidence: betterIndicatorConfidence(current.confidence, indicator.confidence),
+      source: indicator.source ?? current.source,
+      note: indicator.note ?? current.note,
+      extractedAt: Math.min(current.extractedAt, indicator.extractedAt),
+      updatedAt: Math.max(current.updatedAt, indicator.updatedAt),
+    });
+  }
+
+  return Array.from(byKey.values());
+}
+
+function indicatorMergeKey(indicator: Pick<NonNullable<Entity['indicators']>[number], 'name' | 'businessLine' | 'categoryName'>) {
+  return [
+    normalizeTitle(indicator.businessLine ?? ''),
+    normalizeTitle(indicator.categoryName ?? ''),
+    normalizeTitle(indicator.name),
+  ].join(':');
+}
+
+function betterIndicatorConfidence(
+  left: NonNullable<Entity['indicators']>[number]['confidence'],
+  right: NonNullable<Entity['indicators']>[number]['confidence'],
+) {
+  const rank = { low: 1, medium: 2, high: 3 } as const;
+  return rank[right] > rank[left] ? right : left;
 }
 
 function normalizeTitle(value: string) {

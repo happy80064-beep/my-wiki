@@ -81,6 +81,30 @@ export type EntityCategory = {
   updatedAt: number;
 };
 
+export type IndicatorConfidence = 'high' | 'medium' | 'low';
+
+export type EntityIndicator = {
+  id: ID;
+  name: string;
+  value: number | null;
+  rawValue?: string;
+  unit?: string;
+  businessLine?: string;
+  categoryName?: string;
+  categoryId?: string;
+  source?: {
+    entryId?: ID;
+    section?: string;
+    page?: number;
+    excerpt?: string;
+  };
+  confidence: IndicatorConfidence;
+  note?: string;
+  asOfDate?: string;
+  extractedAt: number;
+  updatedAt: number;
+};
+
 export type BaseEntity<TType extends EntityType, TProps extends EntityProperties> = {
   id: ID;
   type: TType;
@@ -90,6 +114,7 @@ export type BaseEntity<TType extends EntityType, TProps extends EntityProperties
   scenes: Scene[];
   properties: TProps;
   categories?: EntityCategory[];
+  indicators?: EntityIndicator[];
   compiledProfile?: CompiledEntityProfile;
   sourceEntries: ID[];
   createdAt: number;

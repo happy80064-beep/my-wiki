@@ -5,6 +5,7 @@ import { createDraftId } from '../capture/draft';
 export type WikiPatchType =
   | 'CREATE_ENTITY'
   | 'UPDATE_ENTITY_CATEGORIES'
+  | 'UPDATE_ENTITY_INDICATORS'
   | 'UPDATE_ENTITY_PROPERTY'
   | 'CREATE_RELATIONSHIP'
   | 'CREATE_TASK'
@@ -39,6 +40,19 @@ export type CaptureAnalysis = {
     }>;
     evidence: string;
     confidence: 'high' | 'medium' | 'low';
+  }>;
+  indicators: Array<{
+    entityTitle: string;
+    name: string;
+    value: number | null;
+    rawValue?: string;
+    unit?: string;
+    businessLine?: string;
+    categoryName?: string;
+    evidence: string;
+    confidence: 'high' | 'medium' | 'low';
+    note?: string;
+    asOfDate?: string;
   }>;
   contradictions: Array<{
     title: string;
@@ -75,6 +89,13 @@ export type WikiPatch =
         }>;
         evidence?: string;
       }>;
+      evidence: string;
+      confidence: number;
+    }
+  | {
+      type: 'UPDATE_ENTITY_INDICATORS';
+      entityTitle: string;
+      indicators: NonNullable<DraftEntity['indicators']>;
       evidence: string;
       confidence: number;
     }
@@ -202,8 +223,9 @@ ${entityIndexJson}
   "concepts": [{"title": "", "evidence": ""}],
   "claims": [{"subject": "", "predicate": "", "object": "", "evidence": "", "confidence": "high|medium|low"}],
   "hierarchies": [{"parentTitle": "", "categoryName": "", "items": [{"title": "", "kind": "", "evidence": ""}], "evidence": "", "confidence": "high|medium|low"}],
+  "indicators": [{"entityTitle": "", "name": "", "value": 123.45, "rawValue": "123.45 万平方米", "unit": "万平方米", "businessLine": "住宅", "categoryName": "住宅业态", "evidence": "", "confidence": "high|medium|low", "note": ""}],
   "contradictions": [{"title": "", "evidence": ""}],
-  "recommendedUpdates": [{"targetTitle": "", "action": "CREATE_ENTITY|UPDATE_ENTITY_PROPERTY|CREATE_RELATIONSHIP|CREATE_TASK|REVIEW_REQUIRED", "reason": ""}]
+  "recommendedUpdates": [{"targetTitle": "", "action": "CREATE_ENTITY|UPDATE_ENTITY_INDICATORS|UPDATE_ENTITY_PROPERTY|CREATE_RELATIONSHIP|CREATE_TASK|REVIEW_REQUIRED", "reason": ""}]
 }
 
 规则：
@@ -212,7 +234,10 @@ ${entityIndexJson}
 - concepts 用来记录重要概念、方法、技术路线或主题，不要把所有普通名词都列进去。
 - claims 必须是可写入 Wiki 的事实属性或关系事实，例如 runtimeEnvironment、wakeWord、stopWord、localPath、models、ownerNote、derivedFrom、openSourceStatus。
 - hierarchies 用来记录层级结构，例如“福瑞三期 -> 医疗业态 -> FMT 疗法 / 中蒙医院”。只在材料明确出现“业态/版块/板块/业务线/模块/分类”及其下属项目、服务、机构或方法时输出。
+- indicators 用来记录数值或事实指标，例如“住宅板块建筑面积”“医疗板块用地面积”“稳定运营期年均总收入”。每条必须有 entityTitle、name、evidence 和 confidence。
+- 如果材料讨论了某个关键指标但没有给出明确数值，indicator.value 应输出 null，并在 note 中写明“原文未提供明确数值”；不要为了凑答案从目录、页码或其他板块数字中猜。
 - 每条 claim 的 evidence 必须是原文中能支撑 subject / predicate / object 的短片段，不要只给关键词。
+- 每条 indicator 的 evidence 必须能支撑“主体/维度 + 指标名 + 数值 + 单位”；若不能支撑，只能标为 low 或 value: null。
 - hierarchy.items 不能放目录标题、页码、章节号、点线、宣传口号或无法归类的碎片。
 - contradictions 只放真正冲突或张力，不要把普通不确定都放进去。
 - recommendedUpdates 要明确建议创建或更新哪些实体、关系、任务或待审核项。
@@ -238,6 +263,7 @@ ${JSON.stringify(analysis, null, 2)}
 patches 中每一项必须符合以下 patch 类型之一：
 - CREATE_ENTITY
 - UPDATE_ENTITY_CATEGORIES
+- UPDATE_ENTITY_INDICATORS
 - UPDATE_ENTITY_PROPERTY
 - CREATE_RELATIONSHIP
 - CREATE_TASK
@@ -250,6 +276,9 @@ patches 中每一项必须符合以下 patch 类型之一：
 - CREATE_ENTITY 只在分析认为实体不存在或值得新建时使用；可能已存在的实体优先 UPDATE_ENTITY_PROPERTY、CREATE_RELATIONSHIP 或 REVIEW_REQUIRED。
 - UPDATE_ENTITY_CATEGORIES 用于写入父实体内部层级结构，格式为 {"type":"UPDATE_ENTITY_CATEGORIES","entityTitle":"父实体","categories":[{"name":"医疗业态","aliases":["医疗"],"items":[{"title":"FMT 疗法","kind":"method","evidence":"..."}]}],"evidence":"...","confidence":0.8}。
 - UPDATE_ENTITY_CATEGORIES 只能在原文明确给出“某维度下包含哪些项目/服务/机构/方法”时生成；不要把目录、页码、章节标题或上一级业态列表当成 items。
+- UPDATE_ENTITY_INDICATORS 用于写入结构化指标，格式为 {"type":"UPDATE_ENTITY_INDICATORS","entityTitle":"父实体","indicators":[{"name":"住宅板块建筑面积","value":null,"unit":"万平方米","businessLine":"住宅","categoryName":"住宅业态","source":{"excerpt":"原文未明确披露住宅板块建筑面积"},"confidence":"high","note":"原文未提供明确数值"}],"evidence":"...","confidence":0.8}。
+- UPDATE_ENTITY_INDICATORS 可以写入 value: null，表示“已经编译过，资料未提供明确值”。这类 null 指标优先级高于查询时临时 OCR 抽取。
+- 指标 value 只有在原文同时出现主体/维度、指标名、数值和单位时才能给具体数字；否则 value 必须为 null 或标 low，不能把目录编号、页码、章节号、点线、OCR 碎片或其他板块数字当作指标。
 - UPDATE_ENTITY_PROPERTY 的 propertyValue 必须是完整值，不要用“开源”“方案”“模型”等泛词代替具体对象；例如“OpenMaic 开源项目”“小林”“Windows”。
 - CREATE_RELATIONSHIP 必须同时有 fromTitle、toTitle、relationshipType 和能证明二者关系的 evidence。
 - REVIEW_REQUIRED 只用于冲突、疑似重复、重要但缺页、需要用户判断的内容；不要创建琐碎 review。
@@ -300,6 +329,21 @@ export function normalizeCaptureAnalysis(rawText: string): CaptureAnalysis {
         confidence: pickEnum(hierarchy.confidence, confidenceLevels, 'medium'),
       }))
       .filter((hierarchy) => hierarchy.parentTitle && hierarchy.categoryName && hierarchy.items.length > 0 && hierarchy.evidence),
+    indicators: toArray<Record<string, unknown>>((parsed as Partial<CaptureAnalysis>).indicators)
+      .map((indicator) => ({
+        entityTitle: stringValue(indicator.entityTitle),
+        name: stringValue(indicator.name),
+        value: parseIndicatorValue(indicator.value),
+        rawValue: stringValue(indicator.rawValue) || undefined,
+        unit: stringValue(indicator.unit) || undefined,
+        businessLine: stringValue(indicator.businessLine) || undefined,
+        categoryName: stringValue(indicator.categoryName) || undefined,
+        evidence: stringValue(indicator.evidence),
+        confidence: pickEnum(indicator.confidence, confidenceLevels, 'medium'),
+        note: stringValue(indicator.note) || undefined,
+        asOfDate: stringValue(indicator.asOfDate) || undefined,
+      }))
+      .filter((indicator) => indicator.entityTitle && indicator.name && indicator.evidence),
     contradictions: toArray<Record<string, unknown>>(parsed.contradictions)
       .map((item) => ({
         title: stringValue(item.title),
@@ -354,6 +398,10 @@ export function normalizeWikiPatchesToCaptureDraft(patches: WikiPatch[], content
     if (patch.type === 'UPDATE_ENTITY_CATEGORIES') {
       const entity = ensureEntity(patch.entityTitle, 'project', patch.evidence);
       entity.categories = mergeDraftCategories(entity.categories ?? [], patch.categories);
+    }
+    if (patch.type === 'UPDATE_ENTITY_INDICATORS') {
+      const entity = ensureEntity(patch.entityTitle, 'project', patch.evidence);
+      entity.indicators = mergeDraftIndicators(entity.indicators ?? [], patch.indicators);
     }
     if (patch.type === 'CREATE_RELATIONSHIP') {
       ensureEntity(patch.fromTitle);
@@ -440,6 +488,10 @@ export function validateWikiPatch(patch: WikiPatch) {
     return patch.entityTitle.trim() && patch.categories.length > 0;
   }
 
+  if (patch.type === 'UPDATE_ENTITY_INDICATORS') {
+    return patch.entityTitle.trim() && patch.indicators.length > 0;
+  }
+
   if (patch.type === 'REVIEW_REQUIRED') {
     return patch.options.every((option) => ['Create Page', 'Update Existing', 'Skip'].includes(option));
   }
@@ -497,6 +549,35 @@ function normalizeWikiPatch(value: unknown): WikiPatch | undefined {
           evidence: stringValue(category.evidence) || undefined,
         }))
         .filter((category) => category.name && category.items.length > 0),
+      evidence: stringValue(raw.evidence),
+      confidence: clamp(Number(raw.confidence) || 0.65, 0, 1),
+    };
+  }
+
+  if (type === 'UPDATE_ENTITY_INDICATORS') {
+    return {
+      type,
+      entityTitle: stringValue(raw.entityTitle),
+      indicators: toArray<Record<string, unknown>>(raw.indicators)
+        .map((indicator) => ({
+          name: stringValue(indicator.name),
+          value: parseIndicatorValue(indicator.value),
+          rawValue: stringValue(indicator.rawValue) || undefined,
+          unit: stringValue(indicator.unit) || undefined,
+          businessLine: stringValue(indicator.businessLine) || undefined,
+          categoryName: stringValue(indicator.categoryName) || undefined,
+          source: {
+            page: Number.isFinite(Number(indicator.page ?? (indicator.source as Record<string, unknown> | undefined)?.page))
+              ? Number(indicator.page ?? (indicator.source as Record<string, unknown> | undefined)?.page)
+              : undefined,
+            section: stringValue(indicator.section ?? (indicator.source as Record<string, unknown> | undefined)?.section) || undefined,
+            excerpt: stringValue(indicator.excerpt ?? (indicator.source as Record<string, unknown> | undefined)?.excerpt) || undefined,
+          },
+          confidence: pickEnum(indicator.confidence, confidenceLevels, 'medium'),
+          note: stringValue(indicator.note) || undefined,
+          asOfDate: stringValue(indicator.asOfDate) || undefined,
+        }))
+        .filter((indicator) => indicator.name && indicator.confidence),
       evidence: stringValue(raw.evidence),
       confidence: clamp(Number(raw.confidence) || 0.65, 0, 1),
     };
@@ -588,6 +669,46 @@ function mergeDraftCategoryItems(items: NonNullable<DraftEntity['categories']>[n
   return Array.from(byTitle.values());
 }
 
+function mergeDraftIndicators(
+  existing: NonNullable<DraftEntity['indicators']>,
+  incoming: NonNullable<DraftEntity['indicators']>,
+) {
+  const byKey = new Map<string, NonNullable<DraftEntity['indicators']>[number]>();
+  for (const indicator of existing) byKey.set(draftIndicatorKey(indicator), indicator);
+  for (const indicator of incoming) {
+    const key = draftIndicatorKey(indicator);
+    const current = byKey.get(key);
+    const shouldUseIncomingValue = !current || indicator.value !== null || current.value === null;
+    byKey.set(key, {
+      ...current,
+      ...indicator,
+      value: shouldUseIncomingValue ? indicator.value : current?.value ?? null,
+      rawValue: shouldUseIncomingValue ? indicator.rawValue : current?.rawValue,
+      unit: shouldUseIncomingValue ? indicator.unit : current?.unit,
+      source: indicator.source ?? current?.source,
+      note: indicator.note ?? current?.note,
+      confidence: current ? betterIndicatorConfidence(current.confidence, indicator.confidence) : indicator.confidence,
+    });
+  }
+  return Array.from(byKey.values());
+}
+
+function draftIndicatorKey(indicator: Pick<NonNullable<DraftEntity['indicators']>[number], 'name' | 'businessLine' | 'categoryName'>) {
+  return [
+    normalizeTitle(indicator.businessLine ?? ''),
+    normalizeTitle(indicator.categoryName ?? ''),
+    normalizeTitle(indicator.name),
+  ].join(':');
+}
+
+function betterIndicatorConfidence(
+  left: NonNullable<DraftEntity['indicators']>[number]['confidence'],
+  right: NonNullable<DraftEntity['indicators']>[number]['confidence'],
+) {
+  const rank = { low: 1, medium: 2, high: 3 } as const;
+  return rank[right] > rank[left] ? right : left;
+}
+
 function isLikelyListNoise(value: string) {
   return /(\.{3,}|…{2,}|-{2,}|\bof\s+\d+\b|目录|页码|第\s*\d+\s*页)/i.test(value);
 }
@@ -604,6 +725,18 @@ function parseBestJson(text: string) {
 
 function stringValue(value: unknown) {
   return typeof value === 'string' ? value.trim() : '';
+}
+
+function parseIndicatorValue(value: unknown) {
+  if (value === null) return null;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const normalized = value.replace(/[,，]/g, '').trim();
+    if (/^(null|none|not-found|未提供|未知|无法确认)$/i.test(normalized)) return null;
+    const number = Number(normalized.match(/-?\d+(?:\.\d+)?/)?.[0]);
+    return Number.isFinite(number) ? number : null;
+  }
+  return null;
 }
 
 function toArray<T = unknown>(value: unknown): T[] {
@@ -656,6 +789,7 @@ const confidenceLevels = ['high', 'medium', 'low'] as const;
 const wikiPatchTypes: WikiPatchType[] = [
   'CREATE_ENTITY',
   'UPDATE_ENTITY_CATEGORIES',
+  'UPDATE_ENTITY_INDICATORS',
   'UPDATE_ENTITY_PROPERTY',
   'CREATE_RELATIONSHIP',
   'CREATE_TASK',

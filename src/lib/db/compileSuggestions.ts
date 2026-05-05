@@ -1,4 +1,4 @@
-import type { CompileSuggestionDraft, CompileSuggestionRecord, Entity } from '@/types';
+import type { CompileSuggestionDraft, CompileSuggestionRecord, Entity, EntityIndicator } from '@/types';
 import { createId } from './ids';
 import { db } from './schema';
 import { refreshCompiledProfile } from '@/lib/wikiIndex';
@@ -121,6 +121,26 @@ export async function applyCompileSuggestion(id: string) {
   }
 
   const now = Date.now();
+  if (suggestion.propertyKey.startsWith('metric_')) {
+    const indicator = compileSuggestionToIndicator(suggestion, now);
+    const indicators = mergeEntityIndicators(entity.indicators ?? [], [indicator]);
+
+    await db.transaction('rw', db.entities, db.compileSuggestions, async () => {
+      await db.entities.update(entity.id, {
+        indicators,
+        updatedAt: now,
+      });
+      await db.compileSuggestions.update(suggestion.id, {
+        status: 'applied',
+        appliedAt: now,
+        updatedAt: now,
+      });
+    });
+    await refreshCompiledProfile(entity.id);
+
+    return db.compileSuggestions.get(id);
+  }
+
   const properties = {
     ...(entity.properties as Record<string, unknown>),
     [suggestion.propertyKey]: mergePropertyValue(
@@ -180,8 +200,82 @@ async function markCompileSuggestion(id: string, status: 'dismissed' | 'supersed
 }
 
 function entityHasCompileValue(entity: Entity, propertyKey: string, propertyValue: string) {
+  if (propertyKey.startsWith('metric_')) {
+    return (entity.indicators ?? []).some((indicator) => indicatorContainsValue(indicator, propertyValue));
+  }
+
   const properties = entity.properties as Record<string, unknown>;
   return propertyContainsValue(properties[propertyKey], propertyValue);
+}
+
+function compileSuggestionToIndicator(suggestion: CompileSuggestionRecord, now: number): EntityIndicator {
+  const parsed = parseMetricSuggestionValue(suggestion.propertyValue);
+  return {
+    id: createId('indicator'),
+    name: metricNameFromPropertyKey(suggestion.propertyKey, suggestion.propertyLabel),
+    value: parsed.value,
+    rawValue: parsed.rawValue,
+    unit: parsed.unit,
+    source: {
+      entryId: suggestion.evidenceEntryId,
+      excerpt: suggestion.evidenceSnippet,
+    },
+    confidence: suggestion.confidence >= 0.8 ? 'high' : suggestion.confidence >= 0.6 ? 'medium' : 'low',
+    note: /疑似|核对|不明确|无法确认/.test(suggestion.propertyValue)
+      ? '用户确认前该指标来自低置信线索，建议核对来源。'
+      : undefined,
+    extractedAt: now,
+    updatedAt: now,
+  };
+}
+
+function metricNameFromPropertyKey(propertyKey: string, fallback: string) {
+  return propertyKey.startsWith('metric_') ? fallback : propertyKey;
+}
+
+function parseMetricSuggestionValue(value: string) {
+  const rawValue = value.replace(/[（(]疑似，?需核对原文[）)]/g, '').trim();
+  const number = Number(rawValue.replace(/[,，]/g, '').match(/-?\d+(?:\.\d+)?/)?.[0]);
+  const unit = rawValue.match(/(?:亿元|万元|元|万平方米|平方米|平米|㎡|亩|公顷|人|家|个|套|间|床|户|%|万|亿)/)?.[0];
+  return {
+    value: Number.isFinite(number) ? number : null,
+    rawValue,
+    unit,
+  };
+}
+
+function mergeEntityIndicators(existing: EntityIndicator[], incoming: EntityIndicator[]) {
+  const byKey = new Map<string, EntityIndicator>();
+  for (const indicator of existing) byKey.set(indicatorCompileKey(indicator), indicator);
+  for (const indicator of incoming) {
+    const key = indicatorCompileKey(indicator);
+    const current = byKey.get(key);
+    if (!current) {
+      byKey.set(key, indicator);
+      continue;
+    }
+    byKey.set(key, {
+      ...current,
+      ...indicator,
+      id: current.id,
+      extractedAt: Math.min(current.extractedAt, indicator.extractedAt),
+      updatedAt: Math.max(current.updatedAt, indicator.updatedAt),
+    });
+  }
+  return Array.from(byKey.values());
+}
+
+function indicatorCompileKey(indicator: Pick<EntityIndicator, 'name' | 'businessLine' | 'categoryName'>) {
+  return [
+    normalizeCompileValue(indicator.businessLine ?? ''),
+    normalizeCompileValue(indicator.categoryName ?? ''),
+    normalizeCompileValue(indicator.name),
+  ].join(':');
+}
+
+function indicatorContainsValue(indicator: EntityIndicator, propertyValue: string) {
+  return propertyContainsValue(indicator.rawValue, propertyValue) ||
+    propertyContainsValue(`${indicator.value ?? ''}${indicator.unit ?? ''}`, propertyValue);
 }
 
 function propertyContainsValue(currentValue: unknown, propertyValue: string): boolean {

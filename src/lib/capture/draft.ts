@@ -1,4 +1,4 @@
-import type { EntityCategory, EntityType, RelationshipType, Scene, TaskStatus } from '@/types';
+import type { EntityCategory, EntityIndicator, EntityType, RelationshipType, Scene, TaskStatus } from '@/types';
 
 export type DraftEntity = {
   clientId: string;
@@ -8,6 +8,7 @@ export type DraftEntity = {
   tags: string[];
   scenes: Scene[];
   categories?: Array<Omit<EntityCategory, 'updatedAt'>>;
+  indicators?: Array<Omit<EntityIndicator, 'id' | 'extractedAt' | 'updatedAt'>>;
 };
 
 export type DraftRelationship = {

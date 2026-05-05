@@ -26,6 +26,7 @@ const relationshipTypes = [
   'mentions',
 ] as const;
 const taskStatuses = ['pending', 'done', 'overdue', 'cancelled'] as const;
+const indicatorConfidences = ['high', 'medium', 'low'] as const;
 
 type AiEntity = {
   type?: string;
@@ -34,6 +35,7 @@ type AiEntity = {
   tags?: unknown;
   scenes?: unknown;
   categories?: unknown;
+  indicators?: unknown;
 };
 
 type AiCategory = {
@@ -48,6 +50,23 @@ type AiCategoryItem = {
   kind?: string;
   summary?: string;
   evidence?: string;
+};
+
+type AiIndicator = {
+  name?: string;
+  value?: unknown;
+  rawValue?: string;
+  unit?: string;
+  businessLine?: string;
+  categoryName?: string;
+  source?: {
+    section?: string;
+    page?: unknown;
+    excerpt?: string;
+  };
+  confidence?: string;
+  note?: string;
+  asOfDate?: string;
 };
 
 type AiRelationship = {
@@ -100,6 +119,20 @@ JSON schema:
         ],
         "evidence": "能证明该层级结构的原文短句"
       }
+    ],
+    "indicators": [
+      {
+        "name": "指标名，例如 住宅板块建筑面积 / 医疗板块用地面积 / 稳定运营期年均总收入",
+        "value": 123.45,
+        "rawValue": "123.45 万平方米",
+        "unit": "万平方米",
+        "businessLine": "住宅 / 医疗 / 康养 / 研发 / 文旅，可省略",
+        "categoryName": "对应 categories 里的维度名，可省略",
+        "source": {"section": "章节名，可省略", "page": 12, "excerpt": "包含指标名、数值和单位的原文证据；未提供时写明未提供的原文线索"},
+        "confidence": "high | medium | low",
+        "note": "如果 value 为 null，说明为什么资料未提供或不能确认",
+        "asOfDate": "指标对应日期，可省略"
+      }
     ]
   },
   "relatedEntities": [
@@ -142,6 +175,9 @@ JSON schema:
 - 对项目、主题中出现“业态 / 版块 / 板块 / 业务线 / 模块 / 分类”且其下有具体项目、服务、机构或方法时，必须写入 primaryEntity.categories 或对应 relatedEntities.categories。
 - categories 表示“父实体内部的层级结构”，不要用它替代 relationships；扁平实体关系仍照常输出。
 - category.items 只能放该维度下面的具体项目、服务、机构、方法或产品，不要放目录标题、页码、章节号、标点点线或宣传口号。
+- 对项目、主题中的数值事实，优先写入 indicators。典型指标包括：用地面积、建筑面积、投资额、收入、成本、利润、人数、床位数、时间节点。
+- indicators 必须保留完整单位和原文摘录；如果原文没有明确给出某个被材料讨论到的关键指标，可以输出 value: null，并在 note 中说明“资料未提供明确数值”。
+- 不要把目录编号、页码、章节号、点线、OCR 碎片或其他板块的数字写成指标值；一个高置信指标必须能在原文里找到“维度/主体 + 指标名 + 数值 + 单位”的完整上下文。
 - 输出中的人名、项目名、任务内容必须来自用户输入或由用户输入直接概括，不能照抄 schema 或示例词。
 `;
 }
@@ -290,6 +326,7 @@ function normalizeEntity(entity: AiEntity | undefined, fallbackType: EntityType)
       .map((scene) => pickEnum(scene, scenes, undefined))
       .filter((scene): scene is Scene => Boolean(scene)),
     categories: normalizeAiCategories(entity?.categories),
+    indicators: normalizeAiIndicators(entity?.indicators),
   };
 }
 
@@ -312,6 +349,41 @@ function normalizeAiCategories(value: unknown): DraftEntity['categories'] {
       evidence: category.evidence?.trim(),
     }))
     .filter((category) => category.name && category.items.length > 0);
+}
+
+function normalizeAiIndicators(value: unknown): DraftEntity['indicators'] {
+  return toArray<AiIndicator>(value)
+    .map((indicator) => ({
+      name: indicator.name?.trim() ?? '',
+      value: parseIndicatorValue(indicator.value),
+      rawValue: indicator.rawValue?.trim(),
+      unit: indicator.unit?.trim(),
+      businessLine: indicator.businessLine?.trim(),
+      categoryName: indicator.categoryName?.trim(),
+      source: indicator.source
+        ? {
+            page: Number.isFinite(Number(indicator.source.page)) ? Number(indicator.source.page) : undefined,
+            section: indicator.source.section?.trim(),
+            excerpt: indicator.source.excerpt?.trim(),
+          }
+        : undefined,
+      confidence: pickEnum(indicator.confidence, indicatorConfidences, 'medium'),
+      note: indicator.note?.trim(),
+      asOfDate: indicator.asOfDate?.trim(),
+    }))
+    .filter((indicator) => indicator.name && indicator.confidence);
+}
+
+function parseIndicatorValue(value: unknown) {
+  if (value === null) return null;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const normalized = value.replace(/[,，]/g, '').trim();
+    if (/^(null|none|not-found|未提供|未知|无法确认)$/i.test(normalized)) return null;
+    const number = Number(normalized.match(/-?\d+(?:\.\d+)?/)?.[0]);
+    return Number.isFinite(number) ? number : null;
+  }
+  return null;
 }
 
 function isLikelyListNoise(value: string) {
