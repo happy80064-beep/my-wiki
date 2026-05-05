@@ -612,7 +612,107 @@ describe('structured query', () => {
     expect(result.compileSuggestions?.[0]).toEqual(
       expect.objectContaining({
         entityId: project.id,
-        propertyValue: '248亩（疑似，需核对原文）',
+        propertyValue: '248亩',
+        evidenceEntryId: entry.id,
+      }),
+    );
+  });
+
+  it('does not reuse known area indicators for an unknown business dimension', async () => {
+    const entry = await createEntry({
+      content:
+        '福瑞健康科技园三期项目资料：住宅板块：用地面积 320 亩，拟建设低密生态别墅，容积率 1.0。',
+      source: 'file',
+    });
+    await createEntity({
+      type: 'project',
+      title: '福瑞健康科技园三期项目',
+      summary: '园区项目，包含住宅业态。',
+      tags: ['福瑞科技园', '三期'],
+      sourceEntries: [entry.id],
+      categories: [
+        {
+          name: '住宅业态',
+          aliases: ['住宅', '住宅板块'],
+          items: [{ title: '低密生态别墅', kind: 'product' }],
+          evidence: '住宅板块：用地面积 320 亩，拟建设低密生态别墅，容积率 1.0。',
+          updatedAt: Date.now(),
+        },
+      ],
+      indicators: [
+        {
+          id: 'indicator_residential_land_area',
+          name: '住宅板块用地面积',
+          value: 320,
+          rawValue: '320 亩',
+          unit: '亩',
+          businessLine: '住宅',
+          categoryName: '住宅业态',
+          source: {
+            entryId: entry.id,
+            excerpt: '住宅板块：用地面积 320 亩，拟建设低密生态别墅，容积率 1.0。',
+          },
+          confidence: 'low',
+          extractedAt: Date.now(),
+          updatedAt: Date.now(),
+        },
+      ],
+    });
+
+    const result = await runStructuredQuery('福瑞健康科技园三期中智算中心的面积是多少？');
+
+    expect(result.answer).toContain('智算中心');
+    expect(result.answer).toContain('没有在福瑞健康科技园三期项目的已编译业态');
+    expect(result.answer).toContain('不能把住宅、医疗、康养、文旅等其他板块的面积套用为答案');
+    expect(result.answer).not.toContain('320亩');
+    expect(result.compileSuggestions ?? []).toEqual([]);
+  });
+
+  it('uses the area value nearest to the requested business dimension in raw fallback', async () => {
+    const entry = await createEntry({
+      content:
+        '福瑞健康科技园三期项目资料：药材科普园还有 132 亩建设用地和文旅开发空地 685 亩（宗地三）正等待规划确认。',
+      source: 'file',
+    });
+    await createEntity({
+      type: 'project',
+      title: '福瑞健康科技园三期项目',
+      summary: '园区项目，包含文旅业态。',
+      tags: ['福瑞科技园', '三期', '文旅业态'],
+      sourceEntries: [entry.id],
+    });
+
+    const result = await runStructuredQuery('福瑞健康科技园三期项目中文旅业态的面积是多少？');
+
+    expect(result.answer).toContain('685亩');
+    expect(result.compileSuggestions?.[0]).toEqual(
+      expect.objectContaining({
+        propertyValue: '685亩',
+        evidenceEntryId: entry.id,
+      }),
+    );
+  });
+
+  it('treats scoped residential land/use area evidence as a direct same-block metric', async () => {
+    const entry = await createEntry({
+      content:
+        '福瑞健康科技园三期项目资料：住宅板块：用地面积 320 亩，拟建设低密生态别墅，容积率 1.0。',
+      source: 'file',
+    });
+    await createEntity({
+      type: 'project',
+      title: '福瑞健康科技园三期项目',
+      summary: '园区项目，包含住宅业态。',
+      tags: ['福瑞科技园', '三期', '住宅业态'],
+      sourceEntries: [entry.id],
+    });
+
+    const result = await runStructuredQuery('福瑞健康科技园三期项目中住宅业态的土地面积是多少？');
+
+    expect(result.answer).toContain('土地面积约为 320亩');
+    expect(result.compileSuggestions?.[0]).toEqual(
+      expect.objectContaining({
+        propertyValue: '320亩',
         evidenceEntryId: entry.id,
       }),
     );

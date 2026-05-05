@@ -1029,6 +1029,10 @@ function formatWikiReadAnswer(question: string, document: EntityDocument) {
   const compiledPropertyValue = queriedPropertyKey ? getEntityPropertyDisplayValue(entity, queriedPropertyKey) : undefined;
   const evidencePropertyValue = queriedPropertyKey ? extractEvidencePropertyValue(queriedPropertyKey, evidenceHits) : undefined;
   const propertyValue = compiledPropertyValue ?? evidencePropertyValue;
+  const unknownMetricDimension = !propertyValue ? findUnknownMetricDimension(question, document) : undefined;
+  if (unknownMetricDimension) {
+    return formatUnknownMetricDimensionFastAnswer(entity, question, unknownMetricDimension);
+  }
   const indicatorGroupAnswer = !propertyValue ? findIndicatorGroupAnswer(question, entity) : undefined;
   if (indicatorGroupAnswer) {
     return formatIndicatorGroupFastAnswer(entity, indicatorGroupAnswer);
@@ -1292,6 +1296,7 @@ function formatEntityIndicatorsForComposer(entity: Entity) {
 
 function buildCompileSuggestions(document: EntityDocument, plan: QueryPlan, question?: string): CompileSuggestionDraft[] {
   const propertyKey = normalizePropertyKey(plan.attribute ?? inferAttribute(plan.evidenceTerms.join(' ')));
+  if (question && findUnknownMetricDimension(question, document)) return [];
   if (question && (findIndicatorGroupAnswer(question, document.entity) || findIndicatorAnswer(question, document.entity))) return [];
   const metricSuggestions = question ? buildMetricCompileSuggestions(document, question) : [];
   if ((!propertyKey || document.evidenceHits.length === 0) && metricSuggestions.length === 0) return [];
@@ -1322,6 +1327,7 @@ function buildCompileSuggestions(document: EntityDocument, plan: QueryPlan, ques
 }
 
 function buildMetricCompileSuggestions(document: EntityDocument, question: string): CompileSuggestionDraft[] {
+  if (findUnknownMetricDimension(question, document)) return [];
   const metricAnswer = extractMetricAnswer(question, document.evidenceHits);
   if (!metricAnswer) return [];
 
@@ -2035,6 +2041,104 @@ function findIndicatorAnswer(question: string, entity: Entity): IndicatorLookupA
   return rankIndicatorsForQuestion(question, entity)[0];
 }
 
+function findUnknownMetricDimension(question: string, document: EntityDocument) {
+  if (!isMetricQuestion(question) || isIndicatorOverviewQuestion(question)) return undefined;
+  const dimension = extractMetricDimensionCandidate(question, document.entity);
+  if (!dimension) return undefined;
+  if (isKnownMetricDimension(dimension, document)) return undefined;
+  return dimension;
+}
+
+function extractMetricDimensionCandidate(question: string, entity: Entity) {
+  let compact = question.replace(/[？?。！!，,、：:；;\s]/g, '');
+  for (const alias of buildEntityAliasesForMetricDimensionStrip(entity).sort((left, right) => right.length - left.length)) {
+    const compactAlias = alias.replace(/[？?。！!，,、：:；;\s]/g, '');
+    if (compactAlias.length >= 2) compact = compact.replace(new RegExp(escapeRegExp(compactAlias), 'gi'), '');
+  }
+
+  const metricPattern = '(?:建筑面积|土地面积|用地面积|占地面积|面积|收入|营收|投资额|投资|人数|数量|床位|机构数|项目数)';
+  const match = compact.match(new RegExp(`(?:项目中|项目里|其中|中|里)?([\\u4e00-\\u9fa5A-Za-z0-9]{2,24}?)(?:的)?${metricPattern}`));
+  const candidate = cleanupMetricDimensionCandidate(match?.[1] ?? '');
+  return isGenericMetricDimension(candidate) ? undefined : candidate;
+}
+
+function buildEntityAliasesForMetricDimensionStrip(entity: Entity) {
+  return buildEntityAliases(entity).filter((alias) => !isMetricDimensionAlias(alias));
+}
+
+function isMetricDimensionAlias(alias: string) {
+  const normalizedAlias = normalize(alias);
+  if (normalizedAlias.length < 2) return false;
+  return Object.values(metricScopeTerms).flat().some((term) => {
+    const normalizedTerm = normalize(term);
+    return normalizedTerm.length >= 2 &&
+      (normalizedAlias.includes(normalizedTerm) || normalizedTerm.includes(normalizedAlias));
+  });
+}
+
+function cleanupMetricDimensionCandidate(value: string) {
+  return value
+    .replace(/^(?:项目中|项目里|其中|中|里|的)+/g, '')
+    .replace(/(?:稳定运营期|运营期|年均|平均|预计|估算|测算|总计|合计|总体|整体|全部|当前|目前|大概|大约|约|项目|相关|对应|的)/g, '')
+    .replace(/(?:是多少|多少|为多少|是几|几)$/g, '')
+    .trim();
+}
+
+function isGenericMetricDimension(value: string) {
+  const normalized = normalize(value);
+  if (normalized.length < 2) return true;
+  return /^(面积|土地面积|用地面积|占地面积|建筑面积|收入|营收|投资|投资额|人数|数量|指标|数值|数据|规模)$/.test(normalized);
+}
+
+function isKnownMetricDimension(dimension: string, document: EntityDocument) {
+  const normalizedDimension = normalize(dimension);
+  if (normalizedDimension.length < 2) return true;
+
+  const entity = document.entity;
+  const categoryTerms = (entity.categories ?? []).flatMap((category) => [
+    category.name,
+    ...(category.aliases ?? []),
+    ...category.items.flatMap((item) => [item.title, item.summary ?? '']),
+    category.evidence ?? '',
+  ]);
+  const indicatorTerms = (entity.indicators ?? []).flatMap((indicator) => [
+    indicator.name,
+    indicator.businessLine ?? '',
+    indicator.categoryName ?? '',
+    indicator.note ?? '',
+    indicator.source?.excerpt ?? '',
+  ]);
+  const knownTerms = uniqueStrings([
+    ...Object.values(metricScopeTerms).flat(),
+    ...categoryTerms,
+    ...indicatorTerms,
+    entity.title,
+    entity.summary,
+    ...entity.tags,
+  ].filter(Boolean));
+
+  if (knownTerms.some((term) => {
+    const normalizedTerm = normalize(term);
+    return normalizedTerm.length >= 2 &&
+      (normalizedTerm.includes(normalizedDimension) || normalizedDimension.includes(normalizedTerm));
+  })) {
+    return true;
+  }
+
+  const sourceText = normalize([
+    ...document.evidenceHits
+      .filter((hit) => !isQueryInsightEntry(hit.entry))
+      .flatMap((hit) => [hit.snippet, hit.entry.content]),
+    ...document.entries.filter((entry) => !isQueryInsightEntry(entry)).map((entry) => entry.content),
+  ].join('\n'));
+  return sourceText.includes(normalizedDimension);
+}
+
+function isQueryInsightEntry(entry: Entry) {
+  const head = entry.content.slice(0, 120);
+  return /查询洞察/.test(head) && /(问题|答案)[:：]/.test(entry.content.slice(0, 300));
+}
+
 function rankIndicatorsForQuestion(
   question: string,
   entity: Entity,
@@ -2220,6 +2324,15 @@ function formatIndicatorFastAnswer(entity: Entity, answer: IndicatorLookupAnswer
       : '该数字来自 Wiki 已编译指标层，但置信度不是高，建议打开来源核对。',
     evidenceLine,
   ].filter(Boolean).join('\n\n');
+}
+
+function formatUnknownMetricDimensionFastAnswer(entity: Entity, question: string, dimension: string) {
+  const label = expectedMetricLabel(question);
+  return [
+    `我没有在${entity.title}的已编译业态、指标或关联来源中找到「${dimension}」这个维度。`,
+    `因此不能把住宅、医疗、康养、文旅等其他板块的${label}套用为答案。`,
+    `建议先补充包含「${dimension}」的材料，或确认它属于哪个已有业态后再编译回 Wiki。`,
+  ].join('\n\n');
 }
 
 function formatMetricFastAnswer(entity: Entity, answer: MetricAnswer) {
@@ -2729,7 +2842,7 @@ function extractMetricValueFromSentence(sentence: string, terms: string[]) {
   if (!metricSentenceMatchesScope(sentence, terms)) return undefined;
 
   const kind = inferMetricKind(terms, sentence);
-  if (kind === 'area') return extractAreaLikeValue(sentence);
+  if (kind === 'area') return extractScopedAreaLikeValue(sentence, terms) ?? extractAreaLikeValue(sentence);
   if (kind === 'money') return extractMoneyLikeValue(sentence);
   if (kind === 'ratio') return extractRatioLikeValue(sentence);
   if (kind === 'count') return extractCountLikeValue(sentence);
@@ -2788,8 +2901,21 @@ function metricSentenceConfidence(sentence: string, terms: string[]): MetricAnsw
     const normalizedTerm = normalize(term);
     return normalizedTerm.length >= 4 && normalizedSentence.includes(normalizedTerm);
   });
-  const metricVerbHit = /(为|约|达到|合计|总计|预计|测算|收入|营收)/.test(sentence);
-  return strongTermHit && metricVerbHit ? 'high' : 'medium';
+  const equivalentTermHit = metricSentenceHasEquivalentSignal(sentence, terms);
+  const metricVerbHit = /(为|约|达到|合计|总计|预计|测算|收入|营收|[:：])/.test(sentence);
+  return (strongTermHit || equivalentTermHit) && metricVerbHit ? 'high' : 'medium';
+}
+
+function metricSentenceHasEquivalentSignal(sentence: string, terms: string[]) {
+  const termText = terms.join('');
+  const kind = inferMetricKind(terms, sentence);
+  if (kind === 'area') {
+    const wantsBuildingArea = /建筑面积/.test(termText);
+    if (wantsBuildingArea) return /建筑面积/.test(sentence);
+    const wantsLandArea = /(土地|用地|占地|土地面积|用地面积|占地面积)/.test(termText);
+    return wantsLandArea && /(土地面积|用地面积|占地面积|土地|用地|占地)/.test(sentence);
+  }
+  return false;
 }
 
 function adjustMetricConfidence(
@@ -2847,8 +2973,8 @@ function extractMoneyLikeValue(text: string) {
 }
 
 function extractAreaLikeValue(text: string) {
-  const areaMatch = text.match(/([0-9][0-9,，]*(?:\.[0-9]+)?\s*(?:万平方米|平方米|平米|㎡|亩|公顷))/);
-  if (areaMatch?.[1]) return normalizeMetricValue(areaMatch[1]);
+  const areaMatch = findAreaLikeValueMatches(text)[0];
+  if (areaMatch) return areaMatch.value;
 
   if (/(面积|土地|用地|占地|建筑面积|住宅|宅地)/.test(text)) {
     const looseWanMatch = text.match(/([0-9][0-9,，]*(?:\.[0-9]+)?\s*万)(?!元|人|家|个|套|间|床|户)/);
@@ -2856,6 +2982,76 @@ function extractAreaLikeValue(text: string) {
   }
 
   return undefined;
+}
+
+function extractScopedAreaLikeValue(text: string, terms: string[]) {
+  const matches = findAreaLikeValueMatches(text);
+  if (matches.length <= 1) return matches[0]?.value;
+
+  const scope = inferMetricScope(terms.join(''));
+  if (!scope) return undefined;
+
+  const scopeIndexes = findAllTermIndexes(text, metricScopeTerms[scope]);
+  if (scopeIndexes.length === 0) return undefined;
+
+  return matches
+    .slice()
+    .sort((left, right) =>
+      distanceToNearestIndex(left.index, scopeIndexes) - distanceToNearestIndex(right.index, scopeIndexes) ||
+      afterScopePenalty(left.index, scopeIndexes) - afterScopePenalty(right.index, scopeIndexes))
+    [0]?.value;
+}
+
+function findAreaLikeValueMatches(text: string) {
+  const matches = [...text.matchAll(/([0-9][0-9,，]*(?:\.[0-9]+)?\s*(?:万平方米|平方米|平米|㎡|亩|公顷))/g)]
+    .map((match) => ({
+      value: normalizeMetricValue(match[1] ?? ''),
+      index: match.index ?? 0,
+    }))
+    .filter((match) => match.value.length > 0);
+
+  if (/(面积|土地|用地|占地|建筑面积|住宅|宅地)/.test(text)) {
+    matches.push(...[...text.matchAll(/([0-9][0-9,，]*(?:\.[0-9]+)?\s*万)(?!元|人|家|个|套|间|床|户)/g)]
+      .map((match) => ({
+        value: normalizeMetricValue(match[1] ?? ''),
+        index: match.index ?? 0,
+      }))
+      .filter((match) => match.value.length > 0));
+  }
+
+  const seen = new Set<string>();
+  return matches.filter((match) => {
+    const key = `${match.value}:${match.index}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function findAllTermIndexes(text: string, terms: string[]) {
+  const lowerText = text.toLowerCase();
+  const indexes: number[] = [];
+  for (const term of terms) {
+    const needle = term.toLowerCase();
+    if (!needle) continue;
+    let fromIndex = 0;
+    while (fromIndex < lowerText.length) {
+      const index = lowerText.indexOf(needle, fromIndex);
+      if (index < 0) break;
+      indexes.push(index);
+      fromIndex = index + Math.max(needle.length, 1);
+    }
+  }
+  return indexes;
+}
+
+function distanceToNearestIndex(index: number, targets: number[]) {
+  return Math.min(...targets.map((target) => Math.abs(index - target)));
+}
+
+function afterScopePenalty(index: number, targets: number[]) {
+  const nearest = targets.slice().sort((left, right) => Math.abs(index - left) - Math.abs(index - right))[0] ?? 0;
+  return index >= nearest ? 0 : 1;
 }
 
 function extractRatioLikeValue(text: string) {
