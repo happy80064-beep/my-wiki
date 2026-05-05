@@ -352,6 +352,9 @@ describe('structured query', () => {
 
     const result = await runStructuredQuery('福瑞健康科技园三期的住宅业态面积是多少？');
 
+    expect(result.answer).toContain('我没有找到能直接确认');
+    expect(result.answer).toContain('住宅业态面积');
+    expect(result.answer).toContain('暂不建议把目录编号、页码或零散数字当作结论');
     expect(result.answer).not.toContain('1.4个');
     expect(result.answer).not.toContain('5.1.4');
     expect(result.answer).not.toContain('个体化巨噬细胞疗法市场前景分析');

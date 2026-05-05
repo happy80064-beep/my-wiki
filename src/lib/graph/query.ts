@@ -1021,6 +1021,9 @@ function formatWikiReadAnswer(question: string, document: EntityDocument) {
   if (metricAnswer) {
     return formatMetricFastAnswer(entity, metricAnswer);
   }
+  if (!propertyValue && isMetricQuestion(question)) {
+    return formatMissingMetricFastAnswer(entity, expectedMetricLabel(question), evidenceHits.length);
+  }
   if (queriedPropertyKey && propertyValue) {
     return formatAttributeFastAnswer(entity, queriedPropertyKey, propertyValue, Boolean(compiledPropertyValue));
   }
@@ -1954,6 +1957,17 @@ function formatMetricFastAnswer(entity: Entity, answer: MetricAnswer) {
   ].join('\n\n');
 }
 
+function formatMissingMetricFastAnswer(entity: Entity, label: string, evidenceHitCount: number) {
+  const lines = [`我没有找到能直接确认${entity.title}的${label}的可靠数值。`];
+  if (evidenceHitCount > 0) {
+    lines.push('当前命中材料里没有出现与该指标对应的可靠单位或完整上下文，暂不建议把目录编号、页码或零散数字当作结论。');
+  } else {
+    lines.push('当前知识库和关联来源里没有命中可用于确认该指标的材料。');
+  }
+  lines.push('建议打开来源核对原文表格或章节；确认后再编译回 Wiki。');
+  return lines.join('\n\n');
+}
+
 function drillDownEntityCategory(entity: Entity, question: string) {
   const categories = entity.categories ?? [];
   if (categories.length === 0) return undefined;
@@ -2546,6 +2560,10 @@ function normalizeMetricLabel(label: string) {
     .replace(/^(这个|该|其)/, '')
     .replace(/是多少|多少|为多少|是几|几/g, '')
     .trim() || '相关数值';
+}
+
+function expectedMetricLabel(question: string) {
+  return normalizeMetricLabel(buildMetricTerms(question)[0] ?? '相关数值');
 }
 
 function normalizeMetricValue(value: string) {
