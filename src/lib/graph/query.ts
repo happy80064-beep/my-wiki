@@ -1769,6 +1769,8 @@ function buildMetricTerms(question: string) {
   if (/项目总收入/.test(question)) terms.push('项目总收入');
   if (/总收入/.test(question)) terms.push('总收入');
   if (/收入|营收/.test(question)) terms.push('收入', '营收');
+  if (/住宅/.test(question)) terms.push('住宅', '住宅业态');
+  if (/土地|用地|占地|面积|建筑面积/.test(question)) terms.push('土地面积', '面积', '用地', '占地');
   if (/多少/.test(question)) terms.push(...compactQuestion.split(/的/).filter((term) => term.length >= 2).slice(-2));
 
   return uniqueStrings(terms).slice(0, 12);
@@ -2174,7 +2176,8 @@ function isTocOrOcrNoise(item: string) {
   if (/^\s*(?:[IVX]+|\d+)(?:[.．]\d+){1,}/i.test(compact)) return true;
   if (/第\s*\d+\s*页|页码|目录|附录/.test(compact)) return true;
   const digitCount = (compact.match(/\d/g) ?? []).length;
-  if (digitCount >= 3 && digitCount / Math.max(compact.length, 1) > 0.2) return true;
+  const hasMetricContext = /(收入|营收|金额|费用|成本|投资|利润|价格|总额|合计|面积|土地|用地|占地|建筑面积|万元|亿元|平方米|平米|㎡|亩|公顷|元)/.test(compact);
+  if (digitCount >= 3 && digitCount / Math.max(compact.length, 1) > 0.2 && !hasMetricContext) return true;
   return false;
 }
 
@@ -2377,11 +2380,12 @@ function extractMetricValueFromText(text: string, terms: string[]) {
     .map((sentence) => sentence.trim())
     .filter(Boolean);
   const matchedSentences = sentences.filter((sentence) =>
+    !isLikelyTocOrNavigationSentence(sentence) &&
     terms.some((term) => evidenceTextMatches(sentence, term)),
   );
 
   for (const sentence of matchedSentences) {
-    const value = extractCurrencyLikeValue(sentence);
+    const value = extractMetricValueFromSentence(sentence, terms);
     if (value) {
       const confidence = adjustMetricConfidence(metricSentenceConfidence(sentence, terms), value, sentence, terms);
       return {
@@ -2396,7 +2400,8 @@ function extractMetricValueFromText(text: string, terms: string[]) {
 
   if (matchedSentences.length > 0) {
     for (const sentence of sentences) {
-      const value = extractCurrencyLikeValue(sentence);
+      if (isLikelyTocOrNavigationSentence(sentence)) continue;
+      const value = extractMetricValueFromSentence(sentence, terms);
       if (value) {
         return {
           value,
@@ -2408,6 +2413,35 @@ function extractMetricValueFromText(text: string, terms: string[]) {
   }
 
   return undefined;
+}
+
+type MetricKind = 'money' | 'area' | 'count' | 'ratio' | 'generic';
+
+function inferMetricKind(terms: string[], sentence = ''): MetricKind {
+  const text = `${terms.join('')} ${sentence}`;
+  if (/(面积|土地|用地|占地|建筑面积|住宅业态)/.test(text)) return 'area';
+  if (/(收入|营收|金额|费用|成本|投资|利润|价格|总额|年均|年收入|总收入)/.test(text)) return 'money';
+  if (/(比例|收益率|利润率|率|百分比|%)/.test(text)) return 'ratio';
+  if (/(人数|数量|家数|机构数|项目数|个数|多少个|多少家|多少人)/.test(text)) return 'count';
+  return 'generic';
+}
+
+function extractMetricValueFromSentence(sentence: string, terms: string[]) {
+  if (isLikelyTocOrNavigationSentence(sentence)) return undefined;
+
+  const kind = inferMetricKind(terms, sentence);
+  if (kind === 'area') return extractAreaLikeValue(sentence);
+  if (kind === 'money') return extractMoneyLikeValue(sentence);
+  if (kind === 'ratio') return extractRatioLikeValue(sentence);
+  if (kind === 'count') return extractCountLikeValue(sentence);
+
+  return (
+    extractMoneyLikeValue(sentence) ??
+    extractAreaLikeValue(sentence) ??
+    extractRatioLikeValue(sentence) ??
+    extractCountLikeValue(sentence) ??
+    extractLooseMagnitudeValue(sentence)
+  );
 }
 
 function metricSentenceConfidence(sentence: string, terms: string[]): MetricAnswer['confidence'] {
@@ -2459,15 +2493,48 @@ function isLooseWanMetricValue(value: string, sentence: string, terms: string[])
 }
 
 function extractCurrencyLikeValue(text: string) {
+  return extractMetricValueFromSentence(text, []);
+}
+
+function extractMoneyLikeValue(text: string) {
   const currencyMatch = text.match(/(?:人民币|RMB)?\s*([0-9][0-9,，]*(?:\.[0-9]+)?\s*(?:亿元|万元|元))/i);
   if (currencyMatch?.[1]) return normalizeMetricValue(currencyMatch[1]);
 
+  if (/(收入|营收|金额|费用|成本|投资|利润|价格|总额|合计|年均)/.test(text)) {
+    const looseMatch = text.match(/([0-9][0-9,，]*(?:\.[0-9]+)?\s*(?:亿|万))(?!平方米|平米|㎡|亩|公顷|人|家|个|套|间|床|户)/);
+    if (looseMatch?.[1]) return normalizeMetricValue(looseMatch[1]);
+  }
+
+  return undefined;
+}
+
+function extractAreaLikeValue(text: string) {
   const areaMatch = text.match(/([0-9][0-9,，]*(?:\.[0-9]+)?\s*(?:万平方米|平方米|平米|㎡|亩|公顷))/);
   if (areaMatch?.[1]) return normalizeMetricValue(areaMatch[1]);
 
-  const genericUnitMatch = text.match(/([0-9][0-9,，]*(?:\.[0-9]+)?\s*(?:人|家|个|套|间|床|户|%))/);
+  if (/(面积|土地|用地|占地|建筑面积|住宅|宅地)/.test(text)) {
+    const looseWanMatch = text.match(/([0-9][0-9,，]*(?:\.[0-9]+)?\s*万)(?!元|人|家|个|套|间|床|户)/);
+    if (looseWanMatch?.[1]) return normalizeMetricValue(looseWanMatch[1]);
+  }
+
+  return undefined;
+}
+
+function extractRatioLikeValue(text: string) {
+  const ratioMatch = text.match(/([0-9][0-9,，]*(?:\.[0-9]+)?\s*%)/);
+  if (ratioMatch?.[1]) return normalizeMetricValue(ratioMatch[1]);
+
+  return undefined;
+}
+
+function extractCountLikeValue(text: string) {
+  const genericUnitMatch = text.match(/([0-9][0-9,，]*(?:\.[0-9]+)?\s*(?:人|家|个|套|间|床|户))/);
   if (genericUnitMatch?.[1]) return normalizeMetricValue(genericUnitMatch[1]);
 
+  return undefined;
+}
+
+function extractLooseMagnitudeValue(text: string) {
   const looseMatch = text.match(/([0-9][0-9,，]*(?:\.[0-9]+)?\s*(?:亿|万))/);
   if (looseMatch?.[1]) return normalizeMetricValue(looseMatch[1]);
 

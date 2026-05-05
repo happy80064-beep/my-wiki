@@ -336,6 +336,28 @@ describe('structured query', () => {
     expect(result.sources.some((source) => source.id === entry.id)).toBe(true);
   });
 
+  it('does not use table-of-contents numbering as area metric evidence', async () => {
+    const entry = await createEntry({
+      content:
+        '福瑞健康科技园三期项目资料：住宅业态面积尚未在本页披露。目录片段：5.1.4 个体化巨噬细胞疗法市场前景分析................................ 39。',
+      source: 'file',
+    });
+    await createEntity({
+      type: 'project',
+      title: '福瑞健康科技园三期项目',
+      summary: '园区项目，包含住宅业态。',
+      tags: ['福瑞科技园', '三期', '住宅业态'],
+      sourceEntries: [entry.id],
+    });
+
+    const result = await runStructuredQuery('福瑞健康科技园三期的住宅业态面积是多少？');
+
+    expect(result.answer).not.toContain('1.4个');
+    expect(result.answer).not.toContain('5.1.4');
+    expect(result.answer).not.toContain('个体化巨噬细胞疗法市场前景分析');
+    expect(result.compileSuggestions ?? []).toEqual([]);
+  });
+
   it('filters blank source titles from query sources', async () => {
     const entry = await createEntry({ content: '福瑞科技园三期收入记录。', source: 'text' });
     const project = await createEntity({
