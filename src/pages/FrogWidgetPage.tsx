@@ -1,5 +1,5 @@
 import { Check, Clipboard, FileDown, Loader2, RotateCcw, Settings2 } from 'lucide-react';
-import { type ClipboardEvent, type DragEvent, type PointerEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { type ClipboardEvent, type DragEvent, type PointerEvent, useEffect, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { createRawAssetFromFile, processNextRawAsset, resetStaleRawAssets } from '@/lib/rawAssets';
 import { isSupportedImportFile } from '@/lib/import/fileText';
@@ -42,18 +42,13 @@ export function FrogWidgetPage() {
   const [position, setPosition] = useState<WidgetPosition>(() => loadPosition());
   const rawAssets = useLiveQuery(() => db.rawAssets.orderBy('createdAt').reverse().limit(5).toArray(), [], []);
 
-  const recentStatus = useMemo(() => {
-    const latest = rawAssets?.[0];
-    if (!latest) return '等待投喂';
-    return `${latest.filename} · ${statusLabel[latest.status]}`;
-  }, [rawAssets]);
-
   useEffect(() => {
     localStorage.setItem(FROG_AUTO_COMPILE_KEY, String(autoCompile));
   }, [autoCompile]);
 
   useEffect(() => {
     pageRef.current?.focus();
+    void resetStaleRawAssets();
   }, []);
 
   useEffect(() => {
@@ -302,30 +297,34 @@ export function FrogWidgetPage() {
         {progress ? <FrogProgress progress={progress} /> : null}
 
         <div className="mt-3 rounded-[12px] border border-[#e2ebe1] bg-white px-3 py-2">
-          <div className="flex items-center justify-between gap-3 text-xs">
-            <span className="font-medium text-[#1f2937]">最近状态</span>
-            <span className="truncate text-[#65736a]">{recentStatus}</span>
+          <div className="flex items-center justify-between gap-2 text-xs">
+            <span className="shrink-0 font-medium text-[#1f2937]">最近状态</span>
+            <span className="shrink-0 text-[11px] text-[#65736a]">{rawAssets?.length ?? 0} 条</span>
           </div>
           {rawAssets && rawAssets.length > 0 ? (
-            <div className="mt-2 space-y-1">
+            <div className="mt-2 space-y-1.5">
               {rawAssets.slice(0, 3).map((asset) => (
-                <div key={asset.id} className="flex items-center justify-between gap-2 text-xs text-[#65736a]">
-                  <span className="truncate">{asset.filename}</span>
+                <div key={asset.id} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-[8px] bg-[#f7fbf7] px-2 py-1.5 text-xs text-[#65736a]">
+                  <span className="min-w-0 truncate" title={asset.filename}>
+                    {asset.filename}
+                  </span>
                   <span className="shrink-0 rounded-full border border-[#d9e4d7] px-2 py-0.5">{statusLabel[asset.status]}</span>
                 </div>
               ))}
             </div>
-          ) : null}
+          ) : (
+            <p className="mt-2 text-xs text-[#65736a]">等待投喂。</p>
+          )}
         </div>
 
-        <div className="mt-3 flex items-center justify-between text-[11px] text-[#65736a]">
-          <span className="inline-flex items-center gap-1">
+        <div className="mt-3 grid gap-1.5 text-[11px] text-[#65736a]">
+          <span className="inline-flex min-w-0 items-start gap-1 leading-5">
             <Clipboard size={12} />
-            支持文本、网页、表格、Word、PDF、图片
+            <span>支持文本、网页、表格、Word、PDF、图片</span>
           </span>
-          <span className="inline-flex items-center gap-1">
+          <span className="inline-flex min-w-0 items-center gap-1 leading-5">
             <Settings2 size={12} />
-            位置已记忆
+            <span>位置已记忆</span>
           </span>
         </div>
       </section>
