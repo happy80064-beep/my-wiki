@@ -16,7 +16,7 @@ import { createIngestJob, processNextIngestJob } from '@/lib/ingest';
 import { isSupportedImportFile } from '@/lib/import/fileText';
 import { createRawAssetFromFile, processNextRawAsset, resetStaleRawAssets } from '@/lib/rawAssets';
 import { db } from '@/lib/db';
-import type { EntityType, RawAssetStatus, RelationshipType, Scene, TaskStatus } from '@/types';
+import type { EntityType, RawAssetKind, RawAssetStatus, RelationshipType, Scene, TaskStatus } from '@/types';
 
 const entityTypes: EntityType[] = ['person', 'project', 'event', 'topic'];
 const scenes: Scene[] = ['work', 'life', 'social', 'personal'];
@@ -62,12 +62,14 @@ const rawAssetStatusLabel: Record<RawAssetStatus, string> = {
   failed: '失败',
 };
 
-const assetKindLabel = {
+const assetKindLabel: Record<RawAssetKind, string> = {
   text: '文本',
   word: 'Word',
   pdf: 'PDF',
   image: '图片',
-} as const;
+  spreadsheet: '表格',
+  html: '网页',
+};
 
 type SaveResult = {
   entities: number;
@@ -465,7 +467,7 @@ export function CapturePage() {
               <input
                 type="file"
                 multiple
-                accept=".txt,.md,.markdown,.doc,.docx,.pdf,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff,text/plain,text/markdown,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/*"
+                accept=".txt,.md,.markdown,.json,.jsonl,.xml,.html,.htm,.csv,.tsv,.xls,.xlsx,.xlsm,.xlsb,.ods,.doc,.docx,.pdf,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff,text/plain,text/markdown,text/html,text/csv,text/tab-separated-values,application/json,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,image/*"
                 className="hidden"
                 onChange={(event) => {
                   void handleImportFiles(event.target.files);
@@ -524,7 +526,7 @@ export function CapturePage() {
                 </button>
               </div>
               <p className="mt-3 text-xs text-[#626965]">
-                支持 Markdown、文本、Word、PDF 和图片。可以拖到本页任意位置，也可以直接粘贴剪贴板里的文件或截图。
+                支持 Markdown、文本、网页 HTML、CSV/Excel、Word、PDF 和图片。可以拖到本页任意位置，也可以直接粘贴剪贴板里的文件或截图。
               </p>
             </div>
             <div className="mt-3">
@@ -1120,6 +1122,10 @@ function mimeExtension(mimeType: string) {
   if (mimeType.includes('jpeg') || mimeType.includes('jpg')) return 'jpg';
   if (mimeType.includes('webp')) return 'webp';
   if (mimeType.includes('pdf')) return 'pdf';
+  if (mimeType.includes('spreadsheet') || mimeType.includes('excel')) return 'xlsx';
+  if (mimeType.includes('csv')) return 'csv';
+  if (mimeType.includes('tab-separated-values')) return 'tsv';
+  if (mimeType.includes('html')) return 'html';
   if (mimeType.startsWith('text/')) return 'txt';
   return 'bin';
 }

@@ -660,7 +660,22 @@ async function extractImportFileText({
   const extension = filename.toLowerCase().split('.').at(-1) ?? '';
   const normalizedMimeType = mimeType.toLowerCase();
 
-  if (['txt', 'md', 'markdown'].includes(extension) || normalizedMimeType.startsWith('text/')) {
+  if (
+    ['xls', 'xlsx', 'xlsm', 'xlsb', 'csv', 'tsv', 'ods'].includes(extension) ||
+    normalizedMimeType.includes('spreadsheet') ||
+    normalizedMimeType.includes('excel') ||
+    normalizedMimeType.includes('csv') ||
+    normalizedMimeType.includes('tab-separated-values') ||
+    normalizedMimeType.includes('opendocument.spreadsheet')
+  ) {
+    return extractSpreadsheetText(buffer, filename, normalizedMimeType);
+  }
+
+  if (['html', 'htm'].includes(extension) || normalizedMimeType.includes('html')) {
+    return extractHtmlText(buffer.toString('utf8'));
+  }
+
+  if (['txt', 'md', 'markdown', 'json', 'jsonl', 'xml'].includes(extension) || normalizedMimeType.startsWith('text/')) {
     return buffer.toString('utf8');
   }
 
@@ -719,6 +734,65 @@ async function extractImageText(buffer: Buffer) {
   } finally {
     await worker.terminate();
   }
+}
+
+async function extractSpreadsheetText(buffer: Buffer, filename: string, mimeType: string) {
+  const XLSX = await import('xlsx');
+  const extension = filename.toLowerCase().split('.').at(-1) ?? '';
+  const workbook =
+    extension === 'csv' || mimeType.includes('csv')
+      ? XLSX.read(buffer.toString('utf8'), { type: 'string' })
+      : extension === 'tsv' || mimeType.includes('tab-separated-values')
+        ? XLSX.read(buffer.toString('utf8'), { type: 'string', FS: '\t' })
+        : XLSX.read(buffer, { type: 'buffer', cellDates: true });
+
+  const sections: string[] = [];
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName];
+    const rows = XLSX.utils.sheet_to_json<string[]>(sheet, {
+      header: 1,
+      raw: false,
+      blankrows: false,
+      defval: '',
+    });
+    if (rows.length === 0) continue;
+
+    const table = rows
+      .slice(0, 500)
+      .map((row) =>
+        row
+          .map((cell) => String(cell ?? '').replace(/\s+/g, ' ').trim())
+          .filter(Boolean)
+          .join(' | '),
+      )
+      .filter(Boolean)
+      .join('\n');
+
+    if (table) {
+      const truncated = rows.length > 500 ? `\n\n...该工作表还有 ${rows.length - 500} 行，已保留前 500 行用于编译。` : '';
+      sections.push(`## 工作表：${sheetName}\n\n${table}${truncated}`);
+    }
+  }
+
+  return sections.join('\n\n').trim();
+}
+
+function extractHtmlText(html: string) {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|section|article|li|tr|h[1-6])>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/\r/g, '\n')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 function normalizeMiniMaxModel(model?: string) {

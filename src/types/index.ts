@@ -240,7 +240,7 @@ export type GraphInsightDismissal = {
   dismissedAt: number;
 };
 
-export type RawAssetKind = 'text' | 'word' | 'pdf' | 'image';
+export type RawAssetKind = 'text' | 'word' | 'pdf' | 'image' | 'spreadsheet' | 'html';
 
 export type RawAssetStatus = 'raw' | 'extracting' | 'compiling' | 'compiled' | 'skipped' | 'failed';
 

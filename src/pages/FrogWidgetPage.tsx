@@ -321,7 +321,7 @@ export function FrogWidgetPage() {
         <div className="mt-3 flex items-center justify-between text-[11px] text-[#65736a]">
           <span className="inline-flex items-center gap-1">
             <Clipboard size={12} />
-            支持文本、Word、PDF、图片
+            支持文本、网页、表格、Word、PDF、图片
           </span>
           <span className="inline-flex items-center gap-1">
             <Settings2 size={12} />
@@ -409,6 +409,10 @@ function mimeExtension(mimeType: string) {
   if (mimeType.includes('jpeg') || mimeType.includes('jpg')) return 'jpg';
   if (mimeType.includes('webp')) return 'webp';
   if (mimeType.includes('pdf')) return 'pdf';
+  if (mimeType.includes('spreadsheet') || mimeType.includes('excel')) return 'xlsx';
+  if (mimeType.includes('csv')) return 'csv';
+  if (mimeType.includes('tab-separated-values')) return 'tsv';
+  if (mimeType.includes('html')) return 'html';
   if (mimeType.startsWith('text/')) return 'txt';
   return 'bin';
 }

@@ -1,6 +1,6 @@
 import type { EntrySource } from '@/types';
 
-export type ImportFileKind = 'text' | 'word' | 'pdf' | 'image';
+export type ImportFileKind = 'text' | 'word' | 'pdf' | 'image' | 'spreadsheet' | 'html';
 
 export type ImportFileExtraction = {
   filename: string;
@@ -21,14 +21,27 @@ export type ExtractImportBlobInput = {
   kind?: ImportFileKind;
 };
 
-const textExtensions = new Set(['txt', 'md', 'markdown']);
+const textExtensions = new Set(['txt', 'md', 'markdown', 'json', 'jsonl', 'xml']);
 const wordExtensions = new Set(['doc', 'docx']);
+const spreadsheetExtensions = new Set(['xls', 'xlsx', 'xlsm', 'xlsb', 'csv', 'tsv', 'ods']);
+const htmlExtensions = new Set(['html', 'htm']);
 const imageExtensions = new Set(['png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif', 'tif', 'tiff']);
 
 export function getImportFileKind(filename: string, mimeType = ''): ImportFileKind | undefined {
   const extension = getExtension(filename);
   const normalizedMimeType = mimeType.toLowerCase();
 
+  if (
+    spreadsheetExtensions.has(extension) ||
+    normalizedMimeType.includes('spreadsheet') ||
+    normalizedMimeType.includes('excel') ||
+    normalizedMimeType.includes('csv') ||
+    normalizedMimeType.includes('tab-separated-values') ||
+    normalizedMimeType.includes('opendocument.spreadsheet')
+  ) {
+    return 'spreadsheet';
+  }
+  if (htmlExtensions.has(extension) || normalizedMimeType.includes('html')) return 'html';
   if (textExtensions.has(extension) || normalizedMimeType.startsWith('text/')) return 'text';
   if (
     wordExtensions.has(extension) ||
@@ -85,10 +98,10 @@ export async function extractImportBlobText(
 
   onProgress?.({ percent: 8, label: `读取 ${input.filename}` });
 
-  if (kind === 'text') {
+  if (kind === 'text' || kind === 'html') {
     const text = await readBlobAsText(input.blob);
     onProgress?.({ percent: 100, label: `${input.filename} 已读取` });
-    return text.trim();
+    return (kind === 'html' ? extractHtmlReadableText(text) : text).trim();
   }
 
   const dataBase64 = await readBlobAsBase64(input.blob, (percent) => {
@@ -183,4 +196,31 @@ const kindLabels: Record<ImportFileKind, string> = {
   word: 'Word',
   pdf: 'PDF',
   image: '图片解析',
+  spreadsheet: '表格',
+  html: '网页 HTML',
 };
+
+function extractHtmlReadableText(html: string) {
+  if (typeof DOMParser !== 'undefined') {
+    const document = new DOMParser().parseFromString(html, 'text/html');
+    document.querySelectorAll('script, style, noscript, svg').forEach((node) => node.remove());
+    const title = document.title?.trim();
+    const bodyText = document.body?.textContent ?? document.documentElement.textContent ?? '';
+    return [title ? `# ${title}` : '', normalizeWhitespace(bodyText)].filter(Boolean).join('\n\n');
+  }
+
+  return normalizeWhitespace(
+    html
+      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<[^>]+>/g, ' '),
+  );
+}
+
+function normalizeWhitespace(text: string) {
+  return text
+    .replace(/\r/g, '\n')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}

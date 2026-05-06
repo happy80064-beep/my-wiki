@@ -319,4 +319,6 @@ const rawKindLabels: Record<RawAssetKind, string> = {
   word: 'Word',
   pdf: 'PDF',
   image: '图片',
+  spreadsheet: '表格',
+  html: '网页 HTML',
 };

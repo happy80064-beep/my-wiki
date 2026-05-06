@@ -33,6 +33,17 @@ describe('raw assets', () => {
     expect(await db.ingestJobs.count()).toBe(0);
   });
 
+  it('accepts spreadsheet files into Raw Inbox before compilation', async () => {
+    const file = new File(['项目,收入\n福瑞三期,4.22亿元'], 'revenue.csv', { type: 'text/csv' });
+
+    const result = await createRawAssetFromFile(file);
+
+    expect(result.reused).toBe(false);
+    expect(result.asset.kind).toBe('spreadsheet');
+    expect(result.asset.status).toBe('raw');
+    expect(await db.entries.count()).toBe(1);
+  });
+
   it('deduplicates raw files by content hash', async () => {
     const first = new File(['重复内容'], 'a.md', { type: 'text/markdown' });
     const second = new File(['重复内容'], 'b.md', { type: 'text/markdown' });

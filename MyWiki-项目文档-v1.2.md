@@ -368,7 +368,8 @@ type GraphAPI = {
 借鉴 Karpathy LLM Wiki 的“用户捕获”和“LLM 编译”解耦思路，MyWiki 的文件采集不应强制实时入库。用户把材料拖入捕获页或批量选择文件后，系统先把原始文件保存为 `RawAsset`，进入本地 Raw Inbox；解析、两步摄入、AI 编译和写入 Wiki 可以稍后批量执行。这样用户的捕获动作保持在秒级，LLM 的处理耗时不会阻塞继续收集材料。
 
 Raw Inbox 要求：
-- 支持 Markdown、纯文本、Word、PDF、图片等格式先原样收件，并立即生成一条 `processed=false` 的原始 Entry。
+- 支持 Markdown、纯文本、CSV/Excel/表格、网页 HTML、Word、PDF、图片等格式先原样收件，并立即生成一条 `processed=false` 的原始 Entry。
+- 采集入口尽量不要求用户先做格式转换；编译阶段按格式调用确定性解析工具（文本/HTML 直接读，CSV/Excel 转 Markdown-like 表格文本，Word/PDF/图片走对应解析），再交给 LLM 编译。
 - 同一原始文件按内容 hash 去重，重复导入不重复编译。
 - 文件状态独立记录为 `raw / extracting / compiling / compiled / skipped / failed`。
 - 用户点击“编译新材料”后，队列异步处理 raw 文件，并显示进度条、百分比和当前文件名。
@@ -676,7 +677,7 @@ MyWiki 的成败很大程度取决于“信息从产生到入库”的摩擦。�
 
 MVP 形态：
 - Web 阶段新增 `/frog` 独立页面，作为未来桌面悬浮窗的前端原型，不依赖主导航布局。
-- 支持拖拽文件、粘贴图片、粘贴文本，复用 Raw Inbox 的 `RawAsset`、hash 去重、格式解析、进度状态和批量编译流程。
+- 支持拖拽文件、粘贴图片、粘贴文本，文件类型覆盖 Markdown、文本、CSV/Excel、网页 HTML、Word、PDF 和图片；复用 Raw Inbox 的 `RawAsset`、hash 去重、格式解析、进度状态和批量编译流程。
 - 默认采用 Raw First：先把材料收进本地 Raw Inbox 并生成未编译原始记录，再决定是否自动“消化”编译。
 - 提供“自动消化”开关；关闭时只收件，用户稍后统一编译。
 - 状态动画至少覆盖 idle / hover / gulp / digest / done / error，等待 AI 的空白期用轻量动画和短反馈承接。
@@ -1261,7 +1262,7 @@ API 调用时把图片作为 image content block 传入，然后追加文本 pro
 [同纯文本 schema...]
 ```
 
-**文件输入**（PDF、Word 等）：先在前端用相应库（pdf.js、mammoth 等）提取文字，然后走纯文本流程。
+**文件输入**（PDF、Word、Excel/CSV、HTML 等）：先用相应解析工具把源文件转成可读文本或 Markdown-like 表格文本，然后走纯文本流程。采集动作保持 Raw First，避免让用户为了入库先手动转格式；无法可靠解析的格式也应保留原始 RawAsset 和失败原因，允许稍后重试或人工整理。
 
 ### 10.2 查询表达提示词
 
@@ -1692,6 +1693,7 @@ v1.2 · 2025-04-28
 基于产品负责人与 AI 共创讨论，并参考 Karpathy LLM Wiki 模式。
 
 变更记录：
+- v1.2 补充：Raw Inbox 与 Froggy Capture 增加 CSV/Excel/表格、网页 HTML 采集与编译解析支持，延续 Karpathy raw-first 思路，入口尽量不要求用户先做格式转换
 - v1.2 补充：新增 Froggy Capture 拟物化捕获入口路线，并落地 `/frog` Web Widget MVP；支持拖拽文件、粘贴图片/文本、Raw Inbox 先收件、自动消化开关、进度反馈和位置记忆，为后续 Tauri 常驻透明悬窗打基础
 - v1.2 补充：指标查询新增未知维度安全失败和同句多数字邻近选择规则；例如材料中没有“智算中心”时不得套用住宅/文旅/医疗面积，文旅面积应优先采用距离“文旅”最近的数值
 - v1.2 补充：将层级结构 `categories` 独立为 14.3.3，并明确与 `indicators` 的联动规则；补齐指标层触发条件、长文档分块策略、指标提取 Prompt、审核界面规范，以及跨业态对比、指标总览、维度词模糊匹配三类 MVP 验收测试
