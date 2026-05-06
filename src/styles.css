@@ -180,3 +180,238 @@ body {
   font-weight: 700;
   stroke-width: 6;
 }
+
+.frog-widget {
+  user-select: none;
+}
+
+.frog-face {
+  margin: 0 auto;
+  width: 174px;
+  height: 145px;
+  animation: frog-idle-bob 4.8s ease-in-out infinite;
+}
+
+.frog-face svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.frog-shadow {
+  fill: rgb(31 41 55 / 0.12);
+}
+
+.frog-body {
+  fill: #74d46b;
+  stroke: #3a9d54;
+  stroke-width: 4;
+}
+
+.frog-belly {
+  fill: #d8f6bc;
+  opacity: 0.92;
+}
+
+.frog-eye-base {
+  fill: #8fe37a;
+  stroke: #3a9d54;
+  stroke-width: 4;
+}
+
+.frog-eye {
+  fill: #1f2937;
+  transform-origin: center;
+  animation: frog-blink 5.4s ease-in-out infinite;
+}
+
+.frog-eye-light {
+  fill: #ffffff;
+  pointer-events: none;
+}
+
+.frog-mouth,
+.frog-arm {
+  fill: none;
+  stroke: #1f2937;
+  stroke-linecap: round;
+  stroke-width: 5;
+}
+
+.frog-mouth-open {
+  fill: #243428;
+  opacity: 0;
+  transform: scaleY(0.45);
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: opacity 160ms ease, transform 180ms ease;
+}
+
+.frog-cheek {
+  fill: #f6a6a3;
+  opacity: 0.58;
+}
+
+.frog-check,
+.frog-error-mark path {
+  fill: none;
+  stroke: #155eef;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 8;
+}
+
+.frog-error-mark path {
+  stroke: #b42318;
+}
+
+.frog-hover,
+.frog-gulp {
+  animation: frog-excited-bob 0.9s ease-in-out infinite;
+}
+
+.frog-hover .frog-mouth,
+.frog-gulp .frog-mouth,
+.frog-digest .frog-mouth {
+  opacity: 0;
+}
+
+.frog-hover .frog-mouth-open,
+.frog-gulp .frog-mouth-open {
+  opacity: 1;
+  transform: scaleY(1);
+}
+
+.frog-gulp .frog-body {
+  animation: frog-gulp-body 0.64s ease-in-out;
+}
+
+.frog-digest .frog-body,
+.frog-digest .frog-belly {
+  animation: frog-digest-pulse 1.1s ease-in-out infinite;
+}
+
+.frog-digest .frog-mouth-open {
+  opacity: 1;
+  transform: scaleY(0.55);
+}
+
+.frog-done .frog-body {
+  fill: #7bd86f;
+}
+
+.frog-error .frog-body {
+  fill: #9bcf77;
+}
+
+.frog-error .frog-eye {
+  fill: #5f2b2b;
+}
+
+.frog-bubble {
+  position: relative;
+  margin-inline: auto;
+  max-width: 230px;
+  border: 1px solid #d9e4d7;
+  border-radius: 12px;
+  background: #ffffff;
+  padding: 8px 10px;
+  text-align: center;
+  color: #2f3f35;
+  font-size: 12px;
+  line-height: 1.55;
+  box-shadow: 0 8px 20px rgb(31 41 55 / 0.08);
+}
+
+.frog-bubble::before {
+  position: absolute;
+  top: -7px;
+  left: calc(50% - 7px);
+  width: 12px;
+  height: 12px;
+  border-top: 1px solid #d9e4d7;
+  border-left: 1px solid #d9e4d7;
+  background: #ffffff;
+  content: "";
+  transform: rotate(45deg);
+}
+
+.frog-bubble-done {
+  border-color: #b7e4c7;
+  color: #276749;
+  animation: frog-bubble-rise 1.4s ease-out;
+}
+
+.frog-bubble-error {
+  border-color: #fecaca;
+  color: #b42318;
+}
+
+@keyframes frog-idle-bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+@keyframes frog-excited-bob {
+  0%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+  50% {
+    transform: translateY(-6px) scale(1.035);
+  }
+}
+
+@keyframes frog-blink {
+  0%,
+  92%,
+  100% {
+    transform: scaleY(1);
+  }
+  95% {
+    transform: scaleY(0.14);
+  }
+}
+
+@keyframes frog-gulp-body {
+  0% {
+    transform: scale(1);
+  }
+  38% {
+    transform: scale(1.08, 0.93);
+  }
+  72% {
+    transform: scale(0.96, 1.08);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes frog-digest-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.025, 1.045);
+  }
+}
+
+@keyframes frog-bubble-rise {
+  0% {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  30%,
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
