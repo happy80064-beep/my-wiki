@@ -222,6 +222,7 @@ body {
 
 .frog-eye {
   fill: #1f2937;
+  transform-box: fill-box;
   transform-origin: center;
   animation: frog-blink 5.4s ease-in-out infinite;
 }
@@ -244,13 +245,15 @@ body {
   opacity: 0;
   transform: scaleY(0.45);
   transform-box: fill-box;
-  transform-origin: center;
+  transform-origin: center top;
   transition: opacity 160ms ease, transform 180ms ease;
 }
 
 .frog-cheek {
   fill: #f6a6a3;
   opacity: 0.58;
+  transform-box: fill-box;
+  transform-origin: center;
 }
 
 .frog-check,
@@ -294,7 +297,15 @@ body {
 
 .frog-digest .frog-mouth-open {
   opacity: 1;
-  transform: scaleY(0.55);
+  animation: frog-chew-mouth 0.46s cubic-bezier(0.36, 0, 0.66, -0.56) infinite;
+}
+
+.frog-digest .frog-cheek {
+  animation: frog-chew-cheeks 0.46s ease-in-out infinite;
+}
+
+.frog-digest .frog-eye {
+  animation: frog-chew-eyes 0.92s ease-in-out infinite;
 }
 
 .frog-done .frog-body {
@@ -401,6 +412,48 @@ body {
   }
   50% {
     transform: scale(1.025, 1.045);
+  }
+}
+
+@keyframes frog-chew-mouth {
+  0%,
+  100% {
+    transform: translateY(0) scale(1.05, 0.2);
+  }
+  18% {
+    transform: translateY(-1px) scale(1.08, 1.28);
+  }
+  34% {
+    transform: translateY(1px) scale(1.16, 0.18);
+  }
+  56% {
+    transform: translateY(-2px) scale(1.05, 1.38);
+  }
+  76% {
+    transform: translateY(1px) scale(1.12, 0.24);
+  }
+}
+
+@keyframes frog-chew-cheeks {
+  0%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+  45% {
+    transform: translateY(3px) scale(1.12, 0.9);
+  }
+}
+
+@keyframes frog-chew-eyes {
+  0%,
+  100% {
+    transform: translateY(0) scaleY(1);
+  }
+  35% {
+    transform: translateY(1px) scaleY(0.92);
+  }
+  70% {
+    transform: translateY(-1px) scaleY(1.04);
   }
 }
 
