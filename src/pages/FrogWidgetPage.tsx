@@ -1,5 +1,6 @@
 import { Check, Clipboard, FileDown, Loader2, RotateCcw, Settings2 } from 'lucide-react';
 import { type ClipboardEvent, type DragEvent, type PointerEvent, useEffect, useRef, useState } from 'react';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { createRawAssetFromFile, processNextRawAsset, resetStaleRawAssets } from '@/lib/rawAssets';
 import { isSupportedImportFile } from '@/lib/import/fileText';
@@ -206,7 +207,13 @@ export function FrogWidgetPage() {
   }
 
   function handlePointerDown(event: PointerEvent<HTMLElement>) {
-    if ((event.target as HTMLElement).closest('button,input')) return;
+    if ((event.target as HTMLElement).closest('a,button,input,label')) return;
+
+    if (isTauriRuntime()) {
+      void getCurrentWindow().startDragging().catch(() => undefined);
+      return;
+    }
+
     const startX = event.clientX;
     const startY = event.clientY;
     const startPosition = position;
@@ -417,6 +424,10 @@ function mimeExtension(mimeType: string) {
 }
 
 function loadPosition(): WidgetPosition {
+  if (isTauriRuntime()) {
+    return { x: 16, y: 16 };
+  }
+
   try {
     const parsed = JSON.parse(localStorage.getItem(FROG_POSITION_KEY) ?? '') as WidgetPosition;
     if (Number.isFinite(parsed.x) && Number.isFinite(parsed.y)) {
@@ -429,6 +440,10 @@ function loadPosition(): WidgetPosition {
     // Ignore invalid saved positions.
   }
   return { x: Math.max(16, window.innerWidth - 360), y: Math.max(16, window.innerHeight - 390) };
+}
+
+function isTauriRuntime() {
+  return typeof window !== 'undefined' && Reflect.has(window, '__TAURI_INTERNALS__');
 }
 
 function loadBoolean(key: string, fallback: boolean) {

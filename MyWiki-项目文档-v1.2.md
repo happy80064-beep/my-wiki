@@ -684,8 +684,11 @@ MVP 形态：
 - 记住悬浮位置和自动消化设置，减少重复操作成本。
 
 桌面化路线：
-- Tauri 阶段把 `/frog` 承载到透明、无边框、always-on-top 小窗口中。
-- 系统托盘负责显示/隐藏，后续再补全局快捷键、右键菜单和“拖到青蛙嘴里即收件”的桌面级体验。
+- Tauri 阶段把 `/frog` 承载到透明、无边框、always-on-top 小窗口中，同时保留 MyWiki 主窗口。
+- 系统托盘负责显示主窗口、显示/隐藏捕获蛙、退出应用；左键可快速切换捕获蛙显示状态。
+- 桌面壳优先实现常驻、置顶、显示/隐藏、位置记忆和 Raw Inbox 收件，不提前堆复杂角色动画资源。
+- Windows 本地开发/打包需要 WebView2 与 Visual Studio Build Tools 的 MSVC / Windows SDK 组件；前端可先独立验证，桌面壳启动需原生编译链完整。
+- 后续再补全局快捷键、右键菜单和“拖到青蛙嘴里即收件”的桌面级体验。
 - 桌面悬窗只做本地采集入口，不直接读取第三方聊天数据库，不绕过 Raw Inbox 和用户确认机制。
 
 ---
@@ -933,6 +936,7 @@ AI 查询时，相关节点和路径在图中点亮，其他节点淡化——�
       query.ts          # 查询时的处理流程
       utils.ts          # JSON 防御性解析
     /graph              # 图遍历查询逻辑
+  /src-tauri            # Tauri 桌面壳：主窗口、Froggy 透明置顶窗口、系统托盘
       filter.ts         # 按关系过滤
       traverse.ts       # 多跳查询
   /types                # TypeScript 类型
@@ -1693,6 +1697,7 @@ v1.2 · 2025-04-28
 基于产品负责人与 AI 共创讨论，并参考 Karpathy LLM Wiki 模式。
 
 变更记录：
+- v1.2 补充：Froggy Capture 阶段 3 桌面化开始落地，引入 Tauri v2 桌面壳、MyWiki 主窗口、透明置顶 Froggy 窗口、系统托盘显示/隐藏入口和桌面脚本
 - v1.2 补充：Raw Inbox 与 Froggy Capture 增加 CSV/Excel/表格、网页 HTML 采集与编译解析支持，延续 Karpathy raw-first 思路，入口尽量不要求用户先做格式转换
 - v1.2 补充：新增 Froggy Capture 拟物化捕获入口路线，并落地 `/frog` Web Widget MVP；支持拖拽文件、粘贴图片/文本、Raw Inbox 先收件、自动消化开关、进度反馈和位置记忆，为后续 Tauri 常驻透明悬窗打基础
 - v1.2 补充：指标查询新增未知维度安全失败和同句多数字邻近选择规则；例如材料中没有“智算中心”时不得套用住宅/文旅/医疗面积，文旅面积应优先采用距离“文旅”最近的数值
