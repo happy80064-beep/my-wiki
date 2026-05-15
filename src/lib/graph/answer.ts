@@ -91,11 +91,12 @@ export function taskSource(task: Task): QuerySource {
 }
 
 export function entrySource(entry: Entry): QuerySource {
+  const title = entry.fileMetadata?.filename ?? (entry.content.length > 28 ? `${entry.content.slice(0, 28)}...` : entry.content);
   return {
     type: 'entry',
     id: entry.id,
-    title: entry.content.length > 28 ? `${entry.content.slice(0, 28)}...` : entry.content,
-    href: `/entries/${entry.id}`,
+    title,
+    href: `/wiki?source=${encodeURIComponent(entry.fileMetadata?.filename ?? entry.id)}`,
   };
 }
 

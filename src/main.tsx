@@ -8,8 +8,10 @@ import { EntityPage } from './pages/EntityPage';
 import { EntryPage } from './pages/EntryPage';
 import { FrogWidgetPage } from './pages/FrogWidgetPage';
 import { GraphPage } from './pages/GraphPage';
+import { LintPage } from './pages/LintPage';
 import { QueryPage } from './pages/QueryPage';
 import { ReviewsPage } from './pages/ReviewsPage';
+import { SettingsPage } from './pages/SettingsPage';
 import { WikiPage } from './pages/WikiPage';
 import './styles.css';
 
@@ -29,7 +31,9 @@ const router = createBrowserRouter([
       { path: 'wiki/:type/:id', element: <EntityPage /> },
       { path: 'graph', element: <GraphPage /> },
       { path: 'reviews', element: <ReviewsPage /> },
+      { path: 'lint', element: <LintPage /> },
       { path: 'query', element: <QueryPage /> },
+      { path: 'settings', element: <SettingsPage /> },
     ],
   },
 ]);

@@ -3,6 +3,11 @@ import { loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import { fileURLToPath, URL } from 'node:url';
+import { spawn } from 'node:child_process';
+import { createReadStream } from 'node:fs';
+import { mkdir, mkdtemp, readdir, readFile as readNodeFile, rm, stat, writeFile as writeNodeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { buildMiniMaxCapturePrompt, normalizeMiniMaxCaptureResponse } from './src/lib/ai/minimaxCapture';
 import { buildQueryComposePrompt, type QueryComposePayload } from './src/lib/ai/queryComposer';
 import {
@@ -11,15 +16,45 @@ import {
   type QueryPlanRequest,
 } from './src/lib/ai/queryPlanner';
 import {
+  buildWikiMarkdownCompilePrompt,
+  normalizeWikiMarkdownCompileResult,
+  type WikiMarkdownCompileInput,
+} from './src/lib/wiki/markdownCompiler';
+import {
+  buildQueryAnswerPrompt,
+  normalizeQueryAnswerResponse,
+  type QueryAnswerRequest,
+} from './src/lib/query/queryAnswer';
+import {
+  buildSemanticWikiLintPrompt,
+  normalizeSemanticWikiLintResponse,
+  type SemanticWikiLintPayload,
+} from './src/lib/wiki/lint';
+import { validateLlmProviderConfig, type LlmProviderConfig } from './src/lib/llm/providers';
+import {
+  anthropicCompatibleRequiresBearerAuth,
+  buildAnthropicMessagesUrl,
+  buildGeminiGenerateContentUrl,
+  buildOpenAiChatCompletionsUrl,
+  buildProviderTextRequest,
+} from './src/lib/llm/textProvider';
+import {
   buildCaptureAnalysisPrompt,
+  buildCaptureAnalysisJsonRepairPrompt,
   buildCaptureDigestPrompt,
+  buildCaptureSourceForStructuredProcessing,
+  buildStructuredCaptureExcerpt,
   buildWikiPatchPrompt,
+  buildWikiPatchJsonRepairPrompt,
+  normalizeCaptureAnalysisToCaptureDraft,
   normalizeCaptureAnalysis,
   normalizeWikiPatchesToCaptureDraft,
   normalizeWikiPatchResponse,
   shouldUseCaptureDigest,
   splitCaptureContentIntoChunks,
 } from './src/lib/ai/wikiPatch';
+
+const STRUCTURED_JSON_MAX_TOKENS = 8000;
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
@@ -31,12 +66,155 @@ export default defineConfig(({ mode }) => {
   const deepseekBaseUrl = (env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com').replace(/\/$/, '');
 
   return {
+    publicDir: false,
     plugins: [
       react(),
       tailwindcss(),
       {
         name: 'mywiki-minimax-api',
         configureServer(server) {
+          server.middlewares.use('/restore/mywiki-restore-payload.json', async (req, res, next) => {
+            if (req.method !== 'GET') {
+              next();
+              return;
+            }
+
+            const restorePayloadPath = path.resolve(process.cwd(), 'public/restore/mywiki-restore-payload.json');
+            try {
+              const fileStat = await stat(restorePayloadPath);
+              res.statusCode = 200;
+              res.setHeader('Content-Type', 'application/json; charset=utf-8');
+              res.setHeader('Content-Length', String(fileStat.size));
+              createReadStream(restorePayloadPath).pipe(res);
+            } catch {
+              sendJson(res, 404, { error: 'Restore payload not found.' });
+            }
+          });
+
+          server.middlewares.use('/api/workspace/default-root', async (req, res) => {
+            if (req.method !== 'GET') {
+              sendJson(res, 405, { error: 'Method not allowed' });
+              return;
+            }
+
+            sendJson(res, 200, normalizeDevFsPath(env.MYWIKI_WORKSPACE_ROOT || path.resolve(process.cwd(), 'LDJ-Wiki')));
+          });
+
+          server.middlewares.use('/api/workspace/ensure-dir', async (req, res) => {
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { error: 'Method not allowed' });
+              return;
+            }
+
+            try {
+              const body = (await readJsonBody(req)) as { path?: string };
+              await mkdir(requireDevFsPath(body.path, 'path'), { recursive: true });
+              sendJson(res, 200, undefined);
+            } catch (error) {
+              sendJson(res, 500, { error: error instanceof Error ? error.message : 'Failed to create directory.' });
+            }
+          });
+
+          server.middlewares.use('/api/workspace/exists', async (req, res) => {
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { error: 'Method not allowed' });
+              return;
+            }
+
+            try {
+              const body = (await readJsonBody(req)) as { path?: string };
+              const target = requireDevFsPath(body.path, 'path');
+              await stat(target);
+              sendJson(res, 200, true);
+            } catch {
+              sendJson(res, 200, false);
+            }
+          });
+
+          server.middlewares.use('/api/workspace/write-text-file', async (req, res) => {
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { error: 'Method not allowed' });
+              return;
+            }
+
+            try {
+              const body = (await readJsonBody(req)) as { path?: string; content?: string };
+              const target = requireDevFsPath(body.path, 'path');
+              const content = typeof body.content === 'string' ? body.content : '';
+              await mkdir(path.dirname(target), { recursive: true });
+              await writeNodeFile(target, content, 'utf8');
+              sendJson(res, 200, undefined);
+            } catch (error) {
+              sendJson(res, 500, { error: error instanceof Error ? error.message : 'Failed to write file.' });
+            }
+          });
+
+          server.middlewares.use('/api/workspace/read-text-file', async (req, res) => {
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { error: 'Method not allowed' });
+              return;
+            }
+
+            try {
+              const body = (await readJsonBody(req)) as { path?: string };
+              const content = await readNodeFile(requireDevFsPath(body.path, 'path'), 'utf8');
+              sendJson(res, 200, content);
+            } catch (error) {
+              sendJson(res, 500, { error: error instanceof Error ? error.message : 'Failed to read file.' });
+            }
+          });
+
+          server.middlewares.use('/api/workspace/list-markdown-files', async (req, res) => {
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { error: 'Method not allowed' });
+              return;
+            }
+
+            try {
+              const body = (await readJsonBody(req)) as { root?: string };
+              const files = await collectDevWorkspaceFiles(requireDevFsPath(body.root, 'root'), (filePath) =>
+                filePath.toLowerCase().endsWith('.md'),
+              );
+              sendJson(res, 200, files);
+            } catch (error) {
+              sendJson(res, 500, { error: error instanceof Error ? error.message : 'Failed to list markdown files.' });
+            }
+          });
+
+          server.middlewares.use('/api/workspace/list-files', async (req, res) => {
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { error: 'Method not allowed' });
+              return;
+            }
+
+            try {
+              const body = (await readJsonBody(req)) as { root?: string };
+              const files = await collectDevWorkspaceFiles(requireDevFsPath(body.root, 'root'));
+              sendJson(res, 200, files);
+            } catch (error) {
+              sendJson(res, 500, { error: error instanceof Error ? error.message : 'Failed to list files.' });
+            }
+          });
+
+          server.middlewares.use('/api/workspace/delete-path', async (req, res) => {
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { error: 'Method not allowed' });
+              return;
+            }
+
+            try {
+              const body = (await readJsonBody(req)) as { root?: string; path?: string };
+              const root = requireDevFsPath(body.root, 'root');
+              const target = requireDevFsPath(body.path, 'path');
+              if (target === root) throw new Error('Refusing to delete the workspace root.');
+              if (!isDevPathInside(root, target)) throw new Error('Refusing to delete a path outside the active workspace.');
+              await rm(target, { recursive: true, force: true });
+              sendJson(res, 200, undefined);
+            } catch (error) {
+              sendJson(res, 500, { error: error instanceof Error ? error.message : 'Failed to delete path.' });
+            }
+          });
+
           server.middlewares.use('/api/capture/extract', async (req, res) => {
             if (req.method !== 'POST') {
               sendJson(res, 405, { error: 'Method not allowed' });
@@ -70,6 +248,7 @@ export default defineConfig(({ mode }) => {
                     draft: assertUsableDraft(minimaxResult.draft, 'MiniMax'),
                     provider: 'minimax',
                     model: minimaxModel,
+                    fallbackFrom: minimaxResult.fallbackFrom,
                     mode: 'two-step',
                   });
                   return;
@@ -191,6 +370,222 @@ export default defineConfig(({ mode }) => {
             }
           });
 
+          server.middlewares.use('/api/vision/caption', async (req, res) => {
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { error: 'Method not allowed' });
+              return;
+            }
+
+            try {
+              const payload = (await readJsonBody(req)) as {
+                imageBase64?: string;
+                mimeType?: string;
+                filename?: string;
+                ocrText?: string;
+                providerConfig?: LlmProviderConfig | null;
+              };
+              if (!payload.imageBase64?.trim() || !payload.mimeType?.trim()) {
+                sendJson(res, 400, { error: 'imageBase64 and mimeType are required.' });
+                return;
+              }
+              const providerConfig = normalizeRequestProviderConfig(payload.providerConfig);
+              if (!providerConfig) {
+                sendJson(res, 400, { error: 'Vision provider is not configured.' });
+                return;
+              }
+
+              const result = await requestConfiguredProviderVision({
+                config: providerConfig,
+                imageBase64: payload.imageBase64,
+                mimeType: payload.mimeType,
+                filename: payload.filename,
+                ocrText: payload.ocrText,
+              });
+              if (!result.ok) {
+                sendJson(res, 502, { error: `${result.providerName} failed: ${result.error}` });
+                return;
+              }
+              sendJson(res, 200, {
+                caption: normalizeCaption(result.text),
+                provider: result.providerName,
+                model: result.model,
+              });
+            } catch (error) {
+              sendJson(res, 500, {
+                error: error instanceof Error ? error.message : 'Vision caption failed.',
+              });
+            }
+          });
+
+          server.middlewares.use('/api/research/search', async (req, res) => {
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { error: 'Method not allowed' });
+              return;
+            }
+
+            try {
+              const payload = (await readJsonBody(req)) as {
+                topic?: string;
+                searchQueries?: string[];
+                searchConfig?: { provider?: string; apiKey?: string; maxResults?: number };
+              };
+              const topic = payload.topic?.trim();
+              if (!topic) {
+                sendJson(res, 400, { error: 'topic is required.' });
+                return;
+              }
+              const searchConfig = payload.searchConfig;
+              if (searchConfig?.provider !== 'tavily' || !searchConfig.apiKey?.trim()) {
+                sendJson(res, 400, { error: 'Tavily API key is required for deep research.' });
+                return;
+              }
+
+              const queries = uniqueStrings(
+                (payload.searchQueries?.length ? payload.searchQueries : [topic])
+                  .map((query) => query.trim())
+                  .filter(Boolean),
+              ).slice(0, 4);
+              const maxResults = Math.min(10, Math.max(1, Number(searchConfig.maxResults) || 5));
+              const webResults = await runTavilySearches(queries, searchConfig.apiKey, maxResults);
+
+              sendJson(res, 200, { webResults });
+            } catch (error) {
+              sendJson(res, 500, {
+                error: error instanceof Error ? error.message : 'Deep research search failed.',
+              });
+            }
+          });
+
+          server.middlewares.use('/api/research/synthesize', async (req, res) => {
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { error: 'Method not allowed' });
+              return;
+            }
+
+            try {
+              const payload = (await readJsonBody(req)) as {
+                topic?: string;
+                webResults?: DevWebSearchResult[];
+                providerConfig?: LlmProviderConfig | null;
+              };
+              const topic = payload.topic?.trim();
+              if (!topic) {
+                sendJson(res, 400, { error: 'topic is required.' });
+                return;
+              }
+
+              const webResults = Array.isArray(payload.webResults) ? payload.webResults : [];
+              if (webResults.length === 0) {
+                sendJson(res, 200, {
+                  synthesis: buildNoWebResultsSynthesis(topic),
+                  provider: '',
+                  model: '',
+                });
+                return;
+              }
+
+              const providerConfig = normalizeRequestProviderConfig(payload.providerConfig);
+              if (!providerConfig) {
+                sendJson(res, 400, { error: 'Deep research LLM provider is not configured.' });
+                return;
+              }
+
+              const providerResult = await requestConfiguredProviderText({
+                config: providerConfig,
+                prompt: buildDeepResearchPrompt(topic, webResults),
+                systemPrompt:
+                  'You are MyWiki Deep Research. Synthesize web search results into a concise, cited Chinese wiki research note. Do not reveal chain-of-thought.',
+                maxTokens: 3600,
+              });
+              if (!providerResult.ok) {
+                sendJson(res, 502, { error: `${providerResult.providerName} failed: ${providerResult.error}` });
+                return;
+              }
+
+              sendJson(res, 200, {
+                synthesis: stripThinking(providerResult.text),
+                provider: providerResult.providerName,
+                model: providerResult.model,
+              });
+            } catch (error) {
+              sendJson(res, 500, {
+                error: error instanceof Error ? error.message : 'Deep research synthesis failed.',
+              });
+            }
+          });
+
+          server.middlewares.use('/api/research/run', async (req, res) => {
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { error: 'Method not allowed' });
+              return;
+            }
+
+            try {
+              const payload = (await readJsonBody(req)) as {
+                topic?: string;
+                searchQueries?: string[];
+                searchConfig?: { provider?: string; apiKey?: string; maxResults?: number };
+                providerConfig?: LlmProviderConfig | null;
+              };
+              const topic = payload.topic?.trim();
+              if (!topic) {
+                sendJson(res, 400, { error: 'topic is required.' });
+                return;
+              }
+              const providerConfig = normalizeRequestProviderConfig(payload.providerConfig);
+              if (!providerConfig) {
+                sendJson(res, 400, { error: 'Deep research LLM provider is not configured.' });
+                return;
+              }
+              const searchConfig = payload.searchConfig;
+              if (searchConfig?.provider !== 'tavily' || !searchConfig.apiKey?.trim()) {
+                sendJson(res, 400, { error: 'Tavily API key is required for deep research.' });
+                return;
+              }
+
+              const queries = uniqueStrings(
+                (payload.searchQueries?.length ? payload.searchQueries : [topic])
+                  .map((query) => query.trim())
+                  .filter(Boolean),
+              ).slice(0, 4);
+              const maxResults = Math.min(10, Math.max(1, Number(searchConfig.maxResults) || 5));
+              const webResults = await runTavilySearches(queries, searchConfig.apiKey, maxResults);
+              if (webResults.length === 0) {
+                sendJson(res, 200, {
+                  webResults: [],
+                  synthesis: `# ${topic}\n\n没有检索到可用的外部来源。建议换一个更具体的主题或检查 Tavily 配置。`,
+                  provider: providerConfig.providerId,
+                  model: providerConfig.model,
+                });
+                return;
+              }
+
+              const prompt = buildDeepResearchPrompt(topic, webResults);
+              const providerResult = await requestConfiguredProviderText({
+                config: providerConfig,
+                prompt,
+                systemPrompt:
+                  'You are MyWiki Deep Research. Synthesize web search results into a concise, cited Chinese wiki research note. Do not reveal chain-of-thought.',
+                maxTokens: 3600,
+              });
+              if (!providerResult.ok) {
+                sendJson(res, 502, { error: `${providerResult.providerName} failed: ${providerResult.error}` });
+                return;
+              }
+
+              sendJson(res, 200, {
+                webResults,
+                synthesis: stripThinking(providerResult.text),
+                provider: providerResult.providerName,
+                model: providerResult.model,
+              });
+            } catch (error) {
+              sendJson(res, 500, {
+                error: error instanceof Error ? error.message : 'Deep research failed.',
+              });
+            }
+          });
+
           server.middlewares.use('/api/query/compose', async (req, res) => {
             if (req.method !== 'POST') {
               sendJson(res, 405, { error: 'Method not allowed' });
@@ -267,6 +662,244 @@ export default defineConfig(({ mode }) => {
             }
           });
 
+          server.middlewares.use('/api/query/answer', async (req, res) => {
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { error: 'Method not allowed' });
+              return;
+            }
+
+            try {
+              const payload = (await readJsonBody(req)) as QueryAnswerRequest & {
+                providerConfig?: LlmProviderConfig | null;
+              };
+              if (!payload.question?.trim() || !Array.isArray(payload.pages) || payload.pages.length === 0) {
+                sendJson(res, 400, { error: 'question and pages are required.' });
+                return;
+              }
+
+              const requestProviderConfig = normalizeRequestProviderConfig(payload.providerConfig);
+              if (!requestProviderConfig && !minimaxApiKey) {
+                sendJson(res, 500, { error: 'MINIMAX_API_KEY is not configured.' });
+                return;
+              }
+
+              const prompt = buildQueryAnswerPrompt(payload);
+              const systemPrompt =
+                '你是 MyWiki Query 2.0 的中文 Wiki 对话分析助手。请基于给定的编号 Wiki 页面进行高质量 Markdown 回答，禁止输出 <think>、思考过程或 JSON。必须在末尾追加一个形如 <!-- cited: 1,2 --> 的 HTML 注释。';
+
+              if (requestProviderConfig) {
+                const providerResult = await requestConfiguredProviderText({
+                  config: requestProviderConfig,
+                  prompt,
+                  systemPrompt,
+                  maxTokens: 3600,
+                });
+
+                if (!providerResult.ok) {
+                  sendJson(res, 502, { error: `${providerResult.providerName} failed: ${providerResult.error}` });
+                  return;
+                }
+
+                const normalized = normalizeQueryAnswerResponse(
+                  providerResult.text,
+                  payload.structuredSupport?.draftAnswer || '现有 Wiki 页面还不能可靠回答这个问题。',
+                );
+                sendJson(res, 200, {
+                  ...normalized,
+                  provider: providerResult.providerName,
+                  model: providerResult.model,
+                });
+                return;
+              }
+
+              const minimaxResult = await requestOpenAiCompatibleText({
+                apiKey: minimaxApiKey,
+                baseUrl: minimaxBaseUrl,
+                model: minimaxModel,
+                providerName: 'MiniMax',
+                prompt,
+                systemPrompt,
+                maxTokens: 3600,
+              });
+
+              if (!minimaxResult.ok) {
+                sendJson(res, 502, { error: `MiniMax failed: ${minimaxResult.error}` });
+                return;
+              }
+
+              const normalized = normalizeQueryAnswerResponse(
+                minimaxResult.text,
+                payload.structuredSupport?.draftAnswer || '现有 Wiki 页面还不能可靠回答这个问题。',
+              );
+              sendJson(res, 200, {
+                ...normalized,
+                provider: 'minimax',
+                model: minimaxModel,
+              });
+            } catch (error) {
+              sendJson(res, 500, {
+                error: error instanceof Error ? error.message : 'Query answer generation failed.',
+              });
+            }
+          });
+
+          server.middlewares.use('/api/wiki/lint/semantic', async (req, res) => {
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { error: 'Method not allowed' });
+              return;
+            }
+
+            try {
+              const payload = (await readJsonBody(req)) as SemanticWikiLintPayload & {
+                providerConfig?: LlmProviderConfig | null;
+              };
+              if (!Array.isArray(payload.pages) || payload.pages.length === 0) {
+                sendJson(res, 400, { error: 'pages are required.' });
+                return;
+              }
+
+              const requestProviderConfig = normalizeRequestProviderConfig(payload.providerConfig);
+              if (!requestProviderConfig && !minimaxApiKey) {
+                sendJson(res, 500, { error: 'MINIMAX_API_KEY is not configured.' });
+                return;
+              }
+
+              const prompt = buildSemanticWikiLintPrompt({
+                pages: payload.pages.slice(0, 80),
+                contextMap: payload.contextMap,
+                outputLanguage: payload.outputLanguage ?? 'zh-CN',
+              });
+              const systemPrompt =
+                'You are MyWiki Wiki Lint. Return only strict ---LINT--- blocks. Do not include markdown fences, JSON, or chain-of-thought.';
+
+              if (requestProviderConfig) {
+                const providerResult = await requestConfiguredProviderText({
+                  config: requestProviderConfig,
+                  prompt,
+                  systemPrompt,
+                  maxTokens: 2600,
+                });
+
+                if (!providerResult.ok) {
+                  sendJson(res, 502, { error: `${providerResult.providerName} failed: ${providerResult.error}` });
+                  return;
+                }
+
+                sendJson(res, 200, {
+                  results: normalizeSemanticWikiLintResponse(providerResult.text),
+                  provider: providerResult.providerName,
+                  model: providerResult.model,
+                });
+                return;
+              }
+
+              const minimaxResult = await requestOpenAiCompatibleText({
+                apiKey: minimaxApiKey,
+                baseUrl: minimaxBaseUrl,
+                model: minimaxModel,
+                providerName: 'MiniMax',
+                prompt,
+                systemPrompt,
+                maxTokens: 2600,
+              });
+
+              if (!minimaxResult.ok) {
+                sendJson(res, 502, { error: `MiniMax failed: ${minimaxResult.error}` });
+                return;
+              }
+
+              sendJson(res, 200, {
+                results: normalizeSemanticWikiLintResponse(minimaxResult.text),
+                provider: 'minimax',
+                model: minimaxModel,
+              });
+            } catch (error) {
+              sendJson(res, 500, {
+                error: error instanceof Error ? error.message : 'Wiki semantic lint failed.',
+              });
+            }
+          });
+
+          server.middlewares.use('/api/wiki/recompile', async (req, res) => {
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { error: 'Method not allowed' });
+              return;
+            }
+
+            try {
+              const payload = (await readJsonBody(req)) as WikiMarkdownCompileInput & {
+                providerConfig?: LlmProviderConfig | null;
+              };
+              if (!payload.entity?.title) {
+                sendJson(res, 400, { error: 'entity is required.' });
+                return;
+              }
+
+              const requestProviderConfig = normalizeRequestProviderConfig(payload.providerConfig);
+              if (!requestProviderConfig && !minimaxApiKey) {
+                sendJson(res, 500, { error: 'MINIMAX_API_KEY is not configured.' });
+                return;
+              }
+
+              const today = new Date().toISOString().slice(0, 10);
+              const prompt = buildWikiMarkdownCompilePrompt({ ...payload, today });
+              const strictFileBlockSystemPrompt =
+                '你是 MyWiki v2 的中文 Wiki 编译 Agent。完整回复必须且只能是一个 ---FILE: wiki/...--- 到 ---END FILE--- 的 FILE block。第一字符必须是 -。严禁输出 <think>、思考过程、分析过程、任务复述或任何 FILE block 外说明。';
+              if (requestProviderConfig) {
+                const providerResult = await requestConfiguredProviderText({
+                  config: requestProviderConfig,
+                  prompt,
+                  systemPrompt: strictFileBlockSystemPrompt,
+                  maxTokens: 4200,
+                });
+
+                if (!providerResult.ok) {
+                  sendJson(res, 502, { error: `${providerResult.providerName} failed: ${providerResult.error}` });
+                  return;
+                }
+
+                const normalized = normalizeWikiMarkdownCompileResult(providerResult.text, payload.entity, today, {
+                  requireFileBlock: true,
+                });
+                sendJson(res, 200, {
+                  ...normalized,
+                  provider: providerResult.providerName,
+                  model: providerResult.model,
+                });
+                return;
+              }
+
+              const minimaxResult = await requestOpenAiCompatibleText({
+                apiKey: minimaxApiKey,
+                baseUrl: minimaxBaseUrl,
+                model: minimaxModel,
+                providerName: 'MiniMax',
+                prompt,
+                systemPrompt:
+                  '你是 MyWiki v2 的中文 Wiki 编译 Agent。你的完整回复必须且只能是一个 ---FILE: wiki/...--- 到 ---END FILE--- 的 FILE block。第一字符必须是 -。严禁输出 <think>、思考过程、分析过程、任务复述或任何 FILE block 外说明。',
+                maxTokens: 4200,
+              });
+
+              if (!minimaxResult.ok) {
+                sendJson(res, 502, { error: `MiniMax failed: ${minimaxResult.error}` });
+                return;
+              }
+
+              const normalized = normalizeWikiMarkdownCompileResult(minimaxResult.text, payload.entity, today, {
+                requireFileBlock: true,
+              });
+              sendJson(res, 200, {
+                ...normalized,
+                provider: 'minimax',
+                model: minimaxModel,
+              });
+            } catch (error) {
+              sendJson(res, 500, {
+                error: error instanceof Error ? error.message : 'Wiki recompilation failed.',
+              });
+            }
+          });
+
           server.middlewares.use('/api/query/plan', async (req, res) => {
             if (req.method !== 'POST') {
               sendJson(res, 405, { error: 'Method not allowed' });
@@ -289,7 +922,7 @@ export default defineConfig(({ mode }) => {
                     providerName: 'MiniMax',
                     prompt,
                     systemPrompt: '你是 MyWiki Query Agent。只输出符合 schema 的 JSON 对象。',
-                    maxTokens: 1200,
+                    maxTokens: STRUCTURED_JSON_MAX_TOKENS,
                     extraBody: { response_format: { type: 'json_object' } },
                   })
                 : { ok: false as const, error: 'MINIMAX_API_KEY is not configured.' };
@@ -443,7 +1076,10 @@ async function requestOpenAiCompatibleTwoStepCapture({
   content: string;
   entityIndex: unknown[];
   extraBody?: Record<string, unknown>;
-}): Promise<{ ok: true; draft: ReturnType<typeof normalizeWikiPatchesToCaptureDraft> } | { ok: false; error: string }> {
+}): Promise<
+  | { ok: true; draft: ReturnType<typeof normalizeWikiPatchesToCaptureDraft>; fallbackFrom?: string }
+  | { ok: false; error: string }
+> {
   try {
     const structuredContentResult = await prepareContentForStructuredCapture({
       apiKey,
@@ -457,20 +1093,30 @@ async function requestOpenAiCompatibleTwoStepCapture({
     if (!structuredContentResult.ok) return structuredContentResult;
     const structuredContent = structuredContentResult.content;
 
+    const entityIndexJson = JSON.stringify(entityIndex.slice(0, 120), null, 2);
     const analysisResult = await requestOpenAiCompatibleText({
       apiKey,
       baseUrl,
       model,
       providerName,
-      prompt: buildCaptureAnalysisPrompt(structuredContent, JSON.stringify(entityIndex.slice(0, 120), null, 2)),
+      prompt: buildCaptureAnalysisPrompt(structuredContent, entityIndexJson),
       systemPrompt: '你是 MyWiki 摄入分析 Agent。只输出符合 schema 的 JSON 对象。',
-      maxTokens: 2200,
+      maxTokens: STRUCTURED_JSON_MAX_TOKENS,
       extraBody,
     });
 
     if (!analysisResult.ok) return analysisResult;
 
-    const analysis = normalizeCaptureAnalysis(analysisResult.text);
+    const analysis = await normalizeCaptureAnalysisWithOpenAiRepair({
+      apiKey,
+      baseUrl,
+      model,
+      providerName,
+      structuredContent,
+      entityIndexJson,
+      rawText: analysisResult.text,
+      extraBody,
+    });
     const patchResult = await requestOpenAiCompatibleText({
       apiKey,
       baseUrl,
@@ -478,15 +1124,43 @@ async function requestOpenAiCompatibleTwoStepCapture({
       providerName,
       prompt: buildWikiPatchPrompt(structuredContent, analysis),
       systemPrompt: '你是 MyWiki WikiPatch 生成 Agent。只输出 JSON 对象。',
-      maxTokens: 2600,
+      maxTokens: STRUCTURED_JSON_MAX_TOKENS,
       extraBody,
     });
 
-    if (!patchResult.ok) return patchResult;
+    if (!patchResult.ok) {
+      return {
+        ok: true,
+        draft: normalizeCaptureAnalysisToCaptureDraft(analysis, structuredContent),
+        fallbackFrom: `${providerName} generation failed: ${patchResult.error}`,
+      };
+    }
 
-    const patches = normalizeWikiPatchResponse(patchResult.text);
+    let patches: ReturnType<typeof normalizeWikiPatchResponse>;
+    try {
+      patches = await normalizeWikiPatchResponseWithOpenAiRepair({
+        apiKey,
+        baseUrl,
+        model,
+        providerName,
+        structuredContent,
+        analysis,
+        rawText: patchResult.text,
+        extraBody,
+      });
+    } catch (error) {
+      return {
+        ok: true,
+        draft: normalizeCaptureAnalysisToCaptureDraft(analysis, structuredContent),
+        fallbackFrom: error instanceof Error ? error.message : `${providerName} returned invalid WikiPatch JSON.`,
+      };
+    }
     if (patches.length === 0) {
-      return { ok: false, error: `${providerName} did not return usable WikiPatch items.` };
+      return {
+        ok: true,
+        draft: normalizeCaptureAnalysisToCaptureDraft(analysis, structuredContent),
+        fallbackFrom: `${providerName} 没有返回可用的 WikiPatch 条目。`,
+      };
     }
 
     return { ok: true, draft: normalizeWikiPatchesToCaptureDraft(patches, structuredContent) };
@@ -496,6 +1170,102 @@ async function requestOpenAiCompatibleTwoStepCapture({
       error: error instanceof Error ? error.message : `${providerName} two-step capture failed.`,
     };
   }
+}
+
+async function normalizeCaptureAnalysisWithOpenAiRepair({
+  apiKey,
+  baseUrl,
+  model,
+  providerName,
+  structuredContent,
+  entityIndexJson,
+  rawText,
+  extraBody,
+}: {
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  providerName: string;
+  structuredContent: string;
+  entityIndexJson: string;
+  rawText: string;
+  extraBody?: Record<string, unknown>;
+}) {
+  try {
+    return normalizeCaptureAnalysis(rawText);
+  } catch (firstError) {
+    const repairResult = await requestOpenAiCompatibleText({
+      apiKey,
+      baseUrl,
+      model,
+      providerName,
+      prompt: buildCaptureAnalysisJsonRepairPrompt(rawText, structuredContent, entityIndexJson),
+      systemPrompt: '你是 MyWiki JSON 修复 Agent。只输出一个合法 JSON 对象，不要 Markdown。',
+      maxTokens: STRUCTURED_JSON_MAX_TOKENS,
+      extraBody,
+    });
+    if (!repairResult.ok) {
+      throw new Error(`模型返回的摄入分析 JSON 不合法，自动修复请求失败：${repairResult.error}`);
+    }
+
+    try {
+      return normalizeCaptureAnalysis(repairResult.text);
+    } catch (secondError) {
+      throw new Error(
+        `模型返回的摄入分析 JSON 不合法，自动修复后仍失败：${formatJsonRepairError(secondError, firstError)}`,
+      );
+    }
+  }
+}
+
+async function normalizeWikiPatchResponseWithOpenAiRepair({
+  apiKey,
+  baseUrl,
+  model,
+  providerName,
+  structuredContent,
+  analysis,
+  rawText,
+  extraBody,
+}: {
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  providerName: string;
+  structuredContent: string;
+  analysis: Parameters<typeof buildWikiPatchPrompt>[1];
+  rawText: string;
+  extraBody?: Record<string, unknown>;
+}) {
+  try {
+    return normalizeWikiPatchResponse(rawText);
+  } catch (firstError) {
+    const repairResult = await requestOpenAiCompatibleText({
+      apiKey,
+      baseUrl,
+      model,
+      providerName,
+      prompt: buildWikiPatchJsonRepairPrompt(rawText, structuredContent, analysis),
+      systemPrompt: '你是 MyWiki WikiPatch JSON 修复 Agent。只输出一个合法 JSON 对象，不要 Markdown。',
+      maxTokens: STRUCTURED_JSON_MAX_TOKENS,
+      extraBody,
+    });
+    if (!repairResult.ok) {
+      throw new Error(`模型返回的 WikiPatch JSON 不合法，自动修复请求失败：${repairResult.error}`);
+    }
+
+    try {
+      return normalizeWikiPatchResponse(repairResult.text);
+    } catch (secondError) {
+      throw new Error(`模型返回的 WikiPatch JSON 不合法，自动修复后仍失败：${formatJsonRepairError(secondError, firstError)}`);
+    }
+  }
+}
+
+function formatJsonRepairError(error: unknown, previous?: unknown) {
+  const current = error instanceof Error ? error.message : '未知错误';
+  const earlier = previous instanceof Error ? previous.message : '';
+  return earlier && earlier !== current ? `${current}；首次错误：${earlier}` : current;
 }
 
 async function prepareContentForStructuredCapture({
@@ -513,11 +1283,12 @@ async function prepareContentForStructuredCapture({
   content: string;
   extraBody?: Record<string, unknown>;
 }): Promise<{ ok: true; content: string } | { ok: false; error: string }> {
-  if (!shouldUseCaptureDigest(content)) {
-    return { ok: true, content };
+  const structuredSource = buildCaptureSourceForStructuredProcessing(content);
+  if (!shouldUseCaptureDigest(structuredSource)) {
+    return { ok: true, content: structuredSource };
   }
 
-  const chunks = splitCaptureContentIntoChunks(content);
+  const chunks = splitCaptureContentIntoChunks(structuredSource);
   const digests: string[] = [];
 
   for (let index = 0; index < chunks.length; index += 1) {
@@ -532,7 +1303,7 @@ async function prepareContentForStructuredCapture({
       extraBody: withoutJsonResponseFormat(extraBody),
     });
 
-    if (!digestResult.ok) return digestResult;
+    if (!digestResult.ok) return { ok: true, content: buildStructuredCaptureExcerpt(structuredSource) };
     digests.push(`## 分块 ${index + 1}/${chunks.length}\n\n${digestResult.text}`);
   }
 
@@ -552,6 +1323,317 @@ function withoutJsonResponseFormat(extraBody?: Record<string, unknown>) {
   if (!extraBody) return undefined;
   const { response_format: _responseFormat, ...rest } = extraBody;
   return rest;
+}
+
+function normalizeRequestProviderConfig(input: LlmProviderConfig | null | undefined): LlmProviderConfig | null {
+  if (!input) return null;
+  const config = { ...input, enabled: true };
+  const errors = validateLlmProviderConfig(config);
+  if (errors.length > 0) {
+    throw new Error(errors.join(' '));
+  }
+  return config;
+}
+
+type DevWebSearchResult = {
+  title: string;
+  url: string;
+  snippet: string;
+  source: string;
+};
+
+async function runTavilySearches(queries: string[], apiKey: string, maxResults: number): Promise<DevWebSearchResult[]> {
+  const seen = new Set<string>();
+  const merged: DevWebSearchResult[] = [];
+  for (const query of queries) {
+    const response = await fetch('https://api.tavily.com/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        api_key: apiKey,
+        query,
+        max_results: maxResults,
+        search_depth: 'advanced',
+        include_answer: false,
+      }),
+    });
+    const data = (await response.json().catch(() => ({}))) as {
+      results?: Array<{ title?: string; url?: string; content?: string }>;
+      error?: string;
+      message?: string;
+    };
+    if (!response.ok) {
+      throw new Error(data.error || data.message || `Tavily search failed with ${response.status}.`);
+    }
+    for (const item of data.results ?? []) {
+      const url = item.url?.trim();
+      if (!url || seen.has(url)) continue;
+      seen.add(url);
+      merged.push({
+        title: item.title?.trim() || 'Untitled',
+        url,
+        snippet: item.content?.trim() || '',
+        source: safeHost(url),
+      });
+    }
+  }
+  return merged.slice(0, Math.max(maxResults, 1) * Math.max(queries.length, 1));
+}
+
+function buildDeepResearchPrompt(topic: string, webResults: DevWebSearchResult[]) {
+  const sources = webResults
+    .map((result, index) => [`[${index + 1}] ${result.title}`, `URL: ${result.url}`, `摘要: ${result.snippet}`].join('\n'))
+    .join('\n\n');
+  return [
+    `研究主题：${topic}`,
+    '',
+    '请基于下面的网页搜索结果生成可写入 Wiki 的中文研究条目：',
+    '- 先给出结论摘要',
+    '- 分主题整理事实、数据、争议和未知项',
+    '- 使用 [1]、[2] 这样的编号引用来源',
+    '- 明确指出还需要补充验证的内容',
+    '- 保持中性、可复用、适合进入知识库',
+    '',
+    '## Web Search Results',
+    '',
+    sources,
+  ].join('\n');
+}
+
+function buildNoWebResultsSynthesis(topic: string) {
+  return `# ${topic}\n\n没有检索到可用的外部来源。建议换一个更具体的主题或检查 Tavily 配置。`;
+}
+
+async function requestConfiguredProviderVision({
+  config,
+  imageBase64,
+  mimeType,
+  filename,
+  ocrText,
+}: {
+  config: LlmProviderConfig;
+  imageBase64: string;
+  mimeType: string;
+  filename?: string;
+  ocrText?: string;
+}): Promise<{ ok: true; text: string; providerName: string; model: string } | { ok: false; error: string; providerName: string; model: string }> {
+  const providerName = config.providerId;
+  try {
+    const request = buildProviderVisionRequest(config, {
+      prompt: buildVisionPrompt(filename, ocrText),
+      imageBase64,
+      mimeType,
+      maxTokens: 900,
+    });
+    const response = await fetch(request.url, {
+      method: 'POST',
+      headers: request.headers,
+      body: JSON.stringify(request.body),
+    });
+    const data = (await response.json()) as unknown;
+    if (!response.ok) {
+      return {
+        ok: false,
+        error: extractProviderError(data) || `${providerName} request failed with ${response.status}.`,
+        providerName,
+        model: config.model,
+      };
+    }
+    const text = extractProviderText(data, config.apiMode);
+    if (!text) {
+      return { ok: false, error: `${providerName} returned empty content.`, providerName, model: config.model };
+    }
+    return { ok: true, text, providerName, model: config.model };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : `${providerName} vision request failed.`,
+      providerName,
+      model: config.model,
+    };
+  }
+}
+
+function buildProviderVisionRequest(
+  config: LlmProviderConfig,
+  input: { prompt: string; imageBase64: string; mimeType: string; maxTokens: number },
+) {
+  if (config.apiMode === 'anthropic-compatible') {
+    const url = buildAnthropicMessagesUrl(config.endpoint);
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (anthropicCompatibleRequiresBearerAuth(url)) {
+      headers.Authorization = `Bearer ${config.apiKey.trim()}`;
+    } else if (config.apiKey.trim()) {
+      headers['x-api-key'] = config.apiKey.trim();
+      headers['anthropic-version'] = '2023-06-01';
+    }
+    return {
+      url,
+      headers,
+      body: {
+        model: config.model,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: input.prompt },
+              {
+                type: 'image',
+                source: {
+                  type: 'base64',
+                  media_type: input.mimeType,
+                  data: input.imageBase64,
+                },
+              },
+            ],
+          },
+        ],
+        stream: false,
+        temperature: 0,
+        max_tokens: input.maxTokens,
+      },
+    };
+  }
+
+  if (config.apiMode === 'gemini-native') {
+    return {
+      url: buildGeminiGenerateContentUrl(config),
+      headers: { 'Content-Type': 'application/json' },
+      body: {
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: input.prompt },
+              { inline_data: { mime_type: input.mimeType, data: input.imageBase64 } },
+            ],
+          },
+        ],
+        generationConfig: {
+          temperature: 0,
+          maxOutputTokens: input.maxTokens,
+        },
+      },
+    };
+  }
+
+  return {
+    url: buildOpenAiChatCompletionsUrl(config.endpoint),
+    headers: {
+      'Content-Type': 'application/json',
+      ...(config.apiKey.trim() ? { Authorization: `Bearer ${config.apiKey.trim()}` } : {}),
+    },
+    body: {
+      model: config.model,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: input.prompt },
+            {
+              type: 'image_url',
+              image_url: { url: buildOpenAiVisionImageUrl(config, input) },
+            },
+          ],
+        },
+      ],
+      stream: false,
+      temperature: 0,
+      max_tokens: input.maxTokens,
+    },
+  };
+}
+
+function buildOpenAiVisionImageUrl(
+  config: LlmProviderConfig,
+  input: { imageBase64: string; mimeType: string },
+) {
+  if (config.providerId === 'zhipu') return input.imageBase64;
+  return `data:${input.mimeType};base64,${input.imageBase64}`;
+}
+
+function buildVisionPrompt(filename?: string, ocrText?: string) {
+  return [
+    '请为知识库索引客观描述这张图片。包含可见文字原文、图表坐标轴和值、结构图的框线箭头标签、关键视觉元素。',
+    '不要猜测，不要评价。输出 2 到 4 句纯文本，不要 Markdown。',
+    filename ? `文件名：${filename}` : '',
+    ocrText?.trim() ? `已有 OCR 文本，可用于校对但不要机械复述：\n${ocrText.trim().slice(0, 1200)}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+}
+
+function normalizeCaption(text: string) {
+  return stripThinking(text)
+    .replace(/```(?:text|markdown)?/g, '')
+    .replace(/```/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 1200);
+}
+
+function stripThinking(text: string) {
+  return text
+    .replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, '')
+    .replace(/<think(?:ing)?>[\s\S]*$/gi, '')
+    .trim();
+}
+
+function safeHost(url: string) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return url;
+  }
+}
+
+function uniqueStrings(values: string[]) {
+  return Array.from(new Set(values.filter(Boolean)));
+}
+
+async function requestConfiguredProviderText({
+  config,
+  prompt,
+  systemPrompt,
+  maxTokens,
+}: {
+  config: LlmProviderConfig;
+  prompt: string;
+  systemPrompt: string;
+  maxTokens: number;
+}): Promise<{ ok: true; text: string; providerName: string; model: string } | { ok: false; error: string; providerName: string; model: string }> {
+  const providerName = config.providerId;
+  try {
+    const request = buildProviderTextRequest(config, { prompt, systemPrompt, maxTokens });
+    const response = await fetch(request.url, {
+      method: 'POST',
+      headers: request.headers,
+      body: JSON.stringify(request.body),
+    });
+    const data = (await response.json()) as unknown;
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        error: extractProviderError(data) || `${providerName} request failed with ${response.status}.`,
+        providerName,
+        model: config.model,
+      };
+    }
+
+    const text = extractProviderText(data, request.responseApiMode);
+    if (!text) {
+      return { ok: false, error: `${providerName} returned empty content.`, providerName, model: config.model };
+    }
+    return { ok: true, text, providerName, model: config.model };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : `${providerName} request failed.`,
+      providerName,
+      model: config.model,
+    };
+  }
 }
 
 async function requestOpenAiCompatibleText({
@@ -625,6 +1707,42 @@ async function requestOpenAiCompatibleText({
   }
 }
 
+function extractProviderText(data: unknown, apiMode: LlmProviderConfig['apiMode']) {
+  if (!data || typeof data !== 'object') return '';
+  const payload = data as Record<string, unknown>;
+
+  if (apiMode === 'anthropic-compatible') {
+    const content = Array.isArray(payload.content) ? payload.content : [];
+    return content
+      .map((part) => (part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string' ? (part as { text: string }).text : ''))
+      .join('')
+      .trim();
+  }
+
+  if (apiMode === 'gemini-native') {
+    const candidates = Array.isArray(payload.candidates) ? payload.candidates : [];
+    const first = candidates[0] as { content?: { parts?: Array<{ text?: string; thought?: boolean }> } } | undefined;
+    return (first?.content?.parts ?? [])
+      .filter((part) => !part.thought)
+      .map((part) => part.text ?? '')
+      .join('')
+      .trim();
+  }
+
+  const choices = Array.isArray(payload.choices) ? payload.choices : [];
+  const first = choices[0] as { message?: { content?: string } } | undefined;
+  return first?.message?.content?.trim() ?? '';
+}
+
+function extractProviderError(data: unknown) {
+  if (!data || typeof data !== 'object') return '';
+  const payload = data as { error?: string | { message?: string; type?: string }; message?: string };
+  if (typeof payload.error === 'string') return payload.error;
+  if (payload.error?.message) return payload.error.message;
+  if (typeof payload.message === 'string') return payload.message;
+  return '';
+}
+
 function readJsonBody(req: import('node:http').IncomingMessage) {
   return new Promise<unknown>((resolve, reject) => {
     let raw = '';
@@ -648,6 +1766,54 @@ function sendJson(res: import('node:http').ServerResponse, statusCode: number, p
   res.end(JSON.stringify(payload));
 }
 
+function requireDevFsPath(value: unknown, label: string) {
+  if (typeof value !== 'string' || !value.trim()) throw new Error(`${label} is required.`);
+  const resolved = path.resolve(value);
+  if (resolved.includes('\0')) throw new Error(`${label} contains an invalid character.`);
+  return resolved;
+}
+
+function normalizeDevFsPath(value: string) {
+  return path.resolve(value).replace(/\\/g, '/');
+}
+
+async function collectDevWorkspaceFiles(
+  root: string,
+  includeFile: (filePath: string) => boolean = () => true,
+): Promise<string[]> {
+  const output: string[] = [];
+  await walkDevWorkspaceFiles(root, output, includeFile);
+  return output.sort((left, right) => left.localeCompare(right, 'zh-Hans-CN'));
+}
+
+async function walkDevWorkspaceFiles(
+  directory: string,
+  output: string[],
+  includeFile: (filePath: string) => boolean,
+) {
+  let entries: Array<{ name: string; isDirectory: () => boolean; isFile: () => boolean }>;
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+
+  for (const entry of entries) {
+    const filePath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      await walkDevWorkspaceFiles(filePath, output, includeFile);
+    } else if (entry.isFile() && includeFile(filePath)) {
+      output.push(normalizeDevFsPath(filePath));
+    }
+  }
+}
+
+function isDevPathInside(root: string, target: string) {
+  const relative = path.relative(root, target);
+  return Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
 async function extractImportFileText({
   filename,
   mimeType,
@@ -660,6 +1826,11 @@ async function extractImportFileText({
   const extension = filename.toLowerCase().split('.').at(-1) ?? '';
   const normalizedMimeType = mimeType.toLowerCase();
 
+  const markitdownText = await tryMarkItDownExtract({ filename, buffer });
+  if (markitdownText?.trim()) {
+    return markitdownText;
+  }
+
   if (
     ['xls', 'xlsx', 'xlsm', 'xlsb', 'csv', 'tsv', 'ods'].includes(extension) ||
     normalizedMimeType.includes('spreadsheet') ||
@@ -669,6 +1840,14 @@ async function extractImportFileText({
     normalizedMimeType.includes('opendocument.spreadsheet')
   ) {
     return extractSpreadsheetText(buffer, filename, normalizedMimeType);
+  }
+
+  if (
+    ['ppt', 'pptx'].includes(extension) ||
+    normalizedMimeType.includes('presentationml') ||
+    normalizedMimeType.includes('powerpoint')
+  ) {
+    throw new Error('演示文稿解析需要启用可选 MarkItDown 后端：设置环境变量 MARKITDOWN_ENABLED=1，并安装 python -m pip install markitdown。');
   }
 
   if (['html', 'htm'].includes(extension) || normalizedMimeType.includes('html')) {
@@ -699,6 +1878,64 @@ async function extractImportFileText({
   }
 
   throw new Error(`暂不支持 ${filename} 的文件格式。`);
+}
+
+async function tryMarkItDownExtract({ filename, buffer }: { filename: string; buffer: Buffer }) {
+  if (process.env.MARKITDOWN_ENABLED !== '1') return null;
+  const extension = filename.toLowerCase().split('.').at(-1) ?? 'bin';
+  if (!['pdf', 'doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx', 'html', 'htm'].includes(extension)) return null;
+
+  const tempDir = await mkdtemp(path.join(tmpdir(), 'mywiki-markitdown-'));
+  const inputPath = path.join(tempDir, sanitizeTempFilename(filename));
+  try {
+    await writeNodeFile(inputPath, buffer);
+    const commands = [
+      ['python', ['-m', 'markitdown', inputPath]],
+      ['py', ['-m', 'markitdown', inputPath]],
+      ['markitdown', [inputPath]],
+    ] as const;
+
+    for (const [command, args] of commands) {
+      const result = await runCommand(command, args).catch(() => null);
+      if (result?.ok && result.stdout.trim()) {
+        return result.stdout.trim();
+      }
+    }
+    return null;
+  } finally {
+    await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+function runCommand(command: string, args: readonly string[]) {
+  return new Promise<{ ok: boolean; stdout: string; stderr: string }>((resolve) => {
+    const child = spawn(command, [...args], { windowsHide: true });
+    const timer = setTimeout(() => {
+      child.kill();
+      resolve({ ok: false, stdout, stderr: `${command} timed out.` });
+    }, 45000);
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      resolve({ ok: false, stdout, stderr: error.message });
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ ok: code === 0, stdout, stderr });
+    });
+  });
+}
+
+function sanitizeTempFilename(filename: string) {
+  const sanitized = filename.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').trim();
+  return sanitized || 'input.bin';
 }
 
 async function extractWordText(buffer: Buffer, filename: string) {

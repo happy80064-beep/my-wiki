@@ -1,0 +1,57 @@
+name: Build macOS
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-macos:
+    name: macOS app and DMG
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.26.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build macOS package
+        run: pnpm desktop:build:macos
+
+      - name: Collect macOS artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release/macos
+          app_path="$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app' -type d | head -n 1)"
+          if [[ -n "$app_path" ]]; then
+            ditto -c -k --keepParent "$app_path" "release/macos/MyWiki_macos_${RUNNER_ARCH}.app.zip"
+          fi
+          find src-tauri/target/release/bundle/dmg -name '*.dmg' -type f -exec cp {} release/macos/ \;
+          shasum -a 256 release/macos/* > release/macos/SHA256SUMS.txt
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mywiki-macos-${{ runner.arch }}
+          path: release/macos/*

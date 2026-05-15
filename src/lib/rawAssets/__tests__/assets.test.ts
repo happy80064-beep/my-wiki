@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import JSZip from 'jszip';
 import { createLocalCaptureDraft } from '@/lib/capture';
 import { db, resetDatabase } from '@/lib/db';
 import {
@@ -7,8 +8,30 @@ import {
   createRawAssetFromFile,
   processNextRawAsset,
   processRawAsset,
+  processRawAssetQueue,
+  resetInvalidCompiledVisionAssets,
   resetStaleRawAssets,
+  shouldCapturePdfPageScreenshots,
 } from '@/lib/rawAssets';
+
+vi.mock('@/lib/llm/providerSettings', () => ({
+  loadProviderSettings: () => ({}),
+  resolveProviderConfigForRole: (_settings: unknown, role: string) => {
+    const config =
+      role === 'vision'
+        ? {
+            providerId: 'custom-openai',
+            enabled: true,
+            apiMode: 'openai-compatible',
+            endpoint: 'https://example.test/v1',
+            apiKey: 'test-key',
+            model: 'vision-test',
+            contextWindow: 8000,
+          }
+        : null;
+    return { config, source: config ? 'assigned' : 'none' };
+  },
+}));
 
 describe('raw assets', () => {
   beforeEach(async () => {
@@ -17,6 +40,7 @@ describe('raw assets', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    window.localStorage.clear();
   });
 
   it('stores files in Raw Inbox without compiling immediately', async () => {
@@ -69,19 +93,255 @@ describe('raw assets', () => {
     expect((await db.entries.get(compiled!.entryId!))?.processed).toBe(true);
   });
 
-  it('falls back to local indexing when AI extraction fails for a raw file', async () => {
+  it('fails imported files instead of creating a fake source summary when AI JSON is malformed', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => new Response(JSON.stringify({ error: 'invalid model json' }), { status: 502 })),
     );
-    const file = new File(['一份很长的 PDF 解析文本。'], 'report.md', { type: 'text/markdown' });
+    const file = new File(['# 导入文件：report.pdf\n\n来源格式：PDF\n\n一份很长的 PDF 解析文本。'], 'report.md', { type: 'text/markdown' });
+    const { asset } = await createRawAssetFromFile(file);
+
+    const compiled = await processRawAsset(asset.id);
+
+    expect(compiled?.status).toBe('failed');
+    expect(compiled?.entryId).toBeTruthy();
+    expect(await db.entries.count()).toBe(1);
+    expect(await db.entities.count()).toBe(0);
+    expect(compiled?.error).toContain('invalid model json');
+  });
+
+  it('sends full raw content into the capture pipeline so long documents can use the digest stage', async () => {
+    let capturedContent = '';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body ?? '{}')) as { content?: string };
+        capturedContent = body.content ?? '';
+        return new Response(
+          JSON.stringify({
+            draft: createLocalCaptureDraft('OpenMaic is an open source project.'),
+            provider: 'minimax',
+            model: 'test',
+            mode: 'two-step',
+          }),
+          { status: 200 },
+        );
+      }),
+    );
+    const marker = 'UNIQUE_TAIL_MARKER_FOR_LONG_RAW_DOCUMENT';
+    const file = new File([`${'long document paragraph\n'.repeat(2500)}\n${marker}`], 'long-report.md', {
+      type: 'text/markdown',
+    });
     const { asset } = await createRawAssetFromFile(file);
 
     const compiled = await processRawAsset(asset.id);
 
     expect(compiled?.status).toBe('compiled');
-    expect(compiled?.entryId).toBeTruthy();
-    expect(await db.entries.count()).toBe(1);
+    expect(capturedContent).toContain(marker);
+  });
+
+  it('requests PDF page screenshots when extracted text only contains page markers', () => {
+    expect(shouldCapturePdfPageScreenshots('\n\n-- 1 of 15 --\n\n-- 2 of 15 --\n\n-- 3 of 15 --')).toBe(true);
+    expect(
+      shouldCapturePdfPageScreenshots(
+        '商业方案汇报 高端人群整合健康管理项目 创新服务模式与市场机遇 睡眠健康管理 益生菌应用 个性化营养方案。'.repeat(3),
+      ),
+    ).toBe(false);
+  });
+
+  it('treats capture fallback as failed raw compilation instead of a normal success', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            draft: createLocalCaptureDraft('fallback draft'),
+            provider: 'minimax',
+            model: 'test',
+            fallbackFrom: 'patch JSON was invalid',
+            mode: 'two-step',
+          }),
+          { status: 200 },
+        ),
+      ),
+    );
+    const file = new File(['OpenMaic is an open source project.'], 'fallback.md', { type: 'text/markdown' });
+    const { asset } = await createRawAssetFromFile(file);
+
+    const compiled = await processRawAsset(asset.id);
+
+    expect(compiled?.status).toBe('failed');
+    expect(compiled?.error).toContain('patch JSON was invalid');
+    expect(await db.entities.count()).toBe(0);
+  });
+
+  it('fails simple imported text when AI extraction is unavailable', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ error: 'invalid model json' }), { status: 502 })),
+    );
+    const file = new File(['普通文本。'], 'note.md', { type: 'text/markdown' });
+    const { asset } = await createRawAssetFromFile(file);
+
+    const compiled = await processRawAsset(asset.id);
+
+    expect(compiled?.status).toBe('failed');
+    expect(await db.entities.count()).toBe(0);
+    expect(compiled?.error).toContain('invalid model json');
+  });
+
+  it('adds multimodal captions to image content before compilation', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ caption: '图中是一张项目总览截图，包含收入、面积和任务节点。' }), { status: 200 })),
+    );
+    const file = new File([new Uint8Array([137, 80, 78, 71])], 'overview.png', { type: 'image/png' });
+    const { asset } = await createRawAssetFromFile(file);
+
+    const compiled = await processRawAsset(asset.id, async (content) => ({
+      draft: createLocalCaptureDraft(content),
+    }));
+    const entry = compiled?.entryId ? await db.entries.get(compiled.entryId) : undefined;
+
+    expect(compiled?.status).toBe('compiled');
+    expect(entry?.content).toContain('## 视觉描述');
+    expect(entry?.content).toContain('项目总览截图');
+    expect(entry?.source).toBe('image');
+  });
+
+  it('keeps OCR text as usable image content when the vision provider is temporarily busy', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/api/import/extract')) {
+          return new Response(JSON.stringify({ text: 'OCR 文本：福瑞健康科技园三期项目总投资 12 亿元。' }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ error: '该模型当前访问量过大，请您稍后再试' }), { status: 429 });
+      }),
+    );
+    const file = new File([new Uint8Array([137, 80, 78, 71, 8])], 'ocr-only.png', { type: 'image/png' });
+    const { asset } = await createRawAssetFromFile(file);
+
+    const compiled = await processRawAsset(asset.id, async (content) => ({
+      draft: createLocalCaptureDraft(content),
+    }));
+    const entry = compiled?.entryId ? await db.entries.get(compiled.entryId) : undefined;
+
+    expect(compiled?.status).toBe('compiled');
+    expect(entry?.content).toContain('## OCR 文本');
+    expect(entry?.content).toContain('福瑞健康科技园三期项目总投资');
+    expect(entry?.content).toContain('## 视觉描述待重试');
+  });
+
+  it('adds multimodal captions for embedded presentation images before compilation', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/api/import/extract')) {
+          return new Response(JSON.stringify({ text: '图片 OCR 中出现“项目进度 85%”。' }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ caption: '内嵌图展示项目进度仪表盘和关键节点。' }), { status: 200 });
+      }),
+    );
+
+    const zip = new JSZip();
+    zip.file(
+      'ppt/slides/slide1.xml',
+      '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>项目汇报</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>',
+    );
+    zip.file('ppt/media/image1.png', new Uint8Array([137, 80, 78, 71, 9]));
+    const buffer = await zip.generateAsync({ type: 'arraybuffer' });
+    const file = new File([buffer], 'deck.pptx', {
+      type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    });
+    const { asset } = await createRawAssetFromFile(file);
+
+    const compiled = await processRawAsset(asset.id, async (content) => ({
+      draft: createLocalCaptureDraft(content),
+    }));
+    const entry = compiled?.entryId ? await db.entries.get(compiled.entryId) : undefined;
+
+    expect(compiled?.status).toBe('compiled');
+    expect(entry?.content).toContain('## 文档内嵌图片描述');
+    expect(entry?.content).toContain('内嵌图展示项目进度仪表盘');
+    expect(entry?.content).toContain('图片 OCR 中出现');
+  });
+
+  it('fails image compilation when the vision model says it cannot see the image', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ caption: '抱歉，我目前无法直接访问或查看此图片。' }), { status: 200 })),
+    );
+    const file = new File([new Uint8Array([137, 80, 78, 71, 2])], 'bad-vision.png', { type: 'image/png' });
+    const { asset } = await createRawAssetFromFile(file);
+
+    const compiled = await processRawAsset(asset.id, async (content) => ({
+      draft: createLocalCaptureDraft(content),
+    }));
+
+    expect(compiled?.status).toBe('failed');
+    expect(compiled?.error).toContain('没有真正读取图片');
+  });
+
+  it('fails image compilation when the vision model asks the user to upload the image again', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ caption: '请上传对应的图片文件，以便我进行客观描述。' }), { status: 200 })),
+    );
+    const file = new File([new Uint8Array([137, 80, 78, 71, 4])], 'needs-upload.png', { type: 'image/png' });
+    const { asset } = await createRawAssetFromFile(file);
+
+    const compiled = await processRawAsset(asset.id, async (content) => ({
+      draft: createLocalCaptureDraft(content),
+    }));
+
+    expect(compiled?.status).toBe('failed');
+    expect(compiled?.error).toContain('没有真正读取图片');
+  });
+
+  it('recovers old compiled image entries whose caption was a vision refusal', async () => {
+    const file = new File([new Uint8Array([137, 80, 78, 71, 3])], 'old-bad-vision.png', { type: 'image/png' });
+    const { asset } = await createRawAssetFromFile(file);
+    await db.rawAssets.update(asset.id, {
+      status: 'compiled',
+      extractedText: '抱歉，我目前无法直接访问或查看此图片。',
+    });
+    await db.entries.update(asset.entryId!, {
+      processed: true,
+      content: '# 图片内容捕获\n\n抱歉，我目前无法直接访问或查看此图片。',
+    });
+
+    const recovered = await resetInvalidCompiledVisionAssets();
+    const updated = await db.rawAssets.get(asset.id);
+    const entry = await db.entries.get(asset.entryId!);
+
+    expect(recovered).toBe(1);
+    expect(updated?.status).toBe('failed');
+    expect(updated?.error).toContain('无效');
+    expect(entry?.processed).toBe(false);
+  });
+
+  it('recovers old compiled image entries whose caption asks for a separate upload', async () => {
+    const file = new File([new Uint8Array([137, 80, 78, 71, 5])], 'old-needs-upload.png', { type: 'image/png' });
+    const { asset } = await createRawAssetFromFile(file);
+    await db.rawAssets.update(asset.id, {
+      status: 'compiled',
+      extractedText: '请上传对应的图片文件，以便我进行客观描述。',
+    });
+    await db.entries.update(asset.entryId!, {
+      processed: true,
+      content: '# 图片内容捕获\n\n请上传对应的图片文件，以便我进行客观描述。',
+    });
+
+    const recovered = await resetInvalidCompiledVisionAssets();
+    const updated = await db.rawAssets.get(asset.id);
+    const entry = await db.entries.get(asset.entryId!);
+
+    expect(recovered).toBe(1);
+    expect(updated?.status).toBe('failed');
+    expect(entry?.processed).toBe(false);
   });
 
   it('recovers stale compiling raw assets so they can be retried', async () => {
@@ -115,6 +375,58 @@ describe('raw assets', () => {
 
     expect(compiled?.id).toBe(asset.id);
     expect(compiled?.status).toBe('compiled');
+  });
+
+  it('processes each queued raw asset once even when one item fails', async () => {
+    const first = new File(['第一个材料会失败。'], 'first.md', { type: 'text/markdown' });
+    const second = new File(['第二个材料会成功。'], 'second.md', { type: 'text/markdown' });
+    const firstResult = await createRawAssetFromFile(first);
+    const secondResult = await createRawAssetFromFile(second);
+
+    let calls = 0;
+    const result = await processRawAssetQueue({
+      extractor: async (content) => {
+        calls += 1;
+        if (content.includes('first.md')) {
+          throw new Error('model request failed');
+        }
+        return { draft: createLocalCaptureDraft(content) };
+      },
+    });
+
+    const firstAsset = await db.rawAssets.get(firstResult.asset.id);
+    const secondAsset = await db.rawAssets.get(secondResult.asset.id);
+
+    expect(result).toEqual({ total: 2, processed: 2, failed: 1 });
+    expect(calls).toBe(2);
+    expect(firstAsset?.status).toBe('failed');
+    expect(secondAsset?.status).toBe('compiled');
+  });
+
+  it('publishes the retry queue ids so Frog can mark failed rows as compiling during retry', async () => {
+    const first = new File(['第一个材料。'], 'first.md', { type: 'text/markdown' });
+    const second = new File(['第二个材料。'], 'second.md', { type: 'text/markdown' });
+    const firstResult = await createRawAssetFromFile(first);
+    const secondResult = await createRawAssetFromFile(second);
+    await db.rawAssets.update(firstResult.asset.id, { status: 'failed', error: 'previous failure' });
+    await db.rawAssets.update(secondResult.asset.id, { status: 'failed', error: 'previous failure' });
+
+    const snapshots: Array<{ currentAssetId?: string; queuedAssetIds?: string[] }> = [];
+    await processRawAssetQueue({
+      extractor: async (content) => ({ draft: createLocalCaptureDraft(content) }),
+      onStatus: (snapshot) => {
+        if (snapshot.stage === 'running') {
+          snapshots.push({
+            currentAssetId: snapshot.currentAssetId,
+            queuedAssetIds: snapshot.queuedAssetIds,
+          });
+        }
+      },
+    });
+
+    expect(snapshots[0]?.queuedAssetIds).toEqual([firstResult.asset.id, secondResult.asset.id]);
+    expect(snapshots.some((snapshot) => snapshot.currentAssetId === firstResult.asset.id)).toBe(true);
+    expect(snapshots.some((snapshot) => snapshot.queuedAssetIds?.includes(secondResult.asset.id))).toBe(true);
   });
 
   it('builds a bounded excerpt for long raw content before sending it to AI', () => {

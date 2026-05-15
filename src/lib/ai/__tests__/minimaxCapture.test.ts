@@ -70,6 +70,27 @@ describe('MiniMax capture normalization', () => {
     expect(draft.primaryEntity.type).toBe('topic');
   });
 
+  it('repairs loose JSON separators returned by Chinese models', () => {
+    const draft = normalizeMiniMaxCaptureResponse(`{
+      "primaryEntity"： {
+        "type": "project"，
+        "title": "福瑞健康科技园三期项目"，
+        "summary": "项目可研报告。"，
+        "tags": ["项目" "可研"]，
+        "scenes": ["work"]
+      }，
+      "relatedEntities": [
+        {"type": "topic"， "title": "中医药康养"， "summary": "相关业态。"， "tags": ["业态"， "康养"]， "scenes": ["work"]}
+      ]，
+      "relationships": []，
+      "tasks": []
+    }`);
+
+    expect(draft.primaryEntity.title).toBe('福瑞健康科技园三期项目');
+    expect(draft.primaryEntity.tags).toEqual(['项目', '可研']);
+    expect(draft.relatedEntities[0]?.title).toBe('中医药康养');
+  });
+
   it('keeps tasks with uncertain owner by assigning editable implicit owner', () => {
     const draft = normalizeMiniMaxCaptureResponse(
       JSON.stringify({

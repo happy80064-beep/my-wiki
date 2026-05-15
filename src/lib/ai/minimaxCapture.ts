@@ -394,16 +394,142 @@ function parseBestCaptureJson(text: string) {
   const objects = extractJsonObjects(text);
   for (const objectText of objects.reverse()) {
     try {
-      const parsed = JSON.parse(objectText) as AiCaptureResponse;
+      const parsed = JSON.parse(cleanCaptureJsonCandidate(objectText)) as AiCaptureResponse;
       if (parsed.primaryEntity && typeof parsed.primaryEntity.title === 'string') {
         return parsed;
       }
     } catch {
-      // Try the previous candidate.
+      try {
+        const parsed = JSON.parse(repairLooseCaptureJsonCandidate(objectText)) as AiCaptureResponse;
+        if (parsed.primaryEntity && typeof parsed.primaryEntity.title === 'string') {
+          return parsed;
+        }
+      } catch {
+        // Try the previous candidate.
+      }
     }
   }
 
   throw new Error('LLM did not return a valid MyWiki JSON object.');
+}
+
+function cleanCaptureJsonCandidate(value: string) {
+  return normalizeJsonSyntaxOutsideStrings(value).replace(/,\s*([}\]])/g, '$1');
+}
+
+function repairLooseCaptureJsonCandidate(value: string) {
+  let repaired = cleanCaptureJsonCandidate(value);
+  for (let iteration = 0; iteration < 6; iteration += 1) {
+    const next = injectMissingCommas(repaired)
+      .replace(/}\s*(?={)/g, '},')
+      .replace(/]\s*(?={)/g, '],')
+      .replace(/]\s*(?=")/g, '],')
+      .replace(/"\s+(?="[^"]+"\s*:)/g, '", ')
+      .replace(/"\s+(?=")/g, '", ')
+      .replace(/"\s*\n\s*"/g, '",\n"')
+      .replace(/}\s*\n\s*{/g, '},\n{')
+      .replace(/]\s*\n\s*"/g, '],\n"')
+      .replace(/}\s*\n\s*"/g, '},\n"')
+      .replace(/"\s*\n\s*{/g, '",\n{')
+      .replace(/(\d|true|false|null)\s*\n\s*"/g, '$1,\n"')
+      .replace(/(\d|true|false|null)\s*\n\s*{/g, '$1,\n{');
+    if (next === repaired) break;
+    repaired = cleanCaptureJsonCandidate(next);
+  }
+  return repaired;
+}
+
+function injectMissingCommas(value: string) {
+  let output = '';
+  let inString = false;
+  let escaped = false;
+  let lastSignificant = '';
+  let gapHasWhitespace = false;
+
+  for (const char of value) {
+    if (inString) {
+      output += char;
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+        lastSignificant = '"';
+      }
+      continue;
+    }
+
+    if (/\s/.test(char)) {
+      output += char;
+      gapHasWhitespace = true;
+      continue;
+    }
+
+    if (char === '"') {
+      if (shouldInsertMissingComma(lastSignificant, char, gapHasWhitespace)) output += ',';
+      output += char;
+      inString = true;
+      escaped = false;
+      gapHasWhitespace = false;
+      continue;
+    }
+
+    if (shouldInsertMissingComma(lastSignificant, char, gapHasWhitespace)) output += ',';
+    output += char;
+    lastSignificant = char;
+    gapHasWhitespace = false;
+  }
+
+  return output;
+}
+
+function normalizeJsonSyntaxOutsideStrings(value: string) {
+  let output = '';
+  let inString = false;
+  let escaped = false;
+
+  for (const char of value) {
+    if (inString) {
+      output += char;
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      output += char;
+      inString = true;
+      escaped = false;
+      continue;
+    }
+
+    output += normalizeJsonSyntaxChar(char);
+  }
+
+  return output;
+}
+
+function normalizeJsonSyntaxChar(char: string) {
+  if (char === '，' || char === '、' || char === '；' || char === ';') return ',';
+  if (char === '：') return ':';
+  if (char === '｛') return '{';
+  if (char === '｝') return '}';
+  if (char === '［' || char === '【') return '[';
+  if (char === '］' || char === '】') return ']';
+  return char;
+}
+
+function shouldInsertMissingComma(previous: string, next: string, hasWhitespace: boolean) {
+  if (!previous) return false;
+  const previousEndsValue = previous === '"' || previous === '}' || previous === ']' || (hasWhitespace && /[0-9eEl]/.test(previous));
+  const nextStartsValueOrKey = next === '"' || next === '{' || next === '[' || next === '-' || /[0-9tfn]/i.test(next);
+  return previousEndsValue && nextStartsValueOrKey;
 }
 
 function extractJsonObjects(text: string) {

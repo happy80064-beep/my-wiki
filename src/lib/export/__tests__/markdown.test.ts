@@ -5,6 +5,7 @@ import {
   isSafeExportPath,
   serializeMarkdownExportBundle,
 } from '@/lib/export/markdown';
+import { parseMarkdownExportZip } from '@/lib/export/importMarkdown';
 import type { Entity, Entry, Relationship, Task } from '@/types';
 
 describe('markdown export', () => {
@@ -12,6 +13,7 @@ describe('markdown export', () => {
     const now = Date.now();
     const entry: Entry = {
       id: 'entry_1',
+      clientId: 'test-client',
       content: '桌面生命体的唤醒词是小林。',
       source: 'text',
       capturedAt: now,
@@ -22,6 +24,7 @@ describe('markdown export', () => {
     };
     const project = {
       id: 'project_1',
+      clientId: 'test-client',
       type: 'project',
       title: '桌面数字生命体',
       summary: '运行在 Windows 桌面的 AI 生命体。',
@@ -34,6 +37,7 @@ describe('markdown export', () => {
     } as unknown as Entity;
     const topic: Entity = {
       id: 'topic_1',
+      clientId: 'test-client',
       type: 'topic',
       title: '唤醒方案',
       summary: '本地语音唤醒方案。',
@@ -46,6 +50,7 @@ describe('markdown export', () => {
     };
     const relationship: Relationship = {
       id: 'rel_1',
+      clientId: 'test-client',
       from: project.id,
       to: topic.id,
       type: 'related-to',
@@ -54,6 +59,7 @@ describe('markdown export', () => {
     };
     const task: Task = {
       id: 'task_1',
+      clientId: 'test-client',
       description: '继续优化唤醒稳定性',
       owner: project.id,
       linkedTo: [topic.id],
@@ -75,15 +81,15 @@ describe('markdown export', () => {
     expect(files.map((file) => file.path)).toEqual(
       expect.arrayContaining([
         'README.md',
-        'index.md',
+        'wiki/index.md',
         'tasks/pending-tasks.md',
-        'wiki/project/桌面数字生命体.md',
-        'wiki/topic/唤醒方案.md',
+        'wiki/projects/桌面数字生命体.md',
+        'wiki/concepts/唤醒方案.md',
         'raw/entries/entry_1.md',
       ]),
     );
-    expect(bundle).toContain('<!-- FILE: wiki/project/桌面数字生命体.md -->');
-    expect(bundle).toContain('[[wiki/topic/唤醒方案|唤醒方案]]');
+    expect(bundle).toContain('<!-- FILE: wiki/projects/桌面数字生命体.md -->');
+    expect(bundle).toContain('[[wiki/concepts/唤醒方案|唤醒方案]]');
     expect([...zip.slice(0, 4)]).toEqual([0x50, 0x4b, 0x03, 0x04]);
   });
 
@@ -91,5 +97,90 @@ describe('markdown export', () => {
     expect(isSafeExportPath('../secret.md')).toBe(false);
     expect(isSafeExportPath('C:/secret.md')).toBe(false);
     expect(isSafeExportPath('wiki/project/demo.md')).toBe(true);
+  });
+
+  it('writes source-tagged entities into wiki source pages and the wiki index', () => {
+    const now = Date.now();
+    const entry: Entry = {
+      id: 'entry_source',
+      clientId: 'test-client',
+      content: '# 导入文件：调研报告.pdf\n\n福瑞三期包含医疗业态。',
+      source: 'file',
+      capturedAt: now,
+      processed: true,
+      derivedEntities: ['topic_source'],
+      derivedTasks: [],
+      derivedRelationships: [],
+    };
+    const sourceEntity: Entity = {
+      id: 'topic_source',
+      clientId: 'test-client',
+      type: 'topic',
+      title: '调研报告',
+      summary: '调研报告的来源摘要。',
+      tags: ['source', '来源'],
+      scenes: ['work'],
+      properties: { isPersonal: false, autoCollectedSnippets: [entry.id] },
+      sourceEntries: [entry.id],
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const files = buildMarkdownExportFilesFromRecords({
+      entries: [entry],
+      entities: [sourceEntity],
+      relationships: [],
+      tasks: [],
+    });
+    const paths = files.map((file) => file.path);
+    const index = files.find((file) => file.path === 'wiki/index.md')?.content ?? '';
+    const sourcePage = files.find((file) => file.path === 'wiki/sources/调研报告.md')?.content ?? '';
+
+    expect(paths).toContain('wiki/sources/调研报告.md');
+    expect(index).toContain('## 来源');
+    expect(index).toContain('[[wiki/sources/调研报告|调研报告]]');
+    expect(sourcePage).toContain('type: "source"');
+  });
+
+  it('parses a MyWiki markdown zip backup back into records', async () => {
+    const now = Date.now();
+    const entry: Entry = {
+      id: 'entry_restore',
+      clientId: 'test-client',
+      content: '福瑞三期稳定运营期年均收入为 4.22 亿元。',
+      source: 'text',
+      capturedAt: now,
+      processed: true,
+      derivedEntities: ['project_restore'],
+      derivedTasks: [],
+      derivedRelationships: [],
+    };
+    const project: Entity = {
+      id: 'project_restore',
+      clientId: 'test-client',
+      type: 'project',
+      title: '福瑞三期',
+      summary: '福瑞三期项目。',
+      tags: ['园区'],
+      scenes: ['work'],
+      properties: { status: 'active' },
+      sourceEntries: [entry.id],
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const files = buildMarkdownExportFilesFromRecords({
+      entries: [entry],
+      entities: [project],
+      relationships: [],
+      tasks: [],
+    });
+    const zip = buildMarkdownZipArchive(files, new Date('2026-05-02T00:00:00Z'));
+    const records = await parseMarkdownExportZip(new Blob([zip], { type: 'application/zip' }));
+
+    expect(records.entries).toHaveLength(1);
+    expect(records.entities).toHaveLength(1);
+    expect(records.entities[0]).toEqual(expect.objectContaining({ id: project.id, title: project.title }));
+    expect(records.entries[0]?.derivedEntities).toContain(project.id);
   });
 });

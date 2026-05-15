@@ -1,6 +1,6 @@
 import { extractCaptureDraft } from '@/lib/ai/captureClient';
 import { persistCaptureDraft, type CaptureDraft } from '@/lib/capture';
-import { createId, db } from '@/lib/db';
+import { createId, db, getClientId } from '@/lib/db';
 import type { EntrySource, IngestJob } from '@/types';
 
 export type IngestExtractor = (content: string) => Promise<{ draft: CaptureDraft }>;
@@ -35,6 +35,7 @@ export async function createIngestJob(input: CreateIngestJobInput) {
 
   const job: IngestJob = {
     id: createId('ingest'),
+    clientId: getClientId(),
     content,
     source: input.source ?? 'text',
     filename: input.filename,
@@ -98,6 +99,7 @@ export async function processIngestJob(id: string, extractor: IngestExtractor = 
     await db.transaction('rw', db.ingestJobs, db.ingestCache, async () => {
       await db.ingestCache.put({
         contentHash: job.contentHash,
+        clientId: getClientId(),
         entryIds: [persisted.entry.id],
         createdAt: completedAt,
         updatedAt: completedAt,

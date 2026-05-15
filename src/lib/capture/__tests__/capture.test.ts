@@ -24,7 +24,7 @@ describe('capture flow', () => {
     expect(result.compilation.createdTasks).toBe(1);
 
     const savedEntry = await db.entries.get(result.entry.id);
-    expect(savedEntry?.derivedEntities).toHaveLength(result.entities.length);
+    expect(savedEntry?.derivedEntities).toEqual(expect.arrayContaining(result.entities.map((entity) => entity.id)));
     expect(savedEntry?.derivedTasks).toHaveLength(result.tasks.length);
   });
 
@@ -34,6 +34,7 @@ describe('capture flow', () => {
     const topic = await createEntity({ type: 'topic', title: '语音交互', tags: ['旧主题'], scenes: ['personal'] });
     const previousEntry = await db.entries.add({
       id: 'entry_previous',
+      clientId: 'test-client',
       content: '旧证据',
       source: 'text',
       capturedAt: 1,
@@ -166,5 +167,37 @@ describe('capture flow', () => {
       '抗衰专病门诊',
       '细胞治疗服务中心',
     ]);
+  });
+
+  it('auto-aggregates useful category terms into topic pages', async () => {
+    const content = '福瑞健康科技园三期项目医疗业态包含抗衰专病门诊、细胞治疗服务中心。';
+    const draft = createLocalCaptureDraft(content);
+    draft.primaryEntity.type = 'project';
+    draft.primaryEntity.title = '福瑞健康科技园三期项目';
+    draft.primaryEntity.categories = [
+      {
+        name: '医疗业态',
+        aliases: ['医疗'],
+        items: [{ title: '抗衰专病门诊' }, { title: '细胞治疗服务中心' }],
+        evidence: '医疗业态包含抗衰专病门诊、细胞治疗服务中心。',
+      },
+    ];
+
+    const result = await persistCaptureDraft(content, draft);
+    const topics = await db.entities.where('type').equals('topic').toArray();
+    const medicalTopic = topics.find((entity) => entity.title === '医疗业态');
+    const savedEntry = await db.entries.get(result.entry.id);
+    const aboutRelationship = medicalTopic
+      ? await db.relationships
+          .where('from')
+          .equals(medicalTopic.id)
+          .filter((relationship) => relationship.to === result.entities[0]?.id && relationship.type === 'about')
+          .first()
+      : undefined;
+
+    expect(medicalTopic?.sourceEntries).toContain(result.entry.id);
+    expect(savedEntry?.derivedEntities).toContain(medicalTopic?.id);
+    expect(aboutRelationship?.evidence).toContain(result.entry.id);
+    expect(result.compilation.autoAggregatedTopics).toBeGreaterThan(0);
   });
 });

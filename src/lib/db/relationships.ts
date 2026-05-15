@@ -1,8 +1,9 @@
 import type { Relationship } from '@/types';
 import { db } from './schema';
 import { createId } from './ids';
+import { getClientId } from './clientId';
 
-export type CreateRelationshipInput = Omit<Relationship, 'id' | 'createdAt'> & {
+export type CreateRelationshipInput = Omit<Relationship, 'id' | 'clientId' | 'createdAt'> & {
   id?: string;
   createdAt?: number;
 };
@@ -10,6 +11,7 @@ export type CreateRelationshipInput = Omit<Relationship, 'id' | 'createdAt'> & {
 export async function createRelationship(input: CreateRelationshipInput) {
   const relationship: Relationship = {
     id: input.id ?? createId('rel'),
+    clientId: getClientId(),
     from: input.from,
     to: input.to,
     type: input.type,

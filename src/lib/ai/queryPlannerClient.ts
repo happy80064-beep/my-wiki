@@ -1,6 +1,32 @@
-import type { QueryIndexEntity, QueryPlan } from './queryPlanner';
+import { getProviderConfigForRole, loadProviderSettings } from '@/lib/llm/providerSettings';
+import { requestConfiguredProviderText } from '@/lib/llm/runtimeProvider';
+import { isTauriRuntime } from '@/lib/runtime/tauri';
+import { buildQueryPlanPrompt, normalizeQueryPlan, type QueryIndexEntity, type QueryPlan } from './queryPlanner';
+import { assertDevAiApiAvailable } from './devApiGuard';
 
 export async function planQueryWithAgent(question: string, index: QueryIndexEntity[]): Promise<QueryPlan> {
+  if (!import.meta.env.DEV && isTauriRuntime()) {
+    const providerConfig = getProviderConfigForRole(loadProviderSettings(), 'query-fast');
+    if (!providerConfig) {
+      throw new Error('请先在设置里配置 Query 快速模型，安装版才能运行 Query Agent 规划。');
+    }
+
+    const providerResult = await requestConfiguredProviderText(providerConfig, {
+      prompt: buildQueryPlanPrompt({ question, index }),
+      systemPrompt:
+        'You are MyWiki Query Agent. Return only one valid JSON object that matches the requested schema. Do not include markdown, comments, or chain-of-thought.',
+      maxTokens: 1800,
+      responseFormat: 'json_object',
+    });
+    if (!providerResult.ok) {
+      throw new Error(`${providerResult.providerName} failed: ${providerResult.error}`);
+    }
+
+    return normalizeQueryPlan(providerResult.text, { question, index });
+  }
+
+  assertDevAiApiAvailable('Query Agent 规划');
+
   const response = await fetch('/api/query/plan', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

@@ -10,6 +10,7 @@ import type {
 } from '@/types';
 import { db } from './schema';
 import { createId } from './ids';
+import { getClientId } from './clientId';
 
 export type CreateEntityInput = {
   type: EntityType;
@@ -44,6 +45,7 @@ export async function createEntity(input: CreateEntityInput) {
   const now = Date.now();
   const entity = {
     id: createId(input.type),
+    clientId: getClientId(),
     type: input.type,
     title: input.title,
     summary: input.summary ?? '',

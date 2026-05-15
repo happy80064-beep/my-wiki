@@ -1,3 +1,4 @@
+import Dexie from 'dexie';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   createEntity,
@@ -8,10 +9,14 @@ import {
   deleteEntity,
   deleteRelationship,
   deleteTask,
+  getClientId,
+  applyCompileSuggestion,
   listPendingTasksByOwner,
   listRelationshipsForEntity,
   resetDatabase,
+  upsertPendingCompileSuggestion,
 } from '@/lib/db';
+import { MyWikiDatabase } from '@/lib/db/schema';
 
 describe('MyWiki data layer', () => {
   beforeEach(async () => {
@@ -51,6 +56,140 @@ describe('MyWiki data layer', () => {
     expect(entry.processed).toBe(false);
     expect(relationship.type).toBe('owner');
     expect(task.status).toBe('pending');
+  });
+
+  it('assigns the local client id to newly created records', async () => {
+    const clientId = getClientId();
+    const entry = await createEntry({ content: 'client id smoke test', source: 'text' });
+    const entity = await createEntity({ type: 'topic', title: 'Client ID' });
+    const relationship = await createRelationship({
+      from: entity.id,
+      to: entity.id,
+      type: 'related-to',
+      evidence: [entry.id],
+    });
+    const task = await createTask({
+      description: 'check client id',
+      owner: entity.id,
+      source: entry.id,
+    });
+
+    expect(entry.clientId).toBe(clientId);
+    expect(entity.clientId).toBe(clientId);
+    expect(relationship.clientId).toBe(clientId);
+    expect(task.clientId).toBe(clientId);
+  });
+
+  it('migrates version 5 browser records to version 6 without losing data', async () => {
+    const databaseName = `migration-smoke-${crypto.randomUUID()}`;
+    const clientId = getClientId();
+
+    class LegacyDatabase extends Dexie {
+      constructor(name: string) {
+        super(name);
+        this.version(5).stores({
+          entries: 'id, capturedAt, processed, source',
+          entities: 'id, type, title, *tags, *scenes, createdAt, updatedAt',
+          relationships: 'id, from, to, type, createdAt, *evidence',
+          tasks: 'id, owner, status, createdAt, dueDate, source, *linkedTo',
+          compileSuggestions: 'id, &fingerprint, status, entityId, propertyKey, evidenceEntryId, createdAt, updatedAt',
+          ingestJobs: 'id, status, contentHash, createdAt, updatedAt',
+          ingestCache: '&contentHash, updatedAt, *entryIds',
+          graphInsightDismissals: 'id, type, dismissedAt',
+          rawAssets: 'id, status, kind, contentHash, filename, createdAt, updatedAt',
+          queryCache: '&key, updatedAt, dataUpdatedAt',
+        });
+      }
+    }
+
+    const legacy = new LegacyDatabase(databaseName);
+    await legacy.open();
+    await legacy.table('entries').add({
+      id: 'legacy-entry',
+      content: 'legacy content',
+      capturedAt: 1,
+      processed: false,
+      source: 'text',
+    });
+    await legacy.table('entities').add({
+      id: 'legacy-entity',
+      type: 'topic',
+      title: 'Legacy Topic',
+      tags: ['legacy'],
+      scenes: [],
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    await legacy.close();
+
+    const migrated = new MyWikiDatabase(databaseName);
+    await migrated.open();
+
+    await expect(migrated.entries.get('legacy-entry')).resolves.toMatchObject({
+      id: 'legacy-entry',
+      content: 'legacy content',
+      clientId,
+    });
+    await expect(migrated.entities.get('legacy-entity')).resolves.toMatchObject({
+      id: 'legacy-entity',
+      title: 'Legacy Topic',
+      clientId,
+    });
+
+    await migrated.delete();
+  });
+
+  it('keeps business-line scope when applying metric compile suggestions', async () => {
+    const entry = await createEntry({
+      content: '住宅板块：用地面积 320 亩。医疗板块：用地面积 320 亩。',
+      source: 'text',
+    });
+    const entity = await createEntity({
+      type: 'project',
+      title: '福瑞三期',
+      sourceEntries: [entry.id],
+    });
+
+    const residential = await upsertPendingCompileSuggestion({
+      entityId: entity.id,
+      entityTitle: entity.title,
+      propertyKey: 'metric_area',
+      propertyLabel: '用地面积',
+      propertyValue: '320 亩',
+      businessLine: '住宅业态',
+      categoryName: '住宅业态',
+      evidenceEntryId: entry.id,
+      evidenceSnippet: '住宅板块：用地面积 320 亩。',
+      evidenceScope: 'entity-source',
+      confidence: 0.82,
+    });
+    expect(residential?.status).toBe('pending');
+
+    await applyCompileSuggestion(residential!.id);
+    const updated = await db.entities.get(entity.id);
+    expect(updated?.indicators?.[0]).toMatchObject({
+      name: '用地面积',
+      rawValue: '320 亩',
+      unit: '亩',
+      businessLine: '住宅业态',
+      categoryName: '住宅业态',
+    });
+
+    const medical = await upsertPendingCompileSuggestion({
+      entityId: entity.id,
+      entityTitle: entity.title,
+      propertyKey: 'metric_area',
+      propertyLabel: '用地面积',
+      propertyValue: '320 亩',
+      businessLine: '医疗业态',
+      categoryName: '医疗业态',
+      evidenceEntryId: entry.id,
+      evidenceSnippet: '医疗板块：用地面积 320 亩。',
+      evidenceScope: 'entity-source',
+      confidence: 0.82,
+    });
+
+    expect(medical?.status).toBe('pending');
   });
 
   it('filters pending tasks by exact owner id', async () => {

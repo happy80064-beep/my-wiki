@@ -1,6 +1,7 @@
 import type { Entry } from '@/types';
 import { db } from './schema';
 import { createId } from './ids';
+import { getClientId } from './clientId';
 
 export type CreateEntryInput = {
   content: string;
@@ -16,6 +17,7 @@ export type CreateEntryInput = {
 export async function createEntry(input: CreateEntryInput) {
   const entry: Entry = {
     id: createId('entry'),
+    clientId: getClientId(),
     content: input.content,
     source: input.source,
     fileMetadata: input.fileMetadata,

@@ -11,6 +11,7 @@ export type FileMetadata = {
 
 export type Entry = {
   id: ID;
+  clientId: string;
   content: string;
   source: EntrySource;
   fileMetadata?: FileMetadata;
@@ -107,6 +108,7 @@ export type EntityIndicator = {
 
 export type BaseEntity<TType extends EntityType, TProps extends EntityProperties> = {
   id: ID;
+  clientId: string;
   type: TType;
   title: string;
   summary: string;
@@ -116,6 +118,9 @@ export type BaseEntity<TType extends EntityType, TProps extends EntityProperties
   categories?: EntityCategory[];
   indicators?: EntityIndicator[];
   compiledProfile?: CompiledEntityProfile;
+  wikiMarkdown?: string;
+  wikiCompiledAt?: number;
+  wikiCompileModel?: string;
   sourceEntries: ID[];
   createdAt: number;
   updatedAt: number;
@@ -159,6 +164,7 @@ export type RelationshipType =
 
 export type Relationship = {
   id: ID;
+  clientId: string;
   from: ID;
   to: ID;
   type: RelationshipType;
@@ -171,6 +177,7 @@ export type TaskStatus = 'pending' | 'done' | 'overdue' | 'cancelled';
 
 export type Task = {
   id: ID;
+  clientId: string;
   description: string;
   owner: ID;
   assignedBy?: ID;
@@ -191,6 +198,9 @@ export type CompileSuggestionDraft = {
   propertyKey: string;
   propertyLabel: string;
   propertyValue: string;
+  businessLine?: string;
+  categoryName?: string;
+  categoryId?: string;
   evidenceEntryId: ID;
   evidenceSnippet: string;
   evidenceScope: CompileSuggestionEvidenceScope;
@@ -199,6 +209,7 @@ export type CompileSuggestionDraft = {
 
 export type CompileSuggestionRecord = CompileSuggestionDraft & {
   id: ID;
+  clientId: string;
   fingerprint: string;
   status: CompileSuggestionStatus;
   sourceQuestion?: string;
@@ -213,6 +224,7 @@ export type IngestJobStatus = 'pending' | 'processing' | 'done' | 'failed' | 'sk
 
 export type IngestJob = {
   id: ID;
+  clientId: string;
   content: string;
   source: EntrySource;
   filename?: string;
@@ -229,6 +241,7 @@ export type IngestJob = {
 
 export type IngestCacheRecord = {
   contentHash: string;
+  clientId: string;
   entryIds: ID[];
   createdAt: number;
   updatedAt: number;
@@ -236,16 +249,18 @@ export type IngestCacheRecord = {
 
 export type GraphInsightDismissal = {
   id: ID;
+  clientId: string;
   type: string;
   dismissedAt: number;
 };
 
-export type RawAssetKind = 'text' | 'word' | 'pdf' | 'image' | 'spreadsheet' | 'html';
+export type RawAssetKind = 'text' | 'word' | 'pdf' | 'image' | 'spreadsheet' | 'html' | 'presentation';
 
 export type RawAssetStatus = 'raw' | 'extracting' | 'compiling' | 'compiled' | 'skipped' | 'failed';
 
 export type RawAsset = {
   id: ID;
+  clientId: string;
   filename: string;
   mimeType: string;
   kind: RawAssetKind;
@@ -265,9 +280,43 @@ export type RawAsset = {
 
 export type QueryCacheRecord = {
   key: string;
+  clientId: string;
   question: string;
   result: unknown;
   createdAt: number;
   updatedAt: number;
   dataUpdatedAt: number;
+};
+
+export type WikiBatchJobStatus = 'pending' | 'running' | 'paused' | 'done' | 'failed' | 'cancelled';
+export type WikiBatchJobItemStatus = 'pending' | 'running' | 'done' | 'failed';
+
+export type WikiBatchJobItem = {
+  entityId: ID;
+  title: string;
+  status: WikiBatchJobItemStatus;
+  attempts: number;
+  error?: string;
+  startedAt?: number;
+  updatedAt?: number;
+  completedAt?: number;
+};
+
+export type WikiBatchJob = {
+  id: ID;
+  clientId: string;
+  owner: string;
+  status: WikiBatchJobStatus;
+  items: WikiBatchJobItem[];
+  total: number;
+  processed: number;
+  succeeded: number;
+  failed: number;
+  currentEntityId?: ID;
+  currentTitle?: string;
+  error?: string;
+  createdAt: number;
+  updatedAt: number;
+  startedAt?: number;
+  completedAt?: number;
 };

@@ -143,11 +143,23 @@ export const allowedWikiPatchPropertyKeys = [
   'openSourceStatus',
 ] as const;
 
+export const CAPTURE_STRUCTURED_SOURCE_MAX_CHARS = 50000;
+
 export function shouldUseCaptureDigest(content: string, threshold = 3000) {
   return content.trim().length > threshold;
 }
 
-export function splitCaptureContentIntoChunks(content: string, maxChars = 5000, maxChunks = 6) {
+export function buildCaptureSourceForStructuredProcessing(content: string, maxChars = CAPTURE_STRUCTURED_SOURCE_MAX_CHARS) {
+  const trimmed = content.trim();
+  if (trimmed.length <= maxChars) return trimmed;
+  return [
+    trimmed.slice(0, maxChars),
+    '',
+    `[...truncated to ${maxChars} characters before structured capture; the complete source is still stored in the raw material entry...]`,
+  ].join('\n');
+}
+
+export function splitCaptureContentIntoChunks(content: string, maxChars = 10000, maxChunks = 5) {
   const trimmed = content.trim();
   if (!trimmed) return [];
   if (trimmed.length <= maxChars) return [trimmed];
@@ -175,6 +187,37 @@ export function splitCaptureContentIntoChunks(content: string, maxChars = 5000, 
 
   if (current) chunks.push(current);
   return selectRepresentativeChunks(chunks, maxChunks);
+}
+
+export function buildStructuredCaptureExcerpt(content: string, maxChars = 28000) {
+  const trimmed = content.trim();
+  if (trimmed.length <= maxChars) return trimmed;
+
+  const headerBudget = Math.round(maxChars * 0.4);
+  const priorityBudget = Math.round(maxChars * 0.28);
+  const tailBudget = maxChars - headerBudget - priorityBudget;
+  const priorityLines = trimmed
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /(摘要|结论|总结|建议|问题|风险|任务|行动|计划|路线|优先级|目标|项目|下一阶段|待办|TODO|todo|业态|板块|面积|投资|收入|成本|利润|时间节点|负责人)/i.test(line))
+    .join('\n')
+    .slice(0, priorityBudget);
+
+  return [
+    '# 长文档本地摘录',
+    '',
+    '长文档摘要模型调用失败或不可用，以下为本地保留的开头、关键行和结尾摘录。请基于这些内容继续生成结构化 Wiki 草稿；完整原文仍保存在 Raw Entry 中。',
+    '',
+    '--- 开头 ---',
+    trimmed.slice(0, headerBudget),
+    priorityLines ? '\n--- 关键行 ---' : '',
+    priorityLines,
+    '\n--- 结尾 ---',
+    trimmed.slice(-tailBudget),
+  ]
+    .filter(Boolean)
+    .join('\n')
+    .slice(0, maxChars + 320);
 }
 
 export function buildCaptureDigestPrompt(content: string, chunkIndex = 1, totalChunks = 1) {
@@ -231,6 +274,9 @@ ${entityIndexJson}
 规则：
 - 只提取材料中有证据的内容。
 - entities 必须对照当前 Wiki 目录判断 existsLikely；名称相近、别名相近、摘要相近都应视为可能已存在。
+- 对 PDF、Word、表格、图片等“导入文件”材料，必须先识别“来源文件本身”与“文件中讲到的知识对象”：来源文件用于生成 source 页面；关键项目/业务/对象用 project/entity/topic；关键方法/模型/机制/路线用 concepts。不要只输出“导入文件：xxx”这种保底主题。
+- 导入材料如果围绕一个长期项目、商业案例、研究对象、软件系统或可研方案展开，entities 至少应包含该 project/topic；如果材料只是截图，也要根据视觉描述提取可见的项目、概念、指标或任务。
+- 不要因为正文中出现“会、会议、同步、讨论”等普通词就创建 event。只有材料本身明确是在记录一次具体会议、沟通、访谈或时间点事件时，才允许 type=event。
 - concepts 用来记录重要概念、方法、技术路线或主题，不要把所有普通名词都列进去。
 - claims 必须是可写入 Wiki 的事实属性或关系事实，例如 runtimeEnvironment、wakeWord、stopWord、localPath、models、ownerNote、derivedFrom、openSourceStatus。
 - hierarchies 用来记录层级结构，例如“福瑞三期 -> 医疗业态 -> FMT 疗法 / 中蒙医院”。只在材料明确出现“业态/版块/板块/业务线/模块/分类”及其下属项目、服务、机构或方法时输出。
@@ -241,9 +287,44 @@ ${entityIndexJson}
 - hierarchy.items 不能放目录标题、页码、章节号、点线、宣传口号或无法归类的碎片。
 - contradictions 只放真正冲突或张力，不要把普通不确定都放进去。
 - recommendedUpdates 要明确建议创建或更新哪些实体、关系、任务或待审核项。
+- 对导入文件，recommendedUpdates 必须包含一个面向来源页的 CREATE_ENTITY 建议，并包含关键 project/entity/concept 的 CREATE_ENTITY 或 UPDATE 建议；除非材料完全没有可读内容。
 - 不确定、冲突或需要用户判断的内容放入 contradictions 或 recommendedUpdates。
 - 如果材料暗示需要后续深度研究，可在 recommendedUpdates.reason 中写出 2-3 个搜索关键词。
 - 不要生成数据库 ID，不要输出 markdown。`;
+}
+
+export function buildCaptureAnalysisJsonRepairPrompt(rawText: string, content: string, entityIndexJson: string) {
+  return `你是 MyWiki 的 JSON 修复 Agent。上一轮摄入分析模型输出不能被程序解析。
+
+你的任务：只根据“原始材料”和“当前 Wiki 目录”重新输出一个合法 JSON 对象。不要解释，不要 Markdown，不要代码块。
+
+必须输出这个 schema：
+{
+  "entities": [{"title": "", "type": "person|project|event|topic", "aliases": [], "evidence": "", "existsLikely": false}],
+  "concepts": [{"title": "", "evidence": ""}],
+  "claims": [{"subject": "", "predicate": "", "object": "", "evidence": "", "confidence": "high|medium|low"}],
+  "hierarchies": [{"parentTitle": "", "categoryName": "", "items": [{"title": "", "kind": "", "evidence": ""}], "evidence": "", "confidence": "high|medium|low"}],
+  "indicators": [{"entityTitle": "", "name": "", "value": null, "rawValue": "", "unit": "", "businessLine": "", "categoryName": "", "evidence": "", "confidence": "high|medium|low", "note": ""}],
+  "contradictions": [{"title": "", "evidence": ""}],
+  "recommendedUpdates": [{"targetTitle": "", "action": "CREATE_ENTITY|UPDATE_ENTITY_INDICATORS|UPDATE_ENTITY_PROPERTY|CREATE_RELATIONSHIP|CREATE_TASK|REVIEW_REQUIRED", "reason": ""}]
+}
+
+硬性规则：
+- 返回值必须是一个 JSON object，第一字符必须是 {，最后一个字符必须是 }。
+- 所有 key 必须使用英文双引号。
+- 数组分隔只能用英文逗号，不能用中文顿号、中文逗号或分号。
+- 如果没有内容，输出空数组，不要省略字段。
+- 对“# 导入文件：...”材料，至少识别来源文件本身；如果材料中有项目/表格/报告对象，也要识别对应 project/topic。
+- 只保留有原文证据的内容，不要猜测。
+
+原始材料：
+${content}
+
+当前 Wiki 目录：
+${entityIndexJson}
+
+上一轮不可解析输出，仅供参考，不能照抄其中的格式错误：
+${rawText.slice(0, 12000)}`;
 }
 
 export function buildWikiPatchPrompt(content: string, analysis: CaptureAnalysis) {
@@ -273,7 +354,11 @@ patches 中每一项必须符合以下 patch 类型之一：
 - UPDATE_ENTITY_PROPERTY.propertyKey 只能使用：${allowedWikiPatchPropertyKeys.join(', ')}
 - REVIEW_REQUIRED.options 只能从 Create Page / Update Existing / Skip 中选择。
 - 每个 patch 都必须带 evidence，evidence 必须是原文中的短证据片段。
+- 对“# 导入文件：...”材料，必须生成一个来源摘要页 patch：CREATE_ENTITY，entityType 为 topic，title 使用文件名去掉扩展名，tags 必须包含 "source" 或 "来源"。这张页会被 schema 路由到 wiki/sources/。
+- 对导入文件中真正讲到的关键对象，还要生成 project/entity/topic/concept 对应的 CREATE_ENTITY 或 UPDATE patch；不要只生成来源摘要页。
+- concepts 中的重要概念应转换为 CREATE_ENTITY(entityType="topic")，tags 包含 "concept" 或 "概念"，以便路由到 wiki/concepts/。
 - CREATE_ENTITY 只在分析认为实体不存在或值得新建时使用；可能已存在的实体优先 UPDATE_ENTITY_PROPERTY、CREATE_RELATIONSHIP 或 REVIEW_REQUIRED。
+- 对导入报告、可研、商业计划书、测算表、截图等文件，CREATE_ENTITY 的 entityType 优先使用 project/topic；不要把文件名或项目名生成为“同步”事件页，除非原文明确是一场会议纪要。
 - UPDATE_ENTITY_CATEGORIES 用于写入父实体内部层级结构，格式为 {"type":"UPDATE_ENTITY_CATEGORIES","entityTitle":"父实体","categories":[{"name":"医疗业态","aliases":["医疗"],"items":[{"title":"FMT 疗法","kind":"method","evidence":"..."}]}],"evidence":"...","confidence":0.8}。
 - UPDATE_ENTITY_CATEGORIES 只能在原文明确给出“某维度下包含哪些项目/服务/机构/方法”时生成；不要把目录、页码、章节标题或上一级业态列表当成 items。
 - UPDATE_ENTITY_INDICATORS 用于写入结构化指标，格式为 {"type":"UPDATE_ENTITY_INDICATORS","entityTitle":"父实体","indicators":[{"name":"住宅板块建筑面积","value":null,"unit":"万平方米","businessLine":"住宅","categoryName":"住宅业态","source":{"excerpt":"原文未明确披露住宅板块建筑面积"},"confidence":"high","note":"原文未提供明确数值"}],"evidence":"...","confidence":0.8}。
@@ -287,8 +372,46 @@ patches 中每一项必须符合以下 patch 类型之一：
 - 不要输出 markdown，不要输出解释。`;
 }
 
+export function buildWikiPatchJsonRepairPrompt(rawText: string, content: string, analysis: CaptureAnalysis) {
+  return `你是 MyWiki 的 WikiPatch JSON 修复 Agent。上一轮 WikiPatch 输出不能被程序解析。
+
+你的任务：根据“原始材料”和“分析结果”重新输出一个合法 JSON 对象。不要解释，不要 Markdown，不要代码块。
+
+必须输出：
+{
+  "patches": []
+}
+
+patches 只能包含以下类型：
+- CREATE_ENTITY
+- UPDATE_ENTITY_CATEGORIES
+- UPDATE_ENTITY_INDICATORS
+- UPDATE_ENTITY_PROPERTY
+- CREATE_RELATIONSHIP
+- CREATE_TASK
+- REVIEW_REQUIRED
+
+硬性规则：
+- 返回值必须是一个 JSON object，第一字符必须是 {，最后一个字符必须是 }。
+- 所有 key 必须使用英文双引号。
+- 数组分隔只能用英文逗号，不能用中文顿号、中文逗号或分号。
+- 每个 patch 都必须带 evidence，且 evidence 必须来自原始材料。
+- 对“# 导入文件：...”材料，必须至少生成一个来源摘要页 patch：CREATE_ENTITY，entityType 为 topic，title 使用文件名去掉扩展名，tags 包含 "source" 或 "来源"。
+- 如果材料中有项目、业务、测算表、报告对象，也要生成对应 project/topic 的 CREATE_ENTITY 或 UPDATE patch。
+- 如果无法安全生成 patch，输出 {"patches": []}，不要输出自然语言。
+
+原始材料：
+${content}
+
+分析结果：
+${JSON.stringify(analysis, null, 2)}
+
+上一轮不可解析输出，仅供参考，不能照抄其中的格式错误：
+${rawText.slice(0, 12000)}`;
+}
+
 export function normalizeCaptureAnalysis(rawText: string): CaptureAnalysis {
-  const parsed = parseBestJson(rawText) as Partial<CaptureAnalysis>;
+  const parsed = parseBestJson(rawText, { repair: true }) as Partial<CaptureAnalysis>;
   return {
     entities: toArray<Record<string, unknown>>(parsed.entities)
       .map((entity) => ({
@@ -361,13 +484,14 @@ export function normalizeCaptureAnalysis(rawText: string): CaptureAnalysis {
 }
 
 export function normalizeWikiPatchResponse(rawText: string): WikiPatch[] {
-  const parsed = parseBestJson(rawText) as { patches?: unknown } | unknown[];
+  const parsed = parseBestJson(rawText, { repair: true }) as { patches?: unknown } | unknown[];
   const rawPatches = Array.isArray(parsed) ? parsed : toArray((parsed as { patches?: unknown }).patches);
   return rawPatches.map(normalizeWikiPatch).filter((patch): patch is WikiPatch => Boolean(patch && validateWikiPatch(patch)));
 }
 
 export function normalizeWikiPatchesToCaptureDraft(patches: WikiPatch[], content: string): CaptureDraft {
   const entityByTitle = new Map<string, DraftEntity>();
+  let importedSourceClientId: string | undefined;
 
   const ensureEntity = (title: string, fallbackType: EntityType = 'topic', summary?: string) => {
     const key = normalizeTitle(title);
@@ -413,6 +537,14 @@ export function normalizeWikiPatchesToCaptureDraft(patches: WikiPatch[], content
     }
   }
 
+  const importedSource = extractImportedSourceInfo(content);
+  if (importedSource) {
+    const sourceEntity = ensureEntity(importedSource.title, 'topic', importedSource.summary);
+    importedSourceClientId = sourceEntity.clientId;
+    sourceEntity.tags = mergeUniqueStrings(sourceEntity.tags, importedSource.tags);
+    sourceEntity.scenes = mergeUniqueStrings(sourceEntity.scenes, ['work']) as DraftEntity['scenes'];
+  }
+
   if (entityByTitle.size === 0) {
     ensureEntity(content.slice(0, 24) || '未命名主题', 'topic', content.slice(0, 120));
   }
@@ -435,6 +567,21 @@ export function normalizeWikiPatchesToCaptureDraft(patches: WikiPatch[], content
       };
     })
     .filter((item): item is NonNullable<typeof item> => Boolean(item));
+
+  if (importedSourceClientId) {
+    for (const entity of entities) {
+      if (entity.clientId === importedSourceClientId) continue;
+      if (relationships.some((relationship) => relationship.fromClientId === importedSourceClientId && relationship.toClientId === entity.clientId)) {
+        continue;
+      }
+      relationships.push({
+        clientId: createDraftId('rel'),
+        fromClientId: importedSourceClientId,
+        toClientId: entity.clientId,
+        type: 'mentions',
+      });
+    }
+  }
 
   const tasks = patches
     .filter((patch): patch is Extract<WikiPatch, { type: 'CREATE_TASK' }> => patch.type === 'CREATE_TASK')
@@ -475,6 +622,138 @@ export function normalizeWikiPatchesToCaptureDraft(patches: WikiPatch[], content
   return { primaryEntity, relatedEntities, relationships, tasks, compileSuggestions };
 }
 
+export function normalizeCaptureAnalysisToCaptureDraft(analysis: CaptureAnalysis, content: string): CaptureDraft {
+  const entityByTitle = new Map<string, DraftEntity>();
+  const importedSource = extractImportedSourceInfo(content);
+  let importedSourceClientId: string | undefined;
+
+  const ensureEntity = (
+    title: string,
+    fallbackType: EntityType = 'topic',
+    summary?: string,
+    tags: string[] = [],
+  ) => {
+    const cleanedTitle = title.trim();
+    const key = normalizeTitle(cleanedTitle);
+    if (!key) return undefined;
+    const existing = entityByTitle.get(key);
+    if (existing) {
+      existing.summary = existing.summary.trim() || summary?.trim() || existing.summary;
+      existing.tags = mergeUniqueStrings(existing.tags, tags);
+      return existing;
+    }
+
+    const entity: DraftEntity = {
+      clientId: createDraftId('entity'),
+      type: fallbackType,
+      title: cleanedTitle,
+      summary: summary?.trim() || `${cleanedTitle} 相关记录。`,
+      tags: mergeUniqueStrings([], tags),
+      scenes: ['work'],
+    };
+    entityByTitle.set(key, entity);
+    return entity;
+  };
+
+  if (importedSource) {
+    const sourceEntity = ensureEntity(importedSource.title, 'topic', importedSource.summary, importedSource.tags);
+    importedSourceClientId = sourceEntity?.clientId;
+  }
+
+  for (const entity of analysis.entities.slice(0, 18)) {
+    ensureEntity(entity.title, entity.type, entity.evidence, defaultTagsForEntityType(entity.type));
+  }
+
+  for (const concept of analysis.concepts.slice(0, 18)) {
+    ensureEntity(concept.title, 'topic', concept.evidence, ['concept', '概念']);
+  }
+
+  for (const hierarchy of analysis.hierarchies) {
+    const entity = ensureEntity(hierarchy.parentTitle, 'project', hierarchy.evidence, ['project', '项目']);
+    if (!entity) continue;
+    entity.categories = mergeDraftCategories(entity.categories ?? [], [
+      {
+        name: hierarchy.categoryName,
+        items: hierarchy.items.map((item) => ({
+          title: item.title,
+          kind: item.kind,
+          evidence: item.evidence,
+        })),
+        evidence: hierarchy.evidence,
+      },
+    ]);
+  }
+
+  for (const indicator of analysis.indicators) {
+    const entity = ensureEntity(indicator.entityTitle, 'project', indicator.evidence, ['project', '项目']);
+    if (!entity) continue;
+    entity.indicators = mergeDraftIndicators(entity.indicators ?? [], [
+      {
+        name: indicator.name,
+        value: indicator.value,
+        rawValue: indicator.rawValue,
+        unit: indicator.unit,
+        businessLine: indicator.businessLine,
+        categoryName: indicator.categoryName,
+        source: {
+          excerpt: indicator.evidence,
+        },
+        confidence: indicator.confidence,
+        note: indicator.note,
+        asOfDate: indicator.asOfDate,
+      },
+    ]);
+  }
+
+  const compileSuggestions = analysis.claims
+    .filter((claim) => allowedWikiPatchPropertyKeys.includes(claim.predicate as (typeof allowedWikiPatchPropertyKeys)[number]))
+    .map((claim) => {
+      const entity = ensureEntity(claim.subject, 'topic', claim.evidence);
+      if (!entity) return undefined;
+      return {
+        clientId: createDraftId('compile'),
+        entityClientId: entity.clientId,
+        entityTitle: entity.title,
+        propertyKey: claim.predicate,
+        propertyLabel: propertyLabel(claim.predicate),
+        propertyValue: claim.object,
+        evidenceSnippet: claim.evidence,
+        confidence: confidenceToNumber(claim.confidence),
+      };
+    })
+    .filter((item): item is NonNullable<typeof item> => Boolean(item));
+
+  for (const update of analysis.recommendedUpdates) {
+    if (update.action === 'CREATE_ENTITY' || update.action === 'REVIEW_REQUIRED') {
+      ensureEntity(update.targetTitle, 'topic', update.reason, update.action === 'REVIEW_REQUIRED' ? ['待审核'] : []);
+    }
+  }
+
+  if (entityByTitle.size === 0) {
+    ensureEntity(content.slice(0, 24) || '未命名主题', 'topic', content.slice(0, 120), ['导入材料']);
+  }
+
+  const entities = Array.from(entityByTitle.values());
+  const sourceEntity = importedSourceClientId ? entities.find((entity) => entity.clientId === importedSourceClientId) : undefined;
+  const primaryEntity = entities.find((entity) => entity.clientId !== importedSourceClientId) ?? sourceEntity ?? entities[0];
+  const relatedEntities = entities.filter((entity) => entity.clientId !== primaryEntity.clientId);
+  const relationships: CaptureDraft['relationships'] = [];
+
+  if (importedSourceClientId) {
+    for (const entity of entities) {
+      if (entity.clientId === importedSourceClientId) continue;
+      relationships.push({
+        clientId: createDraftId('rel'),
+        fromClientId: importedSourceClientId,
+        toClientId: entity.clientId,
+        type: 'mentions',
+      });
+    }
+  }
+
+  return { primaryEntity, relatedEntities, relationships, tasks: [], compileSuggestions };
+}
+
 export function validateWikiPatch(patch: WikiPatch) {
   if (!patch.type || !('evidence' in patch) || !patch.evidence.trim()) return false;
 
@@ -497,6 +776,67 @@ export function validateWikiPatch(patch: WikiPatch) {
   }
 
   return true;
+}
+
+function extractImportedSourceInfo(content: string) {
+  const filename = content.match(/^#\s*导入文件[:：]\s*(.+)$/m)?.[1]?.trim();
+  if (!filename) return undefined;
+
+  const sourceFormat = content.match(/来源格式[:：]\s*([^\n]+)/)?.[1]?.trim();
+  const title = stripSourceExtension(stripImportTitlePrefix(filename)) || filename;
+  const body = content
+    .replace(/^#\s*导入文件[:：].*$/m, '')
+    .replace(/来源格式[:：].*$/m, '')
+    .replace(/文件大小[:：].*$/m, '')
+    .replace(/内容指纹[:：].*$/m, '')
+    .trim();
+  const summary = buildSourceSummary(filename, body || content);
+
+  return {
+    filename,
+    title,
+    summary,
+    tags: mergeUniqueStrings(['source', '来源', '导入材料'], sourceFormat ? [sourceFormat] : []),
+  };
+}
+
+function stripImportTitlePrefix(value: string) {
+  return value.replace(/^导入文件[:：]\s*/i, '').trim();
+}
+
+function stripSourceExtension(value: string) {
+  return value.replace(/\.[a-z0-9]{1,8}$/i, '').trim();
+}
+
+function buildSourceSummary(filename: string, content: string) {
+  const lines = content
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('---') && !/^#+\s*/.test(line))
+    .filter((line) => !/^!\[/.test(line))
+    .slice(0, 8);
+  const summary = lines.join(' ').replace(/\s+/g, ' ').slice(0, 320).trim();
+  return summary || `${filename} 的来源摘要。`;
+}
+
+function defaultTagsForEntityType(type: EntityType) {
+  const tags: Record<EntityType, string[]> = {
+    person: ['entity', '人物'],
+    project: ['project', '项目'],
+    event: ['event', '事件'],
+    topic: ['topic'],
+  };
+  return tags[type];
+}
+
+function mergeUniqueStrings(left: string[], right: string[]) {
+  return Array.from(new Set([...left, ...right].map((item) => item.trim()).filter(Boolean)));
+}
+
+function confidenceToNumber(confidence: CaptureAnalysis['claims'][number]['confidence']) {
+  if (confidence === 'high') return 0.9;
+  if (confidence === 'low') return 0.45;
+  return 0.65;
 }
 
 function normalizeWikiPatch(value: unknown): WikiPatch | undefined {
@@ -713,14 +1053,200 @@ function isLikelyListNoise(value: string) {
   return /(\.{3,}|…{2,}|-{2,}|\bof\s+\d+\b|目录|页码|第\s*\d+\s*页)/i.test(value);
 }
 
-function parseBestJson(text: string) {
+function parseBestJson(text: string, options: { repair?: boolean } = {}) {
   const withoutFence = text.replace(/```(?:json)?/g, '').replace(/```/g, '').trim();
-  const start = withoutFence.indexOf('{');
-  const end = withoutFence.lastIndexOf('}');
-  if (start < 0 || end < start) {
+  const candidates = extractJsonCandidates(withoutFence);
+  if (candidates.length === 0) {
     throw new Error('LLM did not return a JSON object.');
   }
-  return JSON.parse(withoutFence.slice(start, end + 1).replace(/,\s*([}\]])/g, '$1')) as unknown;
+
+  let lastError: unknown;
+  for (const candidate of candidates.reverse()) {
+    try {
+      return JSON.parse(cleanJsonCandidate(candidate)) as unknown;
+    } catch (error) {
+      lastError = error;
+      if (!options.repair) continue;
+      try {
+        return JSON.parse(repairLooseJsonCandidate(candidate)) as unknown;
+      } catch (repairError) {
+        lastError = repairError;
+      }
+    }
+  }
+
+  throw new Error(`模型返回的结构化 JSON 仍不合法，请重试或换一个 Wiki 编译模型。${lastError instanceof Error ? `原始错误：${lastError.message}` : ''}`);
+}
+
+function cleanJsonCandidate(value: string) {
+  return normalizeJsonSyntaxOutsideStrings(value).replace(/,\s*([}\]])/g, '$1');
+}
+
+function repairLooseJsonCandidate(value: string) {
+  let repaired = cleanJsonCandidate(value);
+  for (let iteration = 0; iteration < 6; iteration += 1) {
+    const next = injectMissingCommas(repaired)
+      .replace(/}\s*(?={)/g, '},')
+      .replace(/]\s*(?={)/g, '],')
+      .replace(/]\s*(?=")/g, '],')
+      .replace(/"\s+(?="[^"]+"\s*:)/g, '", ')
+      .replace(/"\s+(?=")/g, '", ')
+      .replace(/"\s*\n\s*"/g, '",\n"')
+      .replace(/}\s*\n\s*{/g, '},\n{')
+      .replace(/]\s*\n\s*"/g, '],\n"')
+      .replace(/}\s*\n\s*"/g, '},\n"')
+      .replace(/"\s*\n\s*{/g, '",\n{')
+      .replace(/(\d|true|false|null)\s*\n\s*"/g, '$1,\n"')
+      .replace(/(\d|true|false|null)\s*\n\s*{/g, '$1,\n{');
+    if (next === repaired) break;
+    repaired = cleanJsonCandidate(next);
+  }
+  return repaired;
+}
+
+function injectMissingCommas(value: string) {
+  let output = '';
+  let inString = false;
+  let escaped = false;
+  let lastSignificant = '';
+  let gapHasWhitespace = false;
+
+  for (const char of value) {
+    if (inString) {
+      output += char;
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+        lastSignificant = '"';
+      }
+      continue;
+    }
+
+    if (/\s/.test(char)) {
+      output += char;
+      gapHasWhitespace = true;
+      continue;
+    }
+
+    if (char === '"') {
+      if (shouldInsertMissingComma(lastSignificant, char, gapHasWhitespace)) output += ',';
+      output += char;
+      inString = true;
+      escaped = false;
+      gapHasWhitespace = false;
+      continue;
+    }
+
+    if (shouldInsertMissingComma(lastSignificant, char, gapHasWhitespace)) output += ',';
+    output += char;
+    lastSignificant = char;
+    gapHasWhitespace = false;
+  }
+
+  return output;
+}
+
+function extractJsonCandidates(text: string) {
+  const candidates: string[] = [];
+  const stack: string[] = [];
+  let inString = false;
+  let escaped = false;
+  let start = -1;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      escaped = false;
+      continue;
+    }
+
+    const expectedClose = openingJsonBracketClose(char);
+    if (expectedClose) {
+      if (stack.length === 0) start = index;
+      stack.push(expectedClose);
+      continue;
+    }
+
+    if (stack.length > 0 && char === stack[stack.length - 1]) {
+      stack.pop();
+      if (stack.length === 0 && start !== -1) {
+        candidates.push(text.slice(start, index + 1));
+        start = -1;
+      }
+    }
+  }
+
+  return candidates;
+}
+
+function openingJsonBracketClose(char: string) {
+  if (char === '{' || char === '｛') return char === '{' ? '}' : '｝';
+  if (char === '[' || char === '［' || char === '【') return char === '[' ? ']' : char === '［' ? '］' : '】';
+  return '';
+}
+
+function normalizeJsonSyntaxOutsideStrings(value: string) {
+  let output = '';
+  let inString = false;
+  let escaped = false;
+
+  for (const char of value) {
+    if (inString) {
+      output += char;
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      output += char;
+      inString = true;
+      escaped = false;
+      continue;
+    }
+
+    output += normalizeJsonSyntaxChar(char);
+  }
+
+  return output;
+}
+
+function normalizeJsonSyntaxChar(char: string) {
+  if (char === '，' || char === '、' || char === '；' || char === ';') return ',';
+  if (char === '：') return ':';
+  if (char === '｛') return '{';
+  if (char === '｝') return '}';
+  if (char === '［' || char === '【') return '[';
+  if (char === '］' || char === '】') return ']';
+  return char;
+}
+
+function shouldInsertMissingComma(previous: string, next: string, hasWhitespace: boolean) {
+  if (!previous) return false;
+  const previousEndsValue = previous === '"' || previous === '}' || previous === ']' || (hasWhitespace && /[0-9eEl]/.test(previous));
+  const nextStartsValueOrKey = next === '"' || next === '{' || next === '[' || next === '-' || /[0-9tfn]/i.test(next);
+  return previousEndsValue && nextStartsValueOrKey;
 }
 
 function stringValue(value: unknown) {

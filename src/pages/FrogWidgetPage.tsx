@@ -1,8 +1,15 @@
-import { Check, Clipboard, FileDown, Loader2, RotateCcw, Settings2 } from 'lucide-react';
-import { type ClipboardEvent, type DragEvent, type PointerEvent, useEffect, useRef, useState } from 'react';
+import { Check, ChevronDown, ChevronUp, Clipboard, FileDown, Loader2, Minus, RotateCcw, Settings2 } from 'lucide-react';
+import { type ClipboardEvent, type DragEvent, type PointerEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { LogicalSize } from '@tauri-apps/api/dpi';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { createRawAssetFromFile, processNextRawAsset, resetStaleRawAssets } from '@/lib/rawAssets';
+import {
+  createRawAssetFromFile,
+  processRawAssetQueue,
+  resetStaleRawAssets,
+  subscribeRawAssetQueueStatus,
+  type RawAssetQueueSnapshot,
+} from '@/lib/rawAssets';
 import { isSupportedImportFile } from '@/lib/import/fileText';
 import { db } from '@/lib/db';
 import type { RawAssetStatus } from '@/types';
@@ -30,27 +37,135 @@ const statusLabel: Record<RawAssetStatus, string> = {
 };
 
 const FROG_POSITION_KEY = 'mywiki.froggy.position';
-const FROG_AUTO_COMPILE_KEY = 'mywiki.froggy.autoCompile';
 
 export function FrogWidgetPage() {
   const pageRef = useRef<HTMLElement | null>(null);
   const [mood, setMood] = useState<FrogMood>('idle');
   const [message, setMessage] = useState('把文件丢给我，我会先收进 Raw Inbox。');
   const [progress, setProgress] = useState<ProgressState | null>(null);
+  const [queueStatus, setQueueStatus] = useState<RawAssetQueueSnapshot | null>(null);
   const [isBusy, setIsBusy] = useState(false);
   const [isDraggingWidget, setIsDraggingWidget] = useState(false);
-  const [autoCompile, setAutoCompile] = useState(() => loadBoolean(FROG_AUTO_COMPILE_KEY, true));
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [showIdleHint, setShowIdleHint] = useState(false);
   const [position, setPosition] = useState<WidgetPosition>(() => loadPosition());
   const rawAssets = useLiveQuery(() => db.rawAssets.orderBy('createdAt').reverse().limit(5).toArray(), [], []);
-
-  useEffect(() => {
-    localStorage.setItem(FROG_AUTO_COMPILE_KEY, String(autoCompile));
-  }, [autoCompile]);
+  const retryQueueKey = useMemo(
+    () =>
+      queueStatus?.stage === 'running'
+        ? [queueStatus.currentAssetId ?? '', ...(queueStatus.queuedAssetIds ?? [])].join('|')
+        : '',
+    [queueStatus?.currentAssetId, queueStatus?.queuedAssetIds, queueStatus?.stage],
+  );
+  const rawAssetStats = useLiveQuery(
+    async () => {
+      const assets = await db.rawAssets.toArray();
+      return assets.reduce(
+        (stats, asset) => {
+          const displayStatus = getDisplayRawAssetStatus(asset, queueStatus);
+          stats.total += 1;
+          if (displayStatus === 'raw' || displayStatus === 'extracting' || displayStatus === 'compiling') {
+            stats.pending += 1;
+          } else if (displayStatus === 'compiled') {
+            stats.compiled += 1;
+          } else if (displayStatus === 'failed') {
+            stats.failed += 1;
+          } else if (displayStatus === 'skipped') {
+            stats.skipped += 1;
+          }
+          return stats;
+        },
+        { total: 0, pending: 0, compiled: 0, failed: 0, skipped: 0 },
+      );
+    },
+    [retryQueueKey],
+    { total: 0, pending: 0, compiled: 0, failed: 0, skipped: 0 },
+  );
+  const desktopShell = isTauriRuntime();
 
   useEffect(() => {
     pageRef.current?.focus();
     void resetStaleRawAssets();
   }, []);
+
+  useEffect(
+    () =>
+      subscribeRawAssetQueueStatus((snapshot) => {
+        setQueueStatus(snapshot);
+        if (!snapshot) return;
+        if (snapshot.stage === 'running') {
+          setMood('digest');
+          setIsBusy(true);
+          setMessage(`${snapshot.owner === 'frog' ? '我正在' : '知识库页面正在'}消化材料。`);
+          setProgress({
+            percent: snapshot.percent,
+            label: snapshot.label,
+            detail: snapshot.detail,
+          });
+          return;
+        }
+        if (snapshot.owner !== 'frog' && Date.now() - snapshot.updatedAt < 5000) {
+          setMood(snapshot.stage === 'failed' ? 'error' : 'done');
+          setProgress({
+            percent: snapshot.percent,
+            label: snapshot.label,
+            detail: snapshot.detail,
+          });
+          setMessage(snapshot.stage === 'failed' ? '知识库页面编译队列遇到失败。' : '知识库页面已完成编译队列。');
+          finishLater(snapshot.stage === 'failed' ? 'error' : 'done');
+        }
+      }),
+    [],
+  );
+
+  useEffect(() => {
+    if (!desktopShell) return;
+    const htmlBackground = document.documentElement.style.background;
+    const bodyBackground = document.body.style.background;
+    document.documentElement.style.background = 'transparent';
+    document.body.style.background = 'transparent';
+    return () => {
+      document.documentElement.style.background = htmlBackground;
+      document.body.style.background = bodyBackground;
+    };
+  }, [desktopShell]);
+
+  useEffect(() => {
+    if (!desktopShell) return;
+    const height = detailsOpen ? 610 : 360;
+    void getCurrentWindow().setSize(new LogicalSize(340, height)).catch(() => undefined);
+  }, [desktopShell, detailsOpen]);
+
+  useEffect(() => {
+    if (mood !== 'idle' || isBusy) {
+      setShowIdleHint(false);
+      return;
+    }
+
+    let active = true;
+    let showTimer: number | undefined;
+    let hideTimer: number | undefined;
+
+    function schedule(delay: number) {
+      showTimer = window.setTimeout(() => {
+        if (!active) return;
+        setShowIdleHint(true);
+        hideTimer = window.setTimeout(() => {
+          if (!active) return;
+          setShowIdleHint(false);
+          schedule(8000 + Math.random() * 12000);
+        }, 3600);
+      }, delay);
+    }
+
+    schedule(2400 + Math.random() * 4200);
+
+    return () => {
+      active = false;
+      if (showTimer) window.clearTimeout(showTimer);
+      if (hideTimer) window.clearTimeout(hideTimer);
+    };
+  }, [mood, isBusy]);
 
   useEffect(() => {
     localStorage.setItem(FROG_POSITION_KEY, JSON.stringify(position));
@@ -59,12 +174,14 @@ export function FrogWidgetPage() {
   function handleDragOver(event: DragEvent<HTMLElement>) {
     if (!hasDraggedFiles(event.dataTransfer)) return;
     event.preventDefault();
+    event.stopPropagation();
     if (isBusy) return;
     setMood('hover');
     setMessage('松手，丢进嘴里。');
   }
 
   function handleDragLeave(event: DragEvent<HTMLElement>) {
+    event.stopPropagation();
     if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
     if (!isBusy) {
       setMood('idle');
@@ -75,6 +192,7 @@ export function FrogWidgetPage() {
   function handleDrop(event: DragEvent<HTMLElement>) {
     if (!hasDraggedFiles(event.dataTransfer)) return;
     event.preventDefault();
+    event.stopPropagation();
     if (isBusy) return;
     void ingestFiles(Array.from(event.dataTransfer.files));
   }
@@ -134,67 +252,54 @@ export function FrogWidgetPage() {
       return;
     }
 
-    if (!autoCompile) {
-      setMood('done');
-      setProgress({
-        percent: 100,
-        label: '已采集到 Raw Inbox',
-        detail: `新增 ${accepted} 个，已存在 ${reused} 个${errors.length > 0 ? `，跳过 ${errors.length} 个` : ''}`,
-      });
-      setMessage('已采集。稍后可在捕获页统一编译。');
-      finishLater('done');
-      return;
-    }
-
-    await digestQueue(accepted + reused, errors.length);
+    setMood('done');
+    setProgress({
+      percent: 100,
+      label: '已采集到 Raw Inbox',
+      detail: `新增 ${accepted} 个，已存在 ${reused} 个${errors.length > 0 ? `，跳过 ${errors.length} 个` : ''}`,
+    });
+    setMessage('已采集。需要时点开队列手动编译。');
+    finishLater('done');
   }
 
   async function digestQueue(queuedCount: number, errorCount: number) {
     setMood('digest');
     setMessage('正在消化材料，AI 编译会在后台继续。');
-    const recovered = await resetStaleRawAssets();
-    const rawTotal =
-      (await db.rawAssets.where('status').equals('raw').count()) +
-      (await db.rawAssets.where('status').equals('failed').count());
-    if (rawTotal === 0) {
+    try {
+      const result = await processRawAssetQueue({
+        owner: 'frog',
+        onStatus: (snapshot) => {
+          setProgress({
+            percent: snapshot.percent,
+            label: snapshot.label,
+            detail: snapshot.detail,
+          });
+        },
+      });
+      if (result.total === 0) {
+        setMood('done');
+        setProgress({ percent: 100, label: '已采集', detail: `新增/复用 ${queuedCount} 个` });
+        setMessage('材料已在 Raw Inbox。');
+        finishLater('done');
+        return;
+      }
+      if (result.failed > 0) {
+        setMood('error');
+        setMessage(`已采集，但还有 ${result.failed} 个材料需要重试。`);
+        setProgress({ percent: 100, label: '部分材料未编译成功', detail: errorCount > 0 ? `另有 ${errorCount} 个跳过` : undefined });
+        finishLater('error');
+        return;
+      }
       setMood('done');
-      setProgress({ percent: 100, label: '已采集', detail: `新增/复用 ${queuedCount} 个` });
-      setMessage('材料已在 Raw Inbox。');
+      setProgress({ percent: 100, label: '已入库', detail: `本轮处理 ${result.processed} 个材料` });
+      setMessage('已入库。');
       finishLater('done');
-      return;
-    }
-
-    let processed = 0;
-    for (let index = 0; index < rawTotal; index += 1) {
-      const result = await processNextRawAsset(undefined, (current) => {
-        setProgress({
-          percent: Math.min(96, Math.round(((processed + current.percent / 100) / rawTotal) * 100)),
-          label: current.label,
-          detail: `${processed}/${rawTotal}${recovered > 0 ? ` · 已恢复 ${recovered} 个` : ''}`,
-        });
-      });
-      if (!result) break;
-      processed += 1;
-      setProgress({
-        percent: Math.round((processed / rawTotal) * 100),
-        label: result.status === 'failed' ? `${result.filename} 编译失败` : `${result.filename} 已入库`,
-        detail: `${processed}/${rawTotal}`,
-      });
-    }
-
-    const failed = await db.rawAssets.where('status').equals('failed').count();
-    if (failed > 0) {
+    } catch (error) {
       setMood('error');
-      setMessage(`已采集，但还有 ${failed} 个材料需要重试。`);
-      setProgress({ percent: 100, label: '部分材料未编译成功', detail: errorCount > 0 ? `另有 ${errorCount} 个跳过` : undefined });
+      setMessage(error instanceof Error ? error.message : '编译队列启动失败。');
+      setProgress({ percent: 100, label: '编译队列未启动', detail: errorCount > 0 ? `另有 ${errorCount} 个跳过` : undefined });
       finishLater('error');
-      return;
     }
-
-    setMood('done');
-    setProgress({ percent: 100, label: '已入库', detail: `本轮处理 ${processed} 个材料` });
-    setMessage('已入库。');
-    finishLater('done');
   }
 
   function finishLater(finalMood: FrogMood) {
@@ -207,7 +312,13 @@ export function FrogWidgetPage() {
   }
 
   function handlePointerDown(event: PointerEvent<HTMLElement>) {
-    if ((event.target as HTMLElement).closest('a,button,input,label')) return;
+    const target = event.target;
+    if (
+      target instanceof Element &&
+      target.closest('[data-no-widget-drag],a,button,input,label,textarea,select')
+    ) {
+      return;
+    }
 
     if (isTauriRuntime()) {
       void getCurrentWindow().startDragging().catch(() => undefined);
@@ -237,6 +348,15 @@ export function FrogWidgetPage() {
     window.addEventListener('pointerup', up);
   }
 
+  function handleMinimize() {
+    if (!desktopShell) return;
+    void getCurrentWindow().minimize().catch(() => undefined);
+  }
+
+  const bubbleVisible = mood !== 'idle' || showIdleHint;
+  const bubbleMessage = mood === 'idle' ? '我饿了，有文件可以喂给我' : message;
+  const queueRunning = queueStatus?.stage === 'running';
+
   return (
     <main
       ref={pageRef}
@@ -248,19 +368,34 @@ export function FrogWidgetPage() {
       tabIndex={0}
     >
       <section
-        className={`frog-widget fixed w-[320px] rounded-[18px] border border-[#d9e4d7] bg-[#fbfffb]/95 p-4 shadow-[0_20px_50px_rgb(31_41_55_/_0.16)] backdrop-blur ${isDraggingWidget ? 'cursor-grabbing' : 'cursor-grab'}`}
+        className={`frog-widget fixed w-[320px] rounded-[18px] ${mood === 'hover' ? 'frog-widget-hover' : ''} ${desktopShell ? 'border border-transparent bg-transparent p-2 shadow-none' : 'border border-[#d9e4d7] bg-[#fbfffb]/95 p-4 shadow-[0_20px_50px_rgb(31_41_55_/_0.16)] backdrop-blur'} ${isDraggingWidget ? 'cursor-grabbing' : 'cursor-grab'}`}
         style={{ left: position.x, top: position.y }}
         onPointerDown={handlePointerDown}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
         aria-label="MyWiki 蛙蛙捕获入口"
       >
-        <div className="flex items-start justify-between gap-3">
-          <div>
+        <div className="absolute right-3 top-3 z-10 flex gap-1" data-no-widget-drag>
+          <div className="hidden">
             <p className="text-xs font-medium text-[#155eef]">Froggy Capture</p>
             <h1 className="mt-1 text-base font-semibold">MyWiki 捕获蛙</h1>
           </div>
+          {desktopShell ? (
+            <button
+              type="button"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-[#d9e4d7] bg-white/90 text-[#4b5563] shadow-sm"
+              title="最小化"
+              aria-label="最小化"
+              data-no-widget-drag
+              onClick={handleMinimize}
+            >
+              <Minus size={15} />
+            </button>
+          ) : null}
           <a
             href="/capture"
-            className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-[#d9e4d7] bg-white text-[#155eef]"
+            className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-[#d9e4d7] bg-white/90 text-[#155eef] shadow-sm"
             title="打开捕获页"
             aria-label="打开捕获页"
           >
@@ -268,36 +403,47 @@ export function FrogWidgetPage() {
           </a>
         </div>
 
-        <div className="mt-3 rounded-[14px] border border-dashed border-[#cfe1cf] bg-white/80 p-3">
-          <FrogFace mood={mood} />
-          <div className={`frog-bubble mt-3 ${mood === 'done' ? 'frog-bubble-done' : mood === 'error' ? 'frog-bubble-error' : ''}`}>
-            {message}
+        <div className="frog-drop-zone pointer-events-none relative h-[220px] rounded-[18px] border border-dashed border-[#cfe1cf] bg-white/80 px-3 pb-4 pt-7 shadow-[0_16px_40px_rgb(31_41_55_/_0.10)] backdrop-blur">
+          <div className="absolute inset-x-0 top-8">
+            <FrogFace mood={mood} />
           </div>
-          <p className="mt-2 text-center text-xs text-[#65736a]">拖入文件，或点一下窗口后粘贴图片/文本。</p>
+          {bubbleVisible ? (
+            <div className={`frog-bubble frog-bubble-floating ${mood === 'idle' ? 'frog-bubble-idle' : ''} ${mood === 'done' ? 'frog-bubble-done' : mood === 'error' ? 'frog-bubble-error' : ''}`}>
+              {bubbleMessage}
+            </div>
+          ) : null}
+          <p className="absolute inset-x-0 bottom-4 text-center text-xs text-[#65736a]">拖入文件 / 粘贴图片或文本</p>
         </div>
 
-        <div className="mt-3 flex items-center justify-between rounded-[12px] border border-[#e2ebe1] bg-white px-3 py-2">
-          <label className="flex items-center gap-2 text-xs text-[#2f3f35]">
-            <input
-              type="checkbox"
-              checked={autoCompile}
-              onChange={(event) => setAutoCompile(event.target.checked)}
-              className="size-4 accent-[#155eef]"
-            />
-            自动消化
-          </label>
+        <button
+          type="button"
+          className="mt-2 flex w-full items-center justify-between rounded-full border border-[#d9e4d7] bg-white/90 px-3 py-2 text-xs text-[#2f3f35] shadow-sm"
+          data-no-widget-drag
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={() => setDetailsOpen((open) => !open)}
+          aria-expanded={detailsOpen}
+        >
+          <span className="inline-flex items-center gap-1.5">
+            <Settings2 size={13} />
+            {detailsOpen ? '收起消化状态' : isBusy ? '正在消化，点开查看' : '消化状态与队列'}
+          </span>
+          {detailsOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+        </button>
+
+        <div className={detailsOpen ? 'block' : 'hidden'} data-no-widget-drag onPointerDown={(event) => event.stopPropagation()}>
+          <div className="mt-2 flex items-center justify-end rounded-[12px] border border-[#e2ebe1] bg-white/95 px-3 py-2">
           <button
             type="button"
             className="inline-flex items-center gap-1 rounded-full border border-[#d9e4d7] px-2 py-1 text-xs text-[#155eef] disabled:text-[#8a968e]"
-            disabled={isBusy}
+            disabled={isBusy || queueRunning}
             onClick={() => {
               setMood('digest');
               setIsBusy(true);
               void digestQueue(0, 0);
             }}
           >
-            {isBusy ? <Loader2 size={13} className="animate-spin" /> : <RotateCcw size={13} />}
-            编译队列
+            {isBusy || queueRunning ? <Loader2 size={13} className="animate-spin" /> : <RotateCcw size={13} />}
+            {queueRunning ? `编译中 ${queueStatus?.percent ?? 0}%` : '编译队列'}
           </button>
         </div>
 
@@ -306,18 +452,26 @@ export function FrogWidgetPage() {
         <div className="mt-3 rounded-[12px] border border-[#e2ebe1] bg-white px-3 py-2">
           <div className="flex items-center justify-between gap-2 text-xs">
             <span className="shrink-0 font-medium text-[#1f2937]">最近状态</span>
-            <span className="shrink-0 text-[11px] text-[#65736a]">{rawAssets?.length ?? 0} 条</span>
+            <span className="shrink-0 text-[11px] text-[#65736a]">
+              最近 {rawAssets?.length ?? 0} / 共 {rawAssetStats?.total ?? 0} 条
+            </span>
+          </div>
+          <div className="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-[11px] text-[#65736a]">
+            <span>待编译/处理中 {rawAssetStats?.pending ?? 0}</span>
+            <span>已入库 {rawAssetStats?.compiled ?? 0}</span>
+            {(rawAssetStats?.skipped ?? 0) > 0 ? <span>已跳过 {rawAssetStats?.skipped ?? 0}</span> : null}
+            {(rawAssetStats?.failed ?? 0) > 0 ? <span className="text-[#b42318]">失败 {rawAssetStats?.failed ?? 0}</span> : null}
           </div>
           {rawAssets && rawAssets.length > 0 ? (
             <div className="mt-2 space-y-1.5">
-              {rawAssets.slice(0, 3).map((asset) => (
-                <div key={asset.id} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-[8px] bg-[#f7fbf7] px-2 py-1.5 text-xs text-[#65736a]">
-                  <span className="min-w-0 truncate" title={asset.filename}>
-                    {asset.filename}
-                  </span>
-                  <span className="shrink-0 rounded-full border border-[#d9e4d7] px-2 py-0.5">{statusLabel[asset.status]}</span>
-                </div>
+              {rawAssets.map((asset) => (
+                <FrogRecentAsset key={asset.id} asset={asset} queueStatus={queueStatus} />
               ))}
+              {(rawAssetStats?.total ?? 0) > rawAssets.length ? (
+                <p className="px-1 text-[11px] text-[#7a827c]">
+                  这里只显示最近 5 条，完整列表在捕获页 Raw Inbox。
+                </p>
+              ) : null}
             </div>
           ) : (
             <p className="mt-2 text-xs text-[#65736a]">等待投喂。</p>
@@ -333,6 +487,7 @@ export function FrogWidgetPage() {
             <Settings2 size={12} />
             <span>位置已记忆</span>
           </span>
+        </div>
         </div>
       </section>
     </main>
@@ -369,6 +524,42 @@ function FrogFace({ mood }: { mood: FrogMood }) {
   );
 }
 
+function FrogRecentAsset({ asset, queueStatus }: { asset: { id: string; filename: string; status: RawAssetStatus; error?: string }; queueStatus: RawAssetQueueSnapshot | null }) {
+  const displayStatus = getDisplayRawAssetStatus(asset, queueStatus);
+  const showError = displayStatus === 'failed' && asset.error;
+
+  return (
+    <div
+      className="rounded-[8px] bg-[#f7fbf7] px-2 py-1.5 text-xs text-[#65736a]"
+      title={showError ? `${asset.filename}\n${asset.error}` : asset.filename}
+    >
+      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+        <span className="min-w-0 truncate">{asset.filename}</span>
+        <span
+          className={[
+            'shrink-0 rounded-full border px-2 py-0.5',
+            displayStatus === 'failed' ? 'border-[#fecaca] bg-[#fff5f5] text-[#b42318]' : 'border-[#d9e4d7]',
+          ].join(' ')}
+        >
+          {statusLabel[displayStatus]}
+        </span>
+      </div>
+      {showError ? <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-[#b42318]">{asset.error}</p> : null}
+    </div>
+  );
+}
+
+function getDisplayRawAssetStatus(
+  asset: { id: string; status: RawAssetStatus },
+  queueStatus: RawAssetQueueSnapshot | null,
+): RawAssetStatus {
+  const isQueuedRetry =
+    queueStatus?.stage === 'running' &&
+    asset.status === 'failed' &&
+    (queueStatus.currentAssetId === asset.id || Boolean(queueStatus.queuedAssetIds?.includes(asset.id)));
+  return isQueuedRetry ? 'compiling' : asset.status;
+}
+
 function FrogProgress({ progress }: { progress: ProgressState }) {
   const percent = Math.max(0, Math.min(100, Math.round(progress.percent)));
   return (
@@ -383,7 +574,7 @@ function FrogProgress({ progress }: { progress: ProgressState }) {
       <div className="mt-2 h-2 overflow-hidden rounded-full bg-[#edf4ee]">
         <div className="h-full rounded-full bg-[#27a65b] transition-all duration-300" style={{ width: `${percent}%` }} />
       </div>
-      {progress.detail ? <p className="mt-1 truncate text-xs text-[#65736a]">{progress.detail}</p> : null}
+      {progress.detail ? <p className="mt-1 text-xs leading-4 text-[#65736a]">{progress.detail}</p> : null}
     </div>
   );
 }
@@ -444,13 +635,6 @@ function loadPosition(): WidgetPosition {
 
 function isTauriRuntime() {
   return typeof window !== 'undefined' && Reflect.has(window, '__TAURI_INTERNALS__');
-}
-
-function loadBoolean(key: string, fallback: boolean) {
-  const value = localStorage.getItem(key);
-  if (value === 'true') return true;
-  if (value === 'false') return false;
-  return fallback;
 }
 
 function clamp(value: number, min: number, max: number) {

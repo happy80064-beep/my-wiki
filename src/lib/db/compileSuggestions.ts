@@ -1,6 +1,7 @@
 import type { CompileSuggestionDraft, CompileSuggestionRecord, Entity, EntityIndicator } from '@/types';
 import { createId } from './ids';
 import { db } from './schema';
+import { getClientId } from './clientId';
 import { refreshCompiledProfile } from '@/lib/wikiIndex';
 
 const allowedCompilePropertyKeys = new Set([
@@ -18,9 +19,13 @@ export function isAllowedCompilePropertyKey(propertyKey: string) {
   return allowedCompilePropertyKeys.has(propertyKey) || /^metric_[a-z0-9_]{3,80}$/.test(propertyKey);
 }
 
-export function createCompileSuggestionFingerprint(suggestion: Pick<CompileSuggestionDraft, 'entityId' | 'propertyKey' | 'propertyValue'>) {
+export function createCompileSuggestionFingerprint(
+  suggestion: Pick<CompileSuggestionDraft, 'entityId' | 'propertyKey' | 'propertyValue' | 'businessLine' | 'categoryName'>,
+) {
   return [
     suggestion.entityId,
+    normalizeCompileValue(suggestion.businessLine ?? ''),
+    normalizeCompileValue(suggestion.categoryName ?? ''),
     suggestion.propertyKey,
     normalizeCompileValue(suggestion.propertyValue),
   ].join(':');
@@ -58,7 +63,7 @@ export async function upsertPendingCompileSuggestion(
   const existing = await db.compileSuggestions.where('fingerprint').equals(fingerprint).first();
   const now = Date.now();
 
-  if (entityHasCompileValue(entity, draft.propertyKey, draft.propertyValue)) {
+  if (entityHasCompileValue(entity, draft)) {
     if (existing?.status === 'pending') {
       await db.compileSuggestions.update(existing.id, {
         status: 'superseded',
@@ -91,6 +96,7 @@ export async function upsertPendingCompileSuggestion(
   const record: CompileSuggestionRecord = {
     ...draft,
     id: createId('compile'),
+    clientId: getClientId(),
     fingerprint,
     status: 'pending',
     sourceQuestion,
@@ -178,7 +184,7 @@ export async function sweepCompileSuggestions(entityIds?: string[]) {
     if (scopedEntityIds && !scopedEntityIds.has(suggestion.entityId)) continue;
 
     const entity = await db.entities.get(suggestion.entityId);
-    if (!entity || entityHasCompileValue(entity, suggestion.propertyKey, suggestion.propertyValue)) {
+    if (!entity || entityHasCompileValue(entity, suggestion)) {
       await db.compileSuggestions.update(suggestion.id, {
         status: 'superseded',
         supersededAt: now,
@@ -199,13 +205,26 @@ async function markCompileSuggestion(id: string, status: 'dismissed' | 'supersed
   return db.compileSuggestions.get(id);
 }
 
-function entityHasCompileValue(entity: Entity, propertyKey: string, propertyValue: string) {
-  if (propertyKey.startsWith('metric_')) {
-    return (entity.indicators ?? []).some((indicator) => indicatorContainsValue(indicator, propertyValue));
+function entityHasCompileValue(
+  entity: Entity,
+  suggestion: Pick<CompileSuggestionDraft, 'propertyKey' | 'propertyLabel' | 'propertyValue' | 'businessLine' | 'categoryName'>,
+) {
+  if (suggestion.propertyKey.startsWith('metric_')) {
+    const hasScopedKey = Boolean(suggestion.businessLine || suggestion.categoryName);
+    const targetKey = indicatorCompileKey({
+      name: metricNameFromPropertyKey(suggestion.propertyKey, suggestion.propertyLabel),
+      businessLine: suggestion.businessLine,
+      categoryName: suggestion.categoryName,
+    });
+
+    return (entity.indicators ?? []).some((indicator) => {
+      if (hasScopedKey && indicatorCompileKey(indicator) !== targetKey) return false;
+      return indicatorContainsValue(indicator, suggestion.propertyValue);
+    });
   }
 
   const properties = entity.properties as Record<string, unknown>;
-  return propertyContainsValue(properties[propertyKey], propertyValue);
+  return propertyContainsValue(properties[suggestion.propertyKey], suggestion.propertyValue);
 }
 
 function compileSuggestionToIndicator(suggestion: CompileSuggestionRecord, now: number): EntityIndicator {
@@ -216,6 +235,9 @@ function compileSuggestionToIndicator(suggestion: CompileSuggestionRecord, now: 
     value: parsed.value,
     rawValue: parsed.rawValue,
     unit: parsed.unit,
+    businessLine: suggestion.businessLine,
+    categoryName: suggestion.categoryName,
+    categoryId: suggestion.categoryId,
     source: {
       entryId: suggestion.evidenceEntryId,
       excerpt: suggestion.evidenceSnippet,

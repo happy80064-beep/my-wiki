@@ -21,6 +21,36 @@ import {
   getRelationshipsWithEntity,
 } from './filter';
 import { parseQueryIntent } from './queryIntent';
+import {
+  buildMetricTerms,
+  expectedMetricLabel,
+  extractMetricAnswer,
+  isLikelyTocOrNavigationSentence,
+  normalizeEvidenceForMetric,
+} from './query/metrics';
+import {
+  cleanEvidenceSnippet,
+  filterSourcesForComposedAnswer,
+  formatEvidenceHitLines,
+  readableRelatedTitles,
+  sourceTextSupportsAnswer,
+  sourceTitleMentioned,
+} from './query/sourceFilter';
+import {
+  buildAttributeTerms,
+  cjkBigrams,
+  dimensionMentionPattern,
+  dimensionSuffixPattern,
+  inferMetricScope,
+  inferMetricScopes,
+  inferAttribute,
+  isMetricQuestion,
+  listQuestionPattern,
+  listTargetPattern,
+  metricScopeLabels,
+  metricScopeTerms,
+  type MetricScope,
+} from './query/language';
 import { rankRelatedEntities } from './relevance';
 import { findPaths, getSubgraph } from './traverse';
 import type { QuerySource, QueryTraceStep, StructuredQueryResult, WikiCompileSuggestion } from './types';
@@ -686,15 +716,17 @@ async function resolveRelationshipQueryPlan(
 
 function buildFallbackQueryPlan(question: string, entityName: string | undefined): QueryPlan {
   const attributeTerms = buildAttributeTerms(question);
+  const metricTerms = buildMetricTerms(question);
   const cleanedQuestion = cleanupSearchText(question);
   const cleanedEntityName = cleanupSearchText(entityName ?? '');
+  const evidenceTerms = uniqueStrings([...attributeTerms, ...metricTerms]).slice(0, 12);
   return {
-    intent: attributeTerms.length > 0 ? 'attribute_lookup' : 'evidence_search',
+    intent: evidenceTerms.length > 0 ? 'attribute_lookup' : 'evidence_search',
     selectedEntityIds: [],
     entityCandidates: [cleanedEntityName, cleanedQuestion].filter((term) => term.length >= 2),
     attribute: inferAttribute(question),
-    evidenceTerms: attributeTerms,
-    needsRawEvidence: attributeTerms.length > 0,
+    evidenceTerms,
+    needsRawEvidence: evidenceTerms.length > 0,
     needsGlobalSearch: true,
     answerType: /(能否|是否|能不能|可不可以|可以吗)/.test(question) ? 'yes_no_with_evidence' : 'unknown',
     confidence: 0.45,
@@ -1335,12 +1367,15 @@ function buildMetricCompileSuggestions(document: EntityDocument, question: strin
   const propertyValue = metricAnswer.confidence === 'high'
     ? metricAnswer.value
     : `${metricAnswer.value}（疑似，需核对原文）`;
+  const scope = inferMetricSuggestionScope(document.entity, question);
   const suggestion = {
     entityId: document.entity.id,
     entityTitle: document.entity.title,
     propertyKey: metricPropertyKey(propertyLabel),
     propertyLabel,
     propertyValue,
+    businessLine: scope.businessLine,
+    categoryName: scope.categoryName,
     evidenceEntryId: metricAnswer.hit.entry.id,
     evidenceSnippet: metricAnswer.evidenceSnippet,
     evidenceScope: metricAnswer.hit.scope,
@@ -1348,6 +1383,37 @@ function buildMetricCompileSuggestions(document: EntityDocument, question: strin
   } satisfies CompileSuggestionDraft;
 
   return validateCompileSuggestionByRule(suggestion) ? [suggestion] : [];
+}
+
+function inferMetricSuggestionScope(entity: Entity, question: string) {
+  const scope = inferMetricScope(question);
+  if (!scope) return {};
+
+  const fallbackLabel = metricScopeLabels[scope];
+  const category = findMetricCategoryForScope(entity, scope, fallbackLabel);
+  return {
+    businessLine: fallbackLabel,
+    categoryName: category?.name ?? fallbackLabel,
+  };
+}
+
+function findMetricCategoryForScope(entity: Entity, scope: MetricScope, fallbackLabel: string) {
+  const normalizedScopeTerms = [fallbackLabel, ...metricScopeTerms[scope]].map(normalize);
+  return (entity.categories ?? []).find((category) => {
+    const categoryTerms = [
+      category.name,
+      ...(category.aliases ?? []),
+      category.evidence ?? '',
+      ...category.items.flatMap((item) => [item.title, item.summary ?? '', item.kind ?? '']),
+    ].map(normalize);
+
+    return categoryTerms.some((categoryTerm) =>
+      categoryTerm.length >= 2 &&
+      normalizedScopeTerms.some((scopeTerm) =>
+        scopeTerm.length >= 2 && (categoryTerm.includes(scopeTerm) || scopeTerm.includes(categoryTerm)),
+      ),
+    );
+  });
 }
 
 function buildPropertyEvidenceSnippet(evidenceText: string, propertyValue: string, hit: EvidenceHit) {
@@ -1702,8 +1768,17 @@ function hasConcretePropertyLine(answer: string) {
   return /(运行环境|唤醒词|终止词|本地路径|相关模型|负责人说明|来源\/基于项目|开源状态)：[^。\n]+|已编译指标显示：|的[^。\n]{1,24}为\s*[^。\n]+。/.test(answer);
 }
 
-function providerLabel(provider: 'minimax' | 'deepseek') {
-  return provider === 'minimax' ? 'MiniMax' : 'DeepSeek';
+function providerLabel(provider: string) {
+  const labels: Record<string, string> = {
+    minimax: 'MiniMax',
+    'minimax-cn': 'MiniMax',
+    'minimax-global': 'MiniMax',
+    deepseek: 'DeepSeek',
+    openai: 'OpenAI',
+    anthropic: 'Anthropic',
+    gemini: 'Gemini',
+  };
+  return labels[provider] ?? provider;
 }
 
 function buildEntitySuggestions(entity: Entity) {
@@ -1764,7 +1839,11 @@ function cleanupSearchText(value: string) {
 }
 
 function buildEvidenceTerms(question: string, entity: Entity, plan?: QueryPlan) {
-  const terms = new Set([...(plan?.evidenceTerms ?? []), ...buildAttributeTerms(question)]);
+  const terms = new Set([
+    ...(plan?.evidenceTerms ?? []),
+    ...buildAttributeTerms(question),
+    ...buildMetricTerms(question),
+  ]);
   const entityAliases = buildEntityAliases(entity);
   let stripped = question;
 
@@ -1783,75 +1862,6 @@ function buildEvidenceTerms(question: string, entity: Entity, plan?: QueryPlan) 
     .flatMap((term) => [term, ...cjkBigrams(term)])
     .filter((term, index, list) => list.findIndex((item) => normalize(item) === normalize(term)) === index)
     .slice(0, 24);
-}
-
-function buildAttributeTerms(question: string) {
-  const groups: Array<{ test: RegExp; terms: string[] }> = [
-    { test: /(唤醒词|叫醒词|唤醒|KWS)/i, terms: ['唤醒词', '主唤醒词', '叫醒词', '唤醒', 'KWS'] },
-    { test: /(终止词|停止词|结束词|打断词|miki|mi ki|米基|米奇)/i, terms: ['终止词', '停止词', '结束词', '打断词', 'miki', 'mi ki', '米基', '米奇'] },
-    { test: /(API\s*key|apikey|密钥|token)/i, terms: ['API key', 'apikey', '密钥', 'token'] },
-    { test: /(模型|LLM|ASR|TTS)/i, terms: ['模型', 'LLM', 'ASR', 'TTS'] },
-    { test: /(Windows|windows|运行环境|桌面环境|操作系统|平台|能否.*运行|是否.*运行|运行在)/i, terms: ['Windows', 'Windows 桌面', '运行在 Windows', '运行环境', '桌面', '平台'] },
-    { test: /(基于|来源|源自|衍生|二次开发|derived|fork)/i, terms: ['基于', '二次开发', '来源', '源自'] },
-    { test: /(开源项目|开源|open\s*source)/i, terms: ['开源', '开源项目', 'open source'] },
-    { test: /(路径|目录|文件夹|本地项目)/, terms: ['路径', '目录', '文件夹', '本地项目路径'] },
-    { test: /(负责人|owner|谁负责|归谁)/i, terms: ['负责人', 'owner', '负责'] },
-    { test: /(角色名|名字|名称|叫什么|叫啥)/, terms: ['角色名', '名字', '名称'] },
-    {
-      test: /(收入|营收|金额|费用|成本|投资|利润|价格|总额|面积|规模|人数|数量|年均|合计|多少)/,
-      terms: buildMetricTerms(question),
-    },
-  ];
-
-  return Array.from(
-    new Set(groups.flatMap((group) => (group.test.test(question) ? group.terms : []))),
-  );
-}
-
-function buildMetricTerms(question: string) {
-  if (!isMetricQuestion(question)) return [];
-
-  const compactQuestion = question.replace(/[？?。！!，,、：:；;]/g, '').replace(/\s+/g, '');
-  const terms: string[] = [];
-  const afterDe = compactQuestion.match(/的([^的]{2,28}?)(?:是多少|多少|为多少|是几|几|$)/);
-  if (afterDe?.[1]) terms.push(afterDe[1]);
-
-  for (const match of compactQuestion.matchAll(/([\u4e00-\u9fa5A-Za-z0-9/-]{0,16}(?:收入|营收|金额|费用|成本|投资|利润|价格|总额|面积|规模|人数|数量))/g)) {
-    if (match[1]) terms.push(match[1]);
-  }
-
-  if (/年均/.test(question)) terms.push('年均');
-  if (/稳定运营期/.test(question)) terms.push('稳定运营期');
-  if (/项目总收入/.test(question)) terms.push('项目总收入');
-  if (/总收入/.test(question)) terms.push('总收入');
-  if (/收入|营收/.test(question)) terms.push('收入', '营收');
-  if (/住宅/.test(question)) terms.push('住宅', '住宅业态');
-  if (/医疗/.test(question)) terms.push('医疗', '医疗业态', '医疗板块');
-  if (/康养|养老|养生/.test(question)) terms.push('康养', '康养业态');
-  if (/研发|科研/.test(question)) terms.push('研发', '研发业态');
-  if (/文旅|旅游|旅居/.test(question)) terms.push('文旅', '文旅业态');
-  if (/土地|用地|占地|面积|建筑面积/.test(question)) terms.push('土地面积', '面积', '用地', '占地');
-  if (/多少/.test(question)) terms.push(...compactQuestion.split(/的/).filter((term) => term.length >= 2).slice(-2));
-
-  return uniqueStrings(terms).slice(0, 12);
-}
-
-function isMetricQuestion(question: string) {
-  return /(指标|收入|营收|金额|费用|成本|投资|利润|价格|总额|面积|规模|人数|数量|年均|合计|多少|几多|多少钱)/.test(question);
-}
-
-function inferAttribute(question: string) {
-  if (/(Windows|windows|运行环境|桌面环境|操作系统|平台|能否.*运行|是否.*运行|运行在)/i.test(question)) {
-    return 'runtimeEnvironment';
-  }
-  if (/(唤醒词|叫醒词|唤醒|KWS)/i.test(question)) return 'wakeWord';
-  if (/(终止词|停止词|结束词|打断词|miki|mi ki|米基|米奇)/i.test(question)) return 'stopWord';
-  if (/(API\s*key|apikey|密钥|token)/i.test(question)) return 'apiKey';
-  if (/(路径|目录|文件夹|本地项目)/.test(question)) return 'localPath';
-  if (/(基于|来源|源自|衍生|二次开发|derived|fork)/i.test(question)) return 'derivedFrom';
-  if (/(开源项目|开源|open\s*source)/i.test(question)) return 'openSourceStatus';
-  if (/(负责人|owner|谁负责|归谁)/i.test(question)) return 'owner';
-  return undefined;
 }
 
 function uniqueStrings(values: string[]) {
@@ -1941,17 +1951,6 @@ function evidenceTextMatches(text: string, term: string) {
   const normalizedTerm = normalize(term);
   if (!normalizedText || !normalizedTerm) return false;
   return normalizedText.includes(normalizedTerm) || isSubsequence(normalizedTerm, normalizedText);
-}
-
-function cjkBigrams(value: string) {
-  const cjkText = value.replace(/[^\u4e00-\u9fa5]/g, '');
-  if (cjkText.length < 4) return [];
-
-  const grams: string[] = [];
-  for (let index = 0; index < cjkText.length - 1; index += 1) {
-    grams.push(cjkText.slice(index, index + 2));
-  }
-  return grams;
 }
 
 function isWeakQueryTerm(term: string) {
@@ -2371,7 +2370,7 @@ function drillDownEntityCategory(entity: Entity, question: string) {
   const normalizedQuestion = normalize(question);
   const normalizedFocus = normalize(focus);
   const category = categories.find((item) => {
-    const aliases = [item.name, ...(item.aliases ?? []), item.name.replace(/(业态|版块|板块|业务线|子分类|子类)$/g, '')];
+    const aliases = [item.name, ...(item.aliases ?? []), item.name.replace(dimensionSuffixPattern, '')];
     return aliases.some((alias) => {
       const normalizedAlias = normalize(alias);
       return normalizedAlias.length >= 2 &&
@@ -2409,9 +2408,8 @@ function formatCategoryDrillDownAnswer(
 }
 
 function isListDetailQuestion(question: string) {
-  const hasDimension = /(业态|版块|板块|业务线|子分类|子类)/.test(question);
-  const asksItemList = /(有哪些|都有哪些|包含哪些|包括哪些|列出|清单)/.test(question) &&
-    /(项目|服务|产品|机构|科室|门诊|中心|疗法)/.test(question);
+  const hasDimension = dimensionMentionPattern.test(question);
+  const asksItemList = listQuestionPattern.test(question) && listTargetPattern.test(question);
   return hasDimension && asksItemList;
 }
 
@@ -2477,8 +2475,8 @@ function buildListFocusTerms(question: string) {
   const commonDimensionBases = ['医疗', '康养', '研发', '文旅', '住宅', '医养', '养老', '商业', '教育']
     .filter((base) => question.includes(base));
   const dimensionBases = uniqueStrings([
-    ...dimensionTerms.map((term) => term.replace(/(业态|版块|板块|业务线|子分类|子类)$/g, '')),
-    ...dimensionTerms.map((term) => term.replace(/(业态|版块|板块|业务线|子分类|子类)$/g, '').slice(-2)),
+    ...dimensionTerms.map((term) => term.replace(dimensionSuffixPattern, '')),
+    ...dimensionTerms.map((term) => term.replace(dimensionSuffixPattern, '').slice(-2)),
     ...commonDimensionBases,
   ]).filter((term) => term.length >= 2);
   const targetTerms = dimensionBases.flatMap((base) => [
@@ -2590,565 +2588,12 @@ function isTocOrOcrNoise(item: string) {
   return false;
 }
 
-function isLikelyTocOrNavigationSentence(sentence: string) {
-  const compact = sentence.replace(/\s+/g, ' ').trim();
-  if (isTocOrOcrNoise(compact)) return true;
-  if (/[.·•]{3,}\s*\d/.test(compact)) return true;
-  if (/--\s*\d+\s+of\s+\d+\s*--/i.test(compact)) return true;
-  if (/(目录|页码|章节|附录|图目录|表目录)/.test(compact)) return true;
-
-  const headingWords = /(业务协同|增长极|创新商业模式|资产价值|项目愿景|项目定位|温暖永生|为特色|为核心|养生息|消费场景|待.*建成后)/;
-  const hasConcreteList =
-    /(包括|包含|设有|设置|建设|配置|规划).{0,24}(项目|服务|机构|科室|门诊|中心|疗法|方法)/.test(compact) ||
-    /(项目|服务|机构|科室|门诊|中心|疗法|方法).{0,12}(包括|包含|有|设有|设置|建设|配置|规划)/.test(compact);
-
-  return headingWords.test(compact) && !hasConcreteList;
-}
-
 function isLikelyNarrativeOrHeadingItem(item: string) {
   return /(业务协同|增长极|创新商业模式|资产价值|项目愿景|项目定位|温暖永生|为特色|为核心|养生息|消费场景|待.*建成后|第\s*\d+\s*页|页码|目录)/.test(item);
 }
 
 function evidenceHitSupportsAnswer(hit: EvidenceHit, answer: string, question: string) {
   return sourceTextSupportsAnswer(`${hit.snippet}\n${hit.entry.content}`, answer, question);
-}
-
-function filterSourcesForComposedAnswer(
-  sources: QuerySource[],
-  answer: string,
-  payload: QueryComposePayload,
-  primaryEntityId?: string,
-) {
-  const entryContentById = new Map(payload.entries.map((entry) => [entry.id, entry.content]));
-  const filtered = sources.filter((source) => {
-    if (source.type === 'entity') {
-      return source.id === primaryEntityId || sourceTitleMentioned(source.title, answer);
-    }
-    if (source.type === 'task') {
-      return sourceTextSupportsAnswer(source.title, answer, payload.question);
-    }
-    const entryContent = entryContentById.get(source.id);
-    return entryContent ? sourceTextSupportsAnswer(entryContent, answer, payload.question) : false;
-  });
-
-  return filtered.length > 0 ? filtered : sources.filter((source) => source.type === 'entity').slice(0, 1);
-}
-
-function sourceTitleMentioned(title: string, answer: string) {
-  const normalizedTitle = normalize(title);
-  if (normalizedTitle.length < 2) return false;
-  const normalizedAnswer = normalize(answer);
-  return normalizedAnswer.includes(normalizedTitle) || titleAliases(title).some((alias) => normalize(alias).length >= 2 && normalizedAnswer.includes(normalize(alias)));
-}
-
-function titleAliases(title: string) {
-  return uniqueStrings([
-    title,
-    title.replace(/项目|主题|事项|公司|有限公司|股份/g, ''),
-    ...title.split(/[、/，,；;\s-]+/),
-  ].filter((alias) => alias.trim().length >= 2));
-}
-
-function sourceTextSupportsAnswer(text: string, answer: string, question: string) {
-  const normalizedText = normalize(text);
-  if (!normalizedText) return false;
-
-  const metricValues = extractComparableMetricValues(answer);
-  if (metricValues.length > 0) {
-    return metricValues.some((value) => normalizedText.includes(normalize(normalizeMetricComparable(value))));
-  }
-
-  const directValues = extractDirectAnswerValues(answer);
-  if (directValues.some((value) => normalizedText.includes(normalize(value)))) {
-    return true;
-  }
-
-  const anchors = extractAnswerSourceAnchors(answer, question);
-  if (anchors.length === 0) return false;
-
-  const matched = anchors.filter((anchor) => normalizedText.includes(normalize(anchor)));
-  if (matched.some((anchor) => normalize(anchor).length >= 6)) return true;
-  const hasStrongMatch = matched.some((anchor) => normalize(anchor).length >= 4);
-  return hasStrongMatch && matched.length >= Math.min(2, anchors.length);
-}
-
-function extractComparableMetricValues(answer: string) {
-  const values = [
-    ...answer.matchAll(/[0-9][0-9,，]*(?:\.[0-9]+)?\s*(?:亿元|万元|元|%|平方米|㎡|人|家|个)/g),
-    ...answer.matchAll(/[0-9][0-9,，]*(?:\.[0-9]+)?\s*(?:亿|万)(?![\u4e00-\u9fa5A-Za-z0-9])/g),
-  ].map((match) => match[0]);
-  return uniqueStrings(values);
-}
-
-function normalizeMetricComparable(value: string) {
-  return value.replace(/，/g, ',').replace(/\s+/g, '');
-}
-
-function extractDirectAnswerValues(answer: string) {
-  const values: string[] = [];
-  for (const match of answer.matchAll(/(?:是|为|叫|设定为|设置为)\s*([^。\n；;]+)/g)) {
-    values.push(...(match[1] ?? '').split(/[、/，,；;\s]+/));
-  }
-  for (const match of answer.matchAll(/「([^」]{1,40})」|“([^”]{1,40})”|\*\*([^*]{1,40})\*\*/g)) {
-    values.push(match[1] ?? match[2] ?? match[3] ?? '');
-  }
-  return uniqueStrings(
-    values
-      .map((value) => value.replace(/^(约|大约|预计|当前|目前)/, '').trim())
-      .filter((value) => normalize(value).length >= 2 && !/^(提示|建议|来源材料|知识库)$/.test(value)),
-  ).slice(0, 12);
-}
-
-function extractAnswerSourceAnchors(answer: string, question: string) {
-  const questionTerms = new Set([
-    ...buildMetricTerms(question),
-    ...buildAttributeTerms(question),
-    ...cjkBigrams(question),
-  ].map(normalize));
-  const ignored = new Set([
-    '主要依据',
-    '提示',
-    '建议',
-    '目前',
-    '知识库',
-    '来源材料',
-    '可以确认',
-    '无法确认',
-    '相关信息',
-    '直接作为结论',
-  ].map(normalize));
-
-  const quoted = [...answer.matchAll(/[「“]([^」”]{2,40})[」”]/g)].map((match) => match[1] ?? '');
-  const phraseCandidates = answer
-    .split(/[。\n；;：:，,、（）()\[\]【】\s]+/)
-    .map((item) => item.trim())
-    .filter((item) => item.length >= 3 && item.length <= 24);
-
-  return uniqueStrings([...quoted, ...phraseCandidates])
-    .filter((term) => {
-      const normalized = normalize(term);
-      if (normalized.length < 3 || ignored.has(normalized) || questionTerms.has(normalized)) return false;
-      return !/^(第?[一二三四五六七八九十0-9]+|这些|其中|包括|分别|相关|具体|如下)$/.test(term);
-    })
-    .slice(0, 16);
-}
-
-function extractMetricAnswer(question: string, hits: EvidenceHit[]) {
-  if (!isMetricQuestion(question)) return undefined;
-  const terms = buildMetricTerms(question);
-  if (terms.length === 0) return undefined;
-
-  let mediumCandidate: MetricAnswer | undefined;
-  for (const hit of hits) {
-    const evidenceText = hit.entry.content || hit.snippet;
-    const extraction = extractMetricValueFromText(evidenceText, terms);
-    if (!extraction) continue;
-    const evidenceSnippet = buildMetricEvidenceSnippet(evidenceText, extraction.value, terms, hit);
-    const answer = {
-      label: normalizeMetricLabel(terms[0] ?? '相关数值'),
-      value: extraction.value,
-      confidence: extraction.confidence,
-      reason: extraction.reason,
-      hit,
-      evidenceSnippet,
-    } satisfies MetricAnswer;
-    if (answer.confidence === 'high') {
-      return answer;
-    }
-    mediumCandidate ??= answer;
-  }
-
-  return mediumCandidate;
-}
-
-function buildMetricEvidenceSnippet(text: string, value: string, terms: string[], hit: EvidenceHit) {
-  const sentence = findSentenceContaining(text, metricValueCandidates(value));
-  if (sentence) return snippet(sentence, 180);
-
-  const valueIndex = findFirstTermIndex(text, metricValueCandidates(value));
-  if (valueIndex >= 0) return snippetAround(text, valueIndex, 180);
-
-  const termIndex = findFirstTermIndex(text, terms);
-  if (termIndex >= 0) return snippetAround(text, termIndex, 180);
-
-  return hit.snippet;
-}
-
-function findSentenceContaining(text: string, terms: string[]) {
-  const sentences = text
-    .split(/[。；;\n]/)
-    .map((sentence) => sentence.trim())
-    .filter(Boolean);
-  return sentences.find((sentence) => terms.some((term) => evidenceTextMatches(sentence, term)));
-}
-
-function extractMetricValueFromText(text: string, terms: string[]) {
-  const cleaned = normalizeEvidenceForMetric(text);
-  const sentences = cleaned
-    .split(/[。\n；;]/)
-    .map((sentence) => sentence.trim())
-    .filter(Boolean);
-  const matchedSentences = sentences.filter((sentence) =>
-    !isLikelyTocOrNavigationSentence(sentence) &&
-    metricSentenceMatchesScope(sentence, terms) &&
-    terms.some((term) => evidenceTextMatches(sentence, term)),
-  );
-
-  for (const sentence of matchedSentences) {
-    const value = extractMetricValueFromSentence(sentence, terms);
-    if (value) {
-      const confidence = adjustMetricConfidence(metricSentenceConfidence(sentence, terms), value, sentence, terms);
-      return {
-        value,
-        confidence,
-        reason: confidence === 'high'
-          ? '来源句同时包含指标词和金额单位'
-          : metricMediumReason(value, sentence, terms),
-      } satisfies Pick<MetricAnswer, 'value' | 'confidence' | 'reason'>;
-    }
-  }
-
-  if (matchedSentences.length > 0) {
-    for (const sentence of sentences) {
-      if (isLikelyTocOrNavigationSentence(sentence)) continue;
-      if (!metricSentenceMatchesScope(sentence, terms)) continue;
-      const value = extractMetricValueFromSentence(sentence, terms);
-      if (value) {
-        return {
-          value,
-          confidence: 'medium',
-          reason: '同一来源中找到问题指标词和金额，但金额不在同一句中',
-        } satisfies Pick<MetricAnswer, 'value' | 'confidence' | 'reason'>;
-      }
-    }
-  }
-
-  return undefined;
-}
-
-type MetricKind = 'money' | 'area' | 'count' | 'ratio' | 'generic';
-
-function inferMetricKind(terms: string[], sentence = ''): MetricKind {
-  const text = `${terms.join('')} ${sentence}`;
-  if (/(面积|土地|用地|占地|建筑面积|住宅业态)/.test(text)) return 'area';
-  if (/(收入|营收|金额|费用|成本|投资|利润|价格|总额|年均|年收入|总收入)/.test(text)) return 'money';
-  if (/(比例|收益率|利润率|率|百分比|%)/.test(text)) return 'ratio';
-  if (/(人数|数量|家数|机构数|项目数|个数|多少个|多少家|多少人)/.test(text)) return 'count';
-  return 'generic';
-}
-
-function extractMetricValueFromSentence(sentence: string, terms: string[]) {
-  if (isLikelyTocOrNavigationSentence(sentence)) return undefined;
-  if (!metricSentenceMatchesScope(sentence, terms)) return undefined;
-
-  const kind = inferMetricKind(terms, sentence);
-  if (kind === 'area') return extractScopedAreaLikeValue(sentence, terms) ?? extractAreaLikeValue(sentence);
-  if (kind === 'money') return extractMoneyLikeValue(sentence);
-  if (kind === 'ratio') return extractRatioLikeValue(sentence);
-  if (kind === 'count') return extractCountLikeValue(sentence);
-
-  return (
-    extractMoneyLikeValue(sentence) ??
-    extractAreaLikeValue(sentence) ??
-    extractRatioLikeValue(sentence) ??
-    extractCountLikeValue(sentence) ??
-    extractLooseMagnitudeValue(sentence)
-  );
-}
-
-type MetricScope = 'residential' | 'medical' | 'eldercare' | 'research' | 'cultureTourism';
-
-function metricSentenceMatchesScope(sentence: string, terms: string[]) {
-  const scope = inferMetricScope(terms.join(''));
-  if (!scope) return true;
-
-  const normalizedSentence = normalize(sentence);
-  const ownTerms = metricScopeTerms[scope];
-  if (ownTerms.some((term) => normalizedSentence.includes(normalize(term)))) return true;
-
-  return false;
-}
-
-const metricScopeTerms: Record<MetricScope, string[]> = {
-  residential: ['住宅', '住宅业态', '住宅项目', '宅地', '居住', '住区', '适老住宅'],
-  medical: ['医疗', '医疗业态', '医疗板块', '医养', '诊疗', '医院', '门诊', '疗法', '细胞治疗'],
-  eldercare: ['康养', '养老', '养生', '康复', '护理', '照护'],
-  research: ['研发', '科研', '实验室', '创新中心'],
-  cultureTourism: ['文旅', '旅游', '旅居', '消费场景'],
-};
-
-function inferMetricScopes(text: string): MetricScope[] {
-  const normalized = normalize(text);
-  return (Object.entries(metricScopeTerms) as Array<[MetricScope, string[]]>)
-    .map(([scope, terms]) => {
-      const indexes = terms
-        .map((term) => normalized.indexOf(normalize(term)))
-        .filter((index) => index >= 0);
-      return indexes.length > 0 ? { scope, index: Math.min(...indexes) } : undefined;
-    })
-    .filter((item): item is { scope: MetricScope; index: number } => Boolean(item))
-    .sort((left, right) => left.index - right.index)
-    .map((item) => item.scope);
-}
-
-function inferMetricScope(text: string): MetricScope | undefined {
-  return inferMetricScopes(text)[0];
-}
-
-function metricSentenceConfidence(sentence: string, terms: string[]): MetricAnswer['confidence'] {
-  const normalizedSentence = normalize(sentence);
-  const strongTermHit = terms.some((term) => {
-    const normalizedTerm = normalize(term);
-    return normalizedTerm.length >= 4 && normalizedSentence.includes(normalizedTerm);
-  });
-  const equivalentTermHit = metricSentenceHasEquivalentSignal(sentence, terms);
-  const metricVerbHit = /(为|约|达到|合计|总计|预计|测算|收入|营收|[:：])/.test(sentence);
-  return (strongTermHit || equivalentTermHit) && metricVerbHit ? 'high' : 'medium';
-}
-
-function metricSentenceHasEquivalentSignal(sentence: string, terms: string[]) {
-  const termText = terms.join('');
-  const kind = inferMetricKind(terms, sentence);
-  if (kind === 'area') {
-    const wantsBuildingArea = /建筑面积/.test(termText);
-    if (wantsBuildingArea) return /建筑面积/.test(sentence);
-    const wantsLandArea = /(土地|用地|占地|土地面积|用地面积|占地面积)/.test(termText);
-    return wantsLandArea && /(土地面积|用地面积|占地面积|土地|用地|占地)/.test(sentence);
-  }
-  return false;
-}
-
-function adjustMetricConfidence(
-  confidence: MetricAnswer['confidence'],
-  value: string,
-  sentence: string,
-  terms: string[],
-): MetricAnswer['confidence'] {
-  if (confidence !== 'high') return confidence;
-  if (isYuanOnlyRevenueValue(value, sentence, terms)) return 'medium';
-  if (isLooseWanMetricValue(value, sentence, terms)) return 'medium';
-  return confidence;
-}
-
-function metricMediumReason(value: string, sentence: string, terms: string[]) {
-  if (isYuanOnlyRevenueValue(value, sentence, terms)) {
-    return '金额单位为元，且问题是收入/营收类指标，可能存在表格单位或 OCR 单位丢失';
-  }
-  if (isLooseWanMetricValue(value, sentence, terms)) {
-    return '数值只出现“万”这类量级词，缺少平方米、亩、万元等明确单位，上下文仍需确认';
-  }
-  return '来源句包含部分指标词和金额单位，但上下文仍需确认';
-}
-
-function isYuanOnlyRevenueValue(value: string, sentence: string, terms: string[]) {
-  const normalizedValue = value.replace(/\s+/g, '');
-  if (!/元$/.test(normalizedValue) || /(万元|亿元)$/.test(normalizedValue)) return false;
-  const normalizedTerms = terms.join('');
-  const revenueLike = /(收入|营收|年均|年收入|总收入|合计)/.test(`${normalizedTerms}${sentence}`);
-  const explicitSmallUnit = /(单价|价格|费用|成本|每次|每人|每平|元\/|元每)/.test(sentence);
-  return revenueLike && !explicitSmallUnit;
-}
-
-function isLooseWanMetricValue(value: string, sentence: string, terms: string[]) {
-  const normalizedValue = value.replace(/\s+/g, '');
-  if (!/^[0-9][0-9,]*(?:\.[0-9]+)?万$/.test(normalizedValue)) return false;
-  const metricLike = /(面积|土地|规模|收入|营收|总额|合计|数量|人数)/.test(`${terms.join('')}${sentence}`);
-  return metricLike;
-}
-
-function extractCurrencyLikeValue(text: string) {
-  return extractMetricValueFromSentence(text, []);
-}
-
-function extractMoneyLikeValue(text: string) {
-  const currencyMatch = text.match(/(?:人民币|RMB)?\s*([0-9][0-9,，]*(?:\.[0-9]+)?\s*(?:亿元|万元|元))/i);
-  if (currencyMatch?.[1]) return normalizeMetricValue(currencyMatch[1]);
-
-  if (/(收入|营收|金额|费用|成本|投资|利润|价格|总额|合计|年均)/.test(text)) {
-    const looseMatch = text.match(/([0-9][0-9,，]*(?:\.[0-9]+)?\s*(?:亿|万))(?!平方米|平米|㎡|亩|公顷|人|家|个|套|间|床|户)/);
-    if (looseMatch?.[1]) return normalizeMetricValue(looseMatch[1]);
-  }
-
-  return undefined;
-}
-
-function extractAreaLikeValue(text: string) {
-  const areaMatch = findAreaLikeValueMatches(text)[0];
-  if (areaMatch) return areaMatch.value;
-
-  if (/(面积|土地|用地|占地|建筑面积|住宅|宅地)/.test(text)) {
-    const looseWanMatch = text.match(/([0-9][0-9,，]*(?:\.[0-9]+)?\s*万)(?!元|人|家|个|套|间|床|户)/);
-    if (looseWanMatch?.[1]) return normalizeMetricValue(looseWanMatch[1]);
-  }
-
-  return undefined;
-}
-
-function extractScopedAreaLikeValue(text: string, terms: string[]) {
-  const matches = findAreaLikeValueMatches(text);
-  if (matches.length <= 1) return matches[0]?.value;
-
-  const scope = inferMetricScope(terms.join(''));
-  if (!scope) return undefined;
-
-  const scopeIndexes = findAllTermIndexes(text, metricScopeTerms[scope]);
-  if (scopeIndexes.length === 0) return undefined;
-
-  return matches
-    .slice()
-    .sort((left, right) =>
-      distanceToNearestIndex(left.index, scopeIndexes) - distanceToNearestIndex(right.index, scopeIndexes) ||
-      afterScopePenalty(left.index, scopeIndexes) - afterScopePenalty(right.index, scopeIndexes))
-    [0]?.value;
-}
-
-function findAreaLikeValueMatches(text: string) {
-  const matches = [...text.matchAll(/([0-9][0-9,，]*(?:\.[0-9]+)?\s*(?:万平方米|平方米|平米|㎡|亩|公顷))/g)]
-    .map((match) => ({
-      value: normalizeMetricValue(match[1] ?? ''),
-      index: match.index ?? 0,
-    }))
-    .filter((match) => match.value.length > 0);
-
-  if (/(面积|土地|用地|占地|建筑面积|住宅|宅地)/.test(text)) {
-    matches.push(...[...text.matchAll(/([0-9][0-9,，]*(?:\.[0-9]+)?\s*万)(?!元|人|家|个|套|间|床|户)/g)]
-      .map((match) => ({
-        value: normalizeMetricValue(match[1] ?? ''),
-        index: match.index ?? 0,
-      }))
-      .filter((match) => match.value.length > 0));
-  }
-
-  const seen = new Set<string>();
-  return matches.filter((match) => {
-    const key = `${match.value}:${match.index}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-function findAllTermIndexes(text: string, terms: string[]) {
-  const lowerText = text.toLowerCase();
-  const indexes: number[] = [];
-  for (const term of terms) {
-    const needle = term.toLowerCase();
-    if (!needle) continue;
-    let fromIndex = 0;
-    while (fromIndex < lowerText.length) {
-      const index = lowerText.indexOf(needle, fromIndex);
-      if (index < 0) break;
-      indexes.push(index);
-      fromIndex = index + Math.max(needle.length, 1);
-    }
-  }
-  return indexes;
-}
-
-function distanceToNearestIndex(index: number, targets: number[]) {
-  return Math.min(...targets.map((target) => Math.abs(index - target)));
-}
-
-function afterScopePenalty(index: number, targets: number[]) {
-  const nearest = targets.slice().sort((left, right) => Math.abs(index - left) - Math.abs(index - right))[0] ?? 0;
-  return index >= nearest ? 0 : 1;
-}
-
-function extractRatioLikeValue(text: string) {
-  const ratioMatch = text.match(/([0-9][0-9,，]*(?:\.[0-9]+)?\s*%)/);
-  if (ratioMatch?.[1]) return normalizeMetricValue(ratioMatch[1]);
-
-  return undefined;
-}
-
-function extractCountLikeValue(text: string) {
-  const genericUnitMatch = text.match(/([0-9][0-9,，]*(?:\.[0-9]+)?\s*(?:人|家|个|套|间|床|户))/);
-  if (genericUnitMatch?.[1]) return normalizeMetricValue(genericUnitMatch[1]);
-
-  return undefined;
-}
-
-function extractLooseMagnitudeValue(text: string) {
-  const looseMatch = text.match(/([0-9][0-9,，]*(?:\.[0-9]+)?\s*(?:亿|万))/);
-  if (looseMatch?.[1]) return normalizeMetricValue(looseMatch[1]);
-
-  return undefined;
-}
-
-function normalizeMetricLabel(label: string) {
-  return label
-    .replace(/^(这个|该|其)/, '')
-    .replace(/是多少|多少|为多少|是几|几/g, '')
-    .trim() || '相关数值';
-}
-
-function expectedMetricLabel(question: string) {
-  return normalizeMetricLabel(buildMetricTerms(question)[0] ?? '相关数值');
-}
-
-function normalizeMetricValue(value: string) {
-  return value.replace(/，/g, ',').replace(/\s+/g, '');
-}
-
-function metricValueCandidates(value: string) {
-  const normalized = normalizeMetricValue(value);
-  const spacedWan = normalized.replace(/(万)(元|平方米)?$/, ' $1$2');
-  const compactUnit = normalized
-    .replace(/平方米$/, '㎡')
-    .replace(/平米$/, '㎡');
-  return uniqueStrings([normalized, spacedWan, compactUnit, normalized.replace(/㎡$/, '平方米')]);
-}
-
-function normalizeEvidenceForMetric(value: string) {
-  return value
-    .replace(/[`>#*_]+/g, ' ')
-    .replace(/万\s+元/g, '万元')
-    .replace(/亿\s+元/g, '亿元')
-    .replace(/([一-龥])\s+(?=[一-龥])/g, '$1')
-    .replace(/([0-9])\s+(?=[0-9])/g, '$1')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function readableRelatedTitles(entities: Entity[]) {
-  return uniqueStrings(
-    entities
-      .map((entity) => entity.title.trim())
-      .filter((title) => title.length > 0 && title !== 'undefined' && title !== 'null'),
-  );
-}
-
-function formatEvidenceHitLines(
-  hits: EvidenceHit[],
-  options: { includeSnippet?: boolean; maxSnippets?: number } = {},
-) {
-  const scopeLabels = Array.from(
-    new Set(hits.map((hit) => (hit.scope === 'global-fallback' ? '全库原始材料兜底' : '关联原始材料'))),
-  );
-  const matchedTerms = uniqueStrings(hits.flatMap((hit) => hit.matchedTerms)).slice(0, 6);
-  const summary = `原始材料命中：已找到 ${hits.length} 条证据（${scopeLabels.join('、')}），命中词：${matchedTerms.join('、') || '未标注'}。`;
-
-  if (!options.includeSnippet) {
-    return `${summary}\n这些原文已放在来源区，避免把未编译的长文本直接混入快速答案。`;
-  }
-
-  const lines = hits.slice(0, options.maxSnippets ?? 2).map((hit, index) => {
-    const scopeLabel = hit.scope === 'global-fallback' ? '全库原始材料兜底' : '关联原始材料';
-    return `${index + 1}. ${cleanEvidenceSnippet(hit.snippet)}（${scopeLabel}）`;
-  });
-
-  return `${summary}\n证据摘录：\n${lines.join('\n')}\n建议：这些信息应后续编译回实体档案，下次就能直接从 Wiki 回答。`;
-}
-
-function cleanEvidenceSnippet(value: string) {
-  return snippet(
-    value
-      .replace(/[`>#*_]+/g, ' ')
-      .replace(/([一-龥])\s+(?=[一-龥])/g, '$1')
-      .replace(/\s+/g, ' ')
-      .trim(),
-    120,
-  );
 }
 
 function findFirstTermIndex(text: string, terms: string[]) {

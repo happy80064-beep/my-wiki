@@ -75,11 +75,30 @@ body {
   touch-action: none;
 }
 
+.mywiki-graph-space-shell {
+  background:
+    radial-gradient(circle at 22% 18%, rgba(21, 94, 239, 0.08), transparent 34%),
+    radial-gradient(circle at 78% 20%, rgba(34, 197, 94, 0.07), transparent 28%),
+    linear-gradient(180deg, #f8fafc 0%, #f4f7fb 48%, #e8eef6 100%);
+  overflow: hidden;
+}
+
+.mywiki-graph-space-canvas {
+  display: block;
+  outline: none;
+  touch-action: none;
+}
+
 .mywiki-tech-link {
-  stroke: #c8cdd3;
+  fill: none;
+  stroke: #9aa4b2;
   stroke-linecap: round;
-  stroke-width: 0.95;
-  opacity: 0.72;
+  stroke-width: 1.1;
+  opacity: 0.82;
+}
+
+.mywiki-tech-community {
+  pointer-events: none;
 }
 
 .mywiki-tech-node {
@@ -99,26 +118,26 @@ body {
 
 .mywiki-tech-node-ring {
   fill: transparent;
-  opacity: 0.16;
-  stroke-width: 4.5;
+  opacity: 0.28;
+  stroke-width: 5;
 }
 
 .mywiki-tech-label {
-  fill: #374151;
-  font-size: 10.5px;
-  font-weight: 560;
+  fill: #1f2937;
+  font-size: 11px;
+  font-weight: 700;
   letter-spacing: 0;
   paint-order: stroke;
   pointer-events: none;
-  stroke: #fbfbfa;
-  stroke-width: 5;
+  stroke: #f8fafc;
+  stroke-width: 5.5;
 }
 
 .mywiki-tech-label-active {
   fill: #111827;
-  font-size: 12px;
+  font-size: 12.5px;
   font-weight: 700;
-  stroke-width: 6;
+  stroke-width: 6.5;
 }
 
 .mywiki-local-graph {
@@ -183,6 +202,14 @@ body {
 
 .frog-widget {
   user-select: none;
+}
+
+.frog-widget-hover .frog-drop-zone {
+  border-color: #27a65b;
+  background: rgb(240 255 244 / 0.94);
+  box-shadow:
+    0 0 0 3px rgb(39 166 91 / 0.14),
+    0 18px 44px rgb(31 41 55 / 0.16);
 }
 
 .frog-face {
@@ -340,6 +367,18 @@ body {
   box-shadow: 0 8px 20px rgb(31 41 55 / 0.08);
 }
 
+.frog-bubble-floating {
+  position: absolute;
+  left: 18px;
+  top: 18px;
+  z-index: 5;
+  max-width: 188px;
+  margin: 0;
+  padding: 7px 10px;
+  text-align: left;
+  pointer-events: none;
+}
+
 .frog-bubble::before {
   position: absolute;
   top: -7px;
@@ -353,10 +392,24 @@ body {
   transform: rotate(45deg);
 }
 
+.frog-bubble-floating::before {
+  top: auto;
+  bottom: -5px;
+  left: 28px;
+  border-top: 0;
+  border-left: 0;
+  border-right: 1px solid #d9e4d7;
+  border-bottom: 1px solid #d9e4d7;
+}
+
 .frog-bubble-done {
   border-color: #b7e4c7;
   color: #276749;
   animation: frog-bubble-rise 1.4s ease-out;
+}
+
+.frog-bubble-idle {
+  animation: frog-idle-hint 3.6s ease-in-out both;
 }
 
 .frog-bubble-error {
@@ -493,5 +546,21 @@ body {
   100% {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes frog-idle-hint {
+  0% {
+    opacity: 0;
+    transform: translateY(8px) scale(0.96);
+  }
+  18%,
+  72% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.98);
   }
 }

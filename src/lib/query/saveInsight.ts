@@ -1,4 +1,5 @@
 import { db } from '@/lib/db';
+import { getClientId } from '@/lib/db/clientId';
 import { createId } from '@/lib/db/ids';
 import type { StructuredQueryResult } from '@/lib/graph';
 import { createIngestJob } from '@/lib/ingest';
@@ -26,9 +27,11 @@ export async function saveQueryInsight(question: string, result: StructuredQuery
     const now = Date.now();
     const relatedEntityIds = getRelatedEntityIds(result);
     const title = buildInsightTitle(trimmedQuestion);
+    const questionTag = `question:${normalizeQuestion(trimmedQuestion)}`;
     const existing = await findExistingInsightEntity(trimmedQuestion);
     const entry: Entry = {
       id: createId('entry'),
+      clientId: getClientId(),
       content: buildInsightEntryContent(trimmedQuestion, result),
       source: 'text',
       capturedAt: now,
@@ -43,10 +46,11 @@ export async function saveQueryInsight(question: string, result: StructuredQuery
       existing ??
       ({
         id: createId('topic'),
+        clientId: getClientId(),
         type: 'topic',
         title,
         summary: summarizeAnswer(result.answer),
-        tags: ['query-insight', `question:${normalizeQuestion(trimmedQuestion)}`],
+        tags: ['query-insight', questionTag],
         scenes: ['work'],
         properties: {
           isPersonal: true,
@@ -58,6 +62,20 @@ export async function saveQueryInsight(question: string, result: StructuredQuery
         createdAt: now,
         updatedAt: now,
       } satisfies Entity);
+    const sourceEntries = existing ? uniqueStrings([...existing.sourceEntries, entry.id]) : [entry.id];
+    const tags = existing ? uniqueStrings([...existing.tags, 'query-insight', questionTag]) : entity.tags;
+    const wikiMarkdown = buildInsightWikiMarkdown({
+      title,
+      question: trimmedQuestion,
+      result,
+      entryId: entry.id,
+      sourceEntries,
+      tags,
+      createdAt: entity.createdAt,
+      updatedAt: now,
+    });
+    const wikiCompileModel = result.llm ? `${result.llm.provider}/${result.llm.model}` : 'query-save';
+    let nextExistingProperties: Entity['properties'] | undefined;
 
     if (existing) {
       const properties = existing.properties as Entity['properties'] & {
@@ -65,21 +83,32 @@ export async function saveQueryInsight(question: string, result: StructuredQuery
         myView?: string;
         viewHistory?: { view: string; updatedAt: number }[];
       };
+      nextExistingProperties = {
+        ...properties,
+        myView: result.answer,
+        viewHistory: properties.myView
+          ? [...(properties.viewHistory ?? []), { view: properties.myView, updatedAt: now }]
+          : properties.viewHistory ?? [],
+        autoCollectedSnippets: uniqueStrings([...(properties.autoCollectedSnippets ?? []), entry.id]),
+      };
       await db.entities.update(existing.id, {
+        title,
         summary: summarizeAnswer(result.answer),
-        sourceEntries: uniqueStrings([...existing.sourceEntries, entry.id]),
-        properties: {
-          ...properties,
-          myView: result.answer,
-          viewHistory: properties.myView
-            ? [...(properties.viewHistory ?? []), { view: properties.myView, updatedAt: now }]
-            : properties.viewHistory ?? [],
-          autoCollectedSnippets: uniqueStrings([...(properties.autoCollectedSnippets ?? []), entry.id]),
-        },
+        tags,
+        sourceEntries,
+        wikiMarkdown,
+        wikiCompiledAt: now,
+        wikiCompileModel,
+        properties: nextExistingProperties,
         updatedAt: now,
       });
     } else {
-      await db.entities.add(entity);
+      await db.entities.add({
+        ...entity,
+        wikiMarkdown,
+        wikiCompiledAt: now,
+        wikiCompileModel,
+      });
     }
 
     const relationships: Relationship[] = [];
@@ -97,6 +126,7 @@ export async function saveQueryInsight(question: string, result: StructuredQuery
 
       const relationship: Relationship = {
         id: createId('rel'),
+        clientId: getClientId(),
         from: entity.id,
         to: targetId,
         type: 'about',
@@ -111,6 +141,7 @@ export async function saveQueryInsight(question: string, result: StructuredQuery
       derivedEntities: uniqueStrings([entity.id, ...relatedEntityIds]),
       derivedRelationships: relationships.map((relationship) => relationship.id),
     });
+    const savedEntity = (await db.entities.get(entity.id)) ?? entity;
 
     return {
       entry: {
@@ -118,7 +149,7 @@ export async function saveQueryInsight(question: string, result: StructuredQuery
         derivedEntities: uniqueStrings([entity.id, ...relatedEntityIds]),
         derivedRelationships: relationships.map((relationship) => relationship.id),
       },
-      entity: existing ? { ...existing, sourceEntries: uniqueStrings([...existing.sourceEntries, entry.id]) } : entity,
+      entity: savedEntity,
       relationships,
       reused: Boolean(existing),
     };
@@ -151,7 +182,7 @@ function buildInsightTitle(question: string) {
 function buildInsightEntryContent(question: string, result: StructuredQueryResult) {
   const sourceLines = result.sources
     .slice(0, 12)
-    .map((source) => `- ${source.type}: ${source.title}`)
+    .map((source) => `- ${source.type}: ${source.href ? `[${source.title}](${source.href})` : source.title}`)
     .join('\n');
 
   return [
@@ -164,6 +195,53 @@ function buildInsightEntryContent(question: string, result: StructuredQueryResul
     '',
     sourceLines ? `来源：\n${sourceLines}` : '来源：暂无结构化来源。',
   ].join('\n');
+}
+
+function buildInsightWikiMarkdown(input: {
+  title: string;
+  question: string;
+  result: StructuredQueryResult;
+  entryId: string;
+  sourceEntries: string[];
+  tags: string[];
+  createdAt: number;
+  updatedAt: number;
+}) {
+  const { title, question, result, entryId, sourceEntries, tags, createdAt, updatedAt } = input;
+  const sourceIds = uniqueStrings([entryId, ...sourceEntries, ...result.sources.map((source) => source.id)]);
+  const related = uniqueStrings([
+    ...(result.candidates ?? []).map((entity) => entity.title),
+    ...result.sources.filter((source) => source.type === 'entity').map((source) => source.title),
+  ]);
+  const sourceLines = result.sources.slice(0, 12).map((source, index) => {
+    const label = `${index + 1}. ${source.title}`;
+    return source.href ? `- [${escapeMarkdownLinkLabel(label)}](${source.href})` : `- ${label}`;
+  });
+  const llmLine = result.llm ? `- 模型：${result.llm.provider}/${result.llm.model}` : undefined;
+  const frontmatter = [
+    '---',
+    'type: query',
+    `title: ${JSON.stringify(title)}`,
+    `created: ${dateOnly(createdAt)}`,
+    `updated: ${dateOnly(updatedAt)}`,
+    `tags: ${JSON.stringify(tags)}`,
+    `sources: ${JSON.stringify(sourceIds)}`,
+    `related: ${JSON.stringify(related)}`,
+    '---',
+  ];
+
+  return [
+    ...frontmatter,
+    '',
+    `# ${title}`,
+    '',
+    '## 摘要',
+    result.answer.trim(),
+    '',
+    '## 参考来源',
+    ...(sourceLines.length ? sourceLines : ['- 暂无结构化来源。']),
+    ...(llmLine ? ['', '## 生成信息', llmLine] : []),
+  ].join('\n').trim();
 }
 
 async function findExistingInsightEntity(question: string) {
@@ -184,6 +262,14 @@ function normalizeQuestion(question: string) {
     .toLowerCase()
     .replace(/[^\u4e00-\u9fa5a-z0-9]/g, '')
     .slice(0, 80);
+}
+
+function dateOnly(timestamp: number) {
+  return new Date(timestamp).toISOString().slice(0, 10);
+}
+
+function escapeMarkdownLinkLabel(value: string) {
+  return value.replace(/\\/g, '\\\\').replace(/\]/g, '\\]');
 }
 
 function uniqueStrings(values: string[]) {

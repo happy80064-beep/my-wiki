@@ -69,6 +69,7 @@ const assetKindLabel: Record<RawAssetKind, string> = {
   image: '图片',
   spreadsheet: '表格',
   html: '网页',
+  presentation: '演示文稿',
 };
 
 type SaveResult = {
@@ -93,6 +94,7 @@ type ProgressState = {
 
 export function CapturePage() {
   const organizeTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const folderInputRef = useRef<HTMLInputElement | null>(null);
   const [content, setContent] = useState('');
   const [draft, setDraft] = useState<CaptureDraft | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -113,6 +115,8 @@ export function CapturePage() {
 
   useEffect(() => {
     void resetStaleRawAssets();
+    folderInputRef.current?.setAttribute('webkitdirectory', '');
+    folderInputRef.current?.setAttribute('directory', '');
 
     return () => {
       if (organizeTimerRef.current) {
@@ -347,6 +351,21 @@ export function CapturePage() {
     }
   }
 
+  async function handleDeleteRawAsset(assetId: string) {
+    const asset = await db.rawAssets.get(assetId);
+    if (!asset) return;
+    if (!window.confirm(`确定从 Raw Inbox 删除“${asset.filename}”？已生成的知识页不会自动删除。`)) return;
+
+    await db.rawAssets.delete(asset.id);
+    if (asset.ingestJobId) {
+      await db.ingestJobs.delete(asset.ingestJobId);
+    }
+    if (asset.entryId && asset.status !== 'compiled' && asset.status !== 'skipped') {
+      await db.entries.delete(asset.entryId);
+    }
+    setQueueMessage(`已删除 Raw Inbox 材料：${asset.filename}`);
+  }
+
   async function handleSave() {
     if (!draft || !content.trim()) return;
 
@@ -467,7 +486,7 @@ export function CapturePage() {
               <input
                 type="file"
                 multiple
-                accept=".txt,.md,.markdown,.json,.jsonl,.xml,.html,.htm,.csv,.tsv,.xls,.xlsx,.xlsm,.xlsb,.ods,.doc,.docx,.pdf,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff,text/plain,text/markdown,text/html,text/csv,text/tab-separated-values,application/json,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,image/*"
+                accept=".txt,.md,.markdown,.json,.jsonl,.xml,.html,.htm,.csv,.tsv,.xls,.xlsx,.xlsm,.xlsb,.ods,.doc,.docx,.pdf,.ppt,.pptx,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff,text/plain,text/markdown,text/html,text/csv,text/tab-separated-values,application/json,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,image/*"
                 className="hidden"
                 onChange={(event) => {
                   void handleImportFiles(event.target.files);
@@ -475,6 +494,19 @@ export function CapturePage() {
                 }}
               />
               批量导入文件
+            </label>
+            <label className="inline-flex cursor-pointer items-center gap-2 rounded-full border border-[#d9d9d6] bg-white px-4 py-2 text-sm font-medium text-[#1f2937]">
+              <input
+                ref={folderInputRef}
+                type="file"
+                multiple
+                className="hidden"
+                onChange={(event) => {
+                  void handleImportFiles(event.target.files);
+                  event.currentTarget.value = '';
+                }}
+              />
+              导入文件夹
             </label>
           </div>
           <div className="mt-4 space-y-3">
@@ -555,6 +587,15 @@ export function CapturePage() {
                       <span className="max-w-full shrink-0 rounded-full border border-[#d9d9d6] px-2 py-0.5 text-[#626965]">
                         {rawAssetStatusLabel[asset.status]}
                       </span>
+                      <button
+                        type="button"
+                        className="flex size-7 shrink-0 items-center justify-center rounded-full text-[#8a8f8b] hover:bg-[#fff1f2] hover:text-[#b42318]"
+                        onClick={() => void handleDeleteRawAsset(asset.id)}
+                        aria-label={`删除 ${asset.filename}`}
+                        title="删除 Raw Inbox 材料"
+                      >
+                        <Trash2 size={14} />
+                      </button>
                     </div>
                     {asset.error ? <p className="mt-1 break-words text-[#b42318]">{asset.error}</p> : null}
                   </div>

@@ -1,382 +1,574 @@
-import { BookPlus, Check, CheckCircle2, Loader2, Search, X } from 'lucide-react';
-import { useRef, useState } from 'react';
-import { Link } from 'react-router';
-import { type StructuredQueryResult, runStructuredQuery } from '@/lib/graph';
-import { applyCompileSuggestion, dismissCompileSuggestion } from '@/lib/db';
-import { saveQueryInsight } from '@/lib/query/saveInsight';
+import { Loader2, MessageSquareText } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { QueryConversationList } from '@/components/query/QueryConversationList';
+import { QueryInput } from '@/components/query/QueryInput';
+import { QueryMessageCard } from '@/components/query/QueryMessageCard';
+import { QueryReferencePanel } from '@/components/query/QueryReferencePanel';
+import { dedupeSources } from '@/lib/graph/answer';
+import { runStructuredQuery } from '@/lib/graph';
+import type { StructuredQueryResult } from '@/lib/graph/types';
+import { getProviderConfigForRole, loadProviderSettings } from '@/lib/llm/providerSettings';
+import {
+  buildQueryReferences,
+  buildWikiPageReferences,
+  type QueryChatReference,
+} from '@/lib/query/chatHelpers';
+import { type QueryChatMessage, useQueryChatStore } from '@/lib/query/chatStore';
+import { answerQueryWithWikiPages } from '@/lib/query/queryAnswerClient';
+import type { QueryConversationContextMessage } from '@/lib/query/queryAnswer';
+import { retrieveQueryContext } from '@/lib/query/wikiRetrieval';
+import {
+  searchConfiguredDeepResearch,
+  synthesizeConfiguredDeepResearch,
+  type WebSearchResult,
+} from '@/lib/research/store';
+import { useWorkspaceRuntimeStore } from '@/lib/workspace';
 
 export function QueryPage() {
-  const [question, setQuestion] = useState('桌面生命体叫什么');
-  const [result, setResult] = useState<StructuredQueryResult | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
-  const [isRefining, setIsRefining] = useState(false);
-  const requestIdRef = useRef(0);
-  const [saveState, setSaveState] = useState<
-    | { status: 'idle' }
-    | { status: 'saving' }
-    | { status: 'saved'; message: string; href: string }
-    | { status: 'error'; message: string }
-  >({ status: 'idle' });
-  const answerPhase = isLoading ? 'analyzing' : result?.llm ? 'optimized' : isRefining ? 'refining' : result ? 'fast' : 'idle';
+  const activeWorkspaceRoot = useWorkspaceRuntimeStore((state) => state.activeRoot);
+  const conversations = useQueryChatStore((state) => state.conversations);
+  const activeConversationId = useQueryChatStore((state) => state.activeConversationId);
+  const messages = useQueryChatStore((state) => state.messages);
+  const workspaceRoot = useQueryChatStore((state) => state.workspaceRoot);
+  const setWorkspaceRoot = useQueryChatStore((state) => state.setWorkspaceRoot);
+  const createConversation = useQueryChatStore((state) => state.createConversation);
+  const addUserMessage = useQueryChatStore((state) => state.addUserMessage);
+  const addAssistantMessage = useQueryChatStore((state) => state.addAssistantMessage);
+  const addAssistantMessageToConversation = useQueryChatStore((state) => state.addAssistantMessageToConversation);
+  const removeLastAssistantMessage = useQueryChatStore((state) => state.removeLastAssistantMessage);
+  const updateMessageResult = useQueryChatStore((state) => state.updateMessageResult);
+  const setIsResponding = useQueryChatStore((state) => state.setIsResponding);
+  const isResponding = useQueryChatStore((state) => state.isResponding);
+  const [draftSeed, setDraftSeed] = useState('');
+  const [selectedReference, setSelectedReference] = useState<QueryChatReference | null>(null);
+  const [referencePanelOpen, setReferencePanelOpen] = useState(false);
+  const [responseMode, setResponseMode] = useState<'wiki' | 'research-search' | 'research-synthesis' | null>(null);
+  const currentWorkspaceRoot = activeWorkspaceRoot || 'browser-indexeddb';
 
-  async function handleAsk() {
-    if (!question.trim()) return;
-    const requestId = requestIdRef.current + 1;
-    requestIdRef.current = requestId;
-    setIsLoading(true);
-    setIsRefining(false);
-    setResult(null);
-    setSaveState({ status: 'idle' });
-    const currentQuestion = question.trim();
-    const [fastResult] = await Promise.all([
-      runStructuredQuery(currentQuestion, {
-        composeWithLlm: false,
-        planWithAgent: false,
-        useCache: false,
-      }),
-      wait(220),
-    ]);
-    if (requestIdRef.current !== requestId) return;
-    setResult(fastResult);
-    setIsLoading(false);
-    setIsRefining(true);
+  const activeMessages = useMemo(
+    () =>
+      messages.filter(
+        (message) =>
+          message.conversationId === activeConversationId &&
+          (message.workspaceRoot ?? 'browser-indexeddb') === workspaceRoot,
+      ),
+    [activeConversationId, messages, workspaceRoot],
+  );
+  const workspaceConversations = useMemo(
+    () => conversations.filter((conversation) => (conversation.workspaceRoot ?? 'browser-indexeddb') === workspaceRoot),
+    [conversations, workspaceRoot],
+  );
 
-    const refinedResult = await runStructuredQuery(currentQuestion, {
-      composeWithLlm: true,
-      planWithAgent: true,
-      useCache: true,
-    });
-    if (requestIdRef.current !== requestId) return;
-    setResult(refinedResult);
-    setIsRefining(false);
+  const lastAssistantId = [...activeMessages].reverse().find((message) => message.role === 'assistant')?.id;
+
+  useEffect(() => {
+    setSelectedReference(null);
+    setReferencePanelOpen(false);
+  }, [activeConversationId]);
+
+  useEffect(() => {
+    setWorkspaceRoot(currentWorkspaceRoot);
+    setSelectedReference(null);
+    setReferencePanelOpen(false);
+  }, [currentWorkspaceRoot, setWorkspaceRoot]);
+
+  function handleReferenceSelect(reference: QueryChatReference) {
+    setSelectedReference(reference);
+    setReferencePanelOpen(true);
   }
 
-  async function handleApplyCompileSuggestion(
-    suggestion: NonNullable<StructuredQueryResult['compileSuggestions']>[number],
-  ) {
-    const updated = await applyCompileSuggestion(suggestion.id);
-    if (!updated) return;
+  async function runConversationTurn(question: string, options: { regenerate?: boolean } = {}) {
+    const trimmed = question.trim();
+    if (!trimmed) return;
 
-    setResult((current) => replaceCompileSuggestion(current, updated));
-  }
+    let userMessage: QueryChatMessage | null = null;
+    if (!options.regenerate) {
+      userMessage = addUserMessage(trimmed);
+      if (!userMessage) return;
+    }
 
-  async function handleDismissCompileSuggestion(
-    suggestion: NonNullable<StructuredQueryResult['compileSuggestions']>[number],
-  ) {
-    const updated = await dismissCompileSuggestion(suggestion.id);
-    if (!updated) return;
-
-    setResult((current) => replaceCompileSuggestion(current, updated));
-  }
-
-  async function handleSaveInsight() {
-    if (!result) return;
-    setSaveState({ status: 'saving' });
+    setIsResponding(true);
+    setResponseMode('wiki');
     try {
-      const saved = await saveQueryInsight(question, result);
-      setSaveState({
-        status: 'saved',
-        message: saved.reused
-          ? '已更新已有查询洞察，并加入再编译队列。'
-          : '已保存为查询洞察，并加入再编译队列。',
-        href: `/wiki/${saved.entity.type}/${saved.entity.id}`,
-      });
-    } catch (error) {
-      setSaveState({
-        status: 'error',
-        message: error instanceof Error ? error.message : '保存失败。',
-      });
+      const providerSettings = loadProviderSettings();
+      const queryProviderConfig = getProviderConfigForRole(providerSettings, 'query-deep');
+      const storeState = useQueryChatStore.getState();
+      const conversationId = userMessage?.conversationId ?? storeState.activeConversationId;
+      const conversationContext = buildConversationContextForQuery(
+        storeState.messages,
+        conversationId,
+        userMessage?.id,
+        trimmed,
+      );
+      const retrievalQuestion = buildRetrievalQuestion(trimmed, conversationContext);
+      const retrievalUsedConversation = retrievalQuestion !== trimmed;
+
+      const [retrieved, structured] = await Promise.all([
+        retrieveQueryContext(retrievalQuestion, {
+          limit: 10,
+          maxContextChars: queryProviderConfig?.contextWindow,
+        }),
+        runStructuredQuery(retrievalQuestion, {
+          composeWithLlm: false,
+          planWithAgent: true,
+          useCache: false,
+        }),
+      ]);
+
+      let result: StructuredQueryResult = {
+        ...structured,
+        trace: [
+          {
+            layer: 'directory',
+            label: 'Wiki 页面检索',
+            detail: `${retrievalUsedConversation ? '已结合最近对话补全检索语义。' : ''}${retrieved.trace.join(' ')}`,
+          },
+          ...(structured.trace ?? []),
+        ],
+      };
+      let finalReferences = buildQueryReferences(result);
+
+      if (retrieved.pages.length > 0) {
+        try {
+          const answered = await answerQueryWithWikiPages({
+            question: trimmed,
+            indexSummary: retrieved.indexSummary,
+            pages: retrieved.pages.map((page) => ({
+              index: page.index,
+              entityId: page.entityId,
+              type: page.type,
+              title: page.title,
+              href: page.href,
+              path: page.path,
+              summary: page.summary,
+              content: page.content,
+              score: page.score,
+              tags: page.tags,
+              sources: page.sources,
+              related: page.related,
+              updated: page.updated,
+            })),
+            structuredSupport: {
+              draftAnswer: structured.answer,
+              keyHints: [
+                ...structured.sources.slice(0, 8).map((source) => `结构化来源：${source.title}`),
+                ...(structured.trace ?? []).slice(0, 4).map((step) => `${step.label}：${step.detail}`),
+              ],
+            },
+            conversationContext,
+            providerConfig: queryProviderConfig,
+          });
+
+          finalReferences = buildWikiPageReferences(retrieved.pages, answered.citedIndices);
+          result = {
+            ...result,
+            answer: answered.answer,
+            sources: dedupeSources([
+              ...finalReferences.map((reference) => ({
+                type: reference.type,
+                id: reference.key.replace(/^entity:/, ''),
+                title: reference.title,
+                href: reference.href,
+              })),
+              ...structured.sources,
+            ]),
+            llm: {
+              provider: answered.provider,
+              model: answered.model,
+              fallbackFrom: answered.fallbackFrom,
+            },
+            trace: [
+              ...(result.trace ?? []),
+              {
+                layer: 'answer',
+                label: 'Query 2.0 回答',
+                detail: `${answered.provider} / ${answered.model} 基于 ${finalReferences.length} 个 Wiki 页面生成了回答。`,
+              },
+            ],
+          };
+        } catch (error) {
+          result = {
+            ...result,
+            trace: [
+              ...(result.trace ?? []),
+              {
+                layer: 'answer',
+                label: 'Query 2.0 回答',
+                detail: `页面级回答失败，已回退到结构化查询结果：${error instanceof Error ? error.message : '未知错误'}`,
+              },
+            ],
+          };
+        }
+      }
+
+      addAssistantMessage(trimmed, result.answer, result, finalReferences);
+    } finally {
+      setIsResponding(false);
+      setResponseMode(null);
     }
   }
 
+  async function runDeepResearchTurn(message: QueryChatMessage, options: { replaceLatest?: boolean } = {}) {
+    if (!message.question || !message.conversationId) return;
+    if (options.replaceLatest) {
+      removeLastAssistantMessage(message.conversationId);
+    }
+
+    let webResults: WebSearchResult[] = [];
+    let placeholderMessage: QueryChatMessage | null = null;
+
+    setIsResponding(true);
+    setResponseMode('research-search');
+    try {
+      const searchPayload = await searchConfiguredDeepResearch(message.question, {
+        searchQueries: [message.question],
+      });
+      webResults = searchPayload.webResults;
+
+      const pending = buildPendingDeepResearchQueryResult(message.question, webResults);
+      placeholderMessage = addAssistantMessageToConversation(
+        message.conversationId,
+        message.question,
+        pending.result.answer,
+        pending.result,
+        pending.references,
+      );
+
+      setResponseMode('research-synthesis');
+      const synthesisPayload = await synthesizeConfiguredDeepResearch(message.question, webResults);
+      const finalPayload = {
+        webResults,
+        synthesis: synthesisPayload.synthesis,
+        provider: synthesisPayload.provider,
+        model: synthesisPayload.model,
+      };
+      const { result, references } = buildDeepResearchQueryResult(message.question, finalPayload);
+
+      if (placeholderMessage) {
+        updateMessageResult(placeholderMessage.id, result);
+      } else {
+        addAssistantMessageToConversation(message.conversationId, message.question, result.answer, result, references);
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : '补充/深度研究失败。';
+      const failure = buildDeepResearchErrorQueryResult(message.question, webResults, errorMessage);
+      if (placeholderMessage) {
+        updateMessageResult(placeholderMessage.id, failure.result);
+      } else {
+        addAssistantMessageToConversation(
+          message.conversationId,
+          message.question,
+          failure.result.answer,
+          failure.result,
+          failure.references,
+        );
+      }
+    } finally {
+      setIsResponding(false);
+      setResponseMode(null);
+    }
+  }
+
+  async function handleRegenerate(message: QueryChatMessage) {
+    if (!message.question || !message.conversationId) return;
+    removeLastAssistantMessage(message.conversationId);
+    if (isDeepResearchMessage(message)) {
+      await runDeepResearchTurn(message);
+      return;
+    }
+    await runConversationTurn(message.question, { regenerate: true });
+  }
+
+  async function handleDeepResearch(message: QueryChatMessage) {
+    await runDeepResearchTurn(message);
+  }
+
   return (
-    <section className="mx-auto max-w-6xl px-5 py-8">
-      <div className="grid gap-5 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
-        <section className="rounded-[12px] border border-[#e5e5e4] bg-white p-5">
-          <p className="text-xs font-medium text-[#155eef]">Query</p>
-          <h2 className="mt-2 text-xl font-semibold text-[#1f2937]">结构化查询</h2>
-          <textarea
-            value={question}
-            onChange={(event) => setQuestion(event.target.value)}
-            className="mt-5 min-h-32 w-full resize-y rounded-[12px] border border-[#d9d9d6] bg-[#fbfbfa] p-4 text-sm leading-6 outline-none transition focus:border-[#155eef] focus:bg-white"
-          />
-          <button
-            type="button"
-            onClick={handleAsk}
-            disabled={!question.trim() || isLoading}
-            className="mt-4 inline-flex items-center gap-2 rounded-full bg-[#155eef] px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:bg-[#a8b7d8]"
-          >
-            {isLoading ? <Loader2 size={16} className="animate-spin" /> : <Search size={16} />}
-            查询
-          </button>
-          <p className="mt-4 text-sm leading-6 text-[#626965]">
-            当前版本会先给出快速可读答案，再后台读取 Wiki Index、实体预编译资料和来源证据优化表达。
-          </p>
-        </section>
+    <section className="mx-auto h-full max-w-[1900px] overflow-hidden px-5 py-6">
+      <div
+        className={[
+          'grid h-full min-h-0 gap-5',
+          referencePanelOpen ? 'xl:grid-cols-[280px_minmax(0,1fr)_430px]' : 'xl:grid-cols-[280px_minmax(0,1fr)]',
+        ].join(' ')}
+      >
+        <QueryConversationList onCreateConversation={() => createConversation()} />
 
-        <section className="rounded-[12px] border border-[#e5e5e4] bg-white p-5">
-          <p className="text-xs font-medium text-[#155eef]">Answer</p>
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            <h2 className="text-xl font-semibold text-[#1f2937]">回答</h2>
-            {answerPhase !== 'idle' ? <AnswerPhaseBadge phase={answerPhase} /> : null}
+        <section className="flex h-full min-h-0 flex-col rounded-[16px] border border-[#e5e5e4] bg-white">
+          <header className="shrink-0 border-b border-[#ececeb] px-5 py-4">
+            <p className="text-xs font-medium text-[#155eef]">Query 2.0</p>
+            <div className="mt-2 flex items-center gap-3">
+              <h2 className="text-xl font-semibold text-[#1f2937]">查询工作台</h2>
+              <span className="rounded-full border border-[#d9d9d6] bg-[#fbfbfa] px-2.5 py-1 text-xs text-[#626965]">
+                独立会话 · 引用可追溯 · 可保存回 Wiki
+              </span>
+            </div>
+            <p className="mt-3 max-w-3xl text-sm leading-6 text-[#626965]">
+              每轮问题会优先检索现有 Wiki 页面，再结合查询模型生成回答。若当前 Wiki 暂时没有覆盖到需要的信息，可以继续触发补充/深度研究，先查看搜索到的网页来源，再生成这一轮的综合结论。
+            </p>
+          </header>
+
+          <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+            {!activeConversationId && workspaceConversations.length === 0 ? (
+              <EmptyConversationState onStart={() => createConversation()} />
+            ) : activeMessages.length === 0 ? (
+              <EmptyConversationState onStart={() => createConversation()} />
+            ) : (
+              <div className="space-y-5">
+                {activeMessages.map((message) => (
+                  <QueryMessageCard
+                    key={message.id}
+                    message={message}
+                    isLastAssistant={message.id === lastAssistantId}
+                    onRegenerate={handleRegenerate}
+                    onDeepResearch={handleDeepResearch}
+                    onPrefillSuggestion={setDraftSeed}
+                    onMessageResultUpdate={updateMessageResult}
+                    selectedReferenceKey={selectedReference?.key}
+                    onReferenceSelect={handleReferenceSelect}
+                  />
+                ))}
+                {isResponding ? (
+                  <div className="rounded-[16px] border border-[#d9e5ff] bg-[#f4f8ff] px-4 py-3 text-sm text-[#155eef]">
+                    <span className="inline-flex items-center gap-2">
+                      <Loader2 size={15} className="animate-spin" />
+                      {responseMode === 'research-search'
+                        ? '正在搜索网页来源，准备补充研究。'
+                        : responseMode === 'research-synthesis'
+                          ? '已获取网页来源，正在生成补充研究结论。'
+                          : '正在检索相关 Wiki 页面、整理上下文并生成本轮回答。'}
+                    </span>
+                  </div>
+                ) : null}
+              </div>
+            )}
           </div>
-          {!result ? (
-            <div className="mt-5 rounded-[12px] border border-dashed border-[#d9d9d6] bg-[#fbfbfa] p-6 text-sm leading-6 text-[#626965]">
-              {isLoading ? (
-                <span className="inline-flex items-center gap-2 text-[#155eef]">
-                  <Loader2 size={14} className="animate-spin" />
-                  正在分析问题类型、读取索引和高相关来源...
-                </span>
-              ) : (
-                '输入问题后，这里会展示结构化过滤后的答案和来源。'
-              )}
-            </div>
-          ) : (
-            <div className="mt-5 space-y-5">
-              <pre className="whitespace-pre-wrap rounded-[12px] border border-[#e5e5e4] bg-[#fbfbfa] p-4 text-sm leading-7 text-[#1f2937]">
-                {result.answer}
-              </pre>
-              {result.llm ? (
-                <p className="text-xs text-[#626965]">
-                  已由 {providerTypeLabel[result.llm.provider]} · {result.llm.model} 优化表达
-                </p>
-              ) : null}
-              {isRefining ? (
-                <p className="inline-flex items-center gap-2 rounded-full border border-[#d9e5ff] bg-[#f4f8ff] px-3 py-1.5 text-xs text-[#155eef]">
-                  <Loader2 size={13} className="animate-spin" />
-                  已先显示快速答案，正在后台读取 Query Agent 和 LLM 优化表达...
-                </p>
-              ) : null}
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={handleSaveInsight}
-                  disabled={saveState.status === 'saving'}
-                  className="inline-flex items-center gap-2 rounded-full border border-[#155eef] px-3 py-1.5 text-xs font-medium text-[#155eef] disabled:border-[#a8b7d8] disabled:text-[#7b8794]"
-                >
-                  {saveState.status === 'saving' ? <Loader2 size={14} className="animate-spin" /> : <BookPlus size={14} />}
-                  保存到 Wiki
-                </button>
-                {saveState.status === 'saved' ? (
-                  <Link to={saveState.href} className="inline-flex items-center gap-1 text-xs text-[#276749]">
-                    <CheckCircle2 size={14} />
-                    {saveState.message}
-                  </Link>
-                ) : null}
-                {saveState.status === 'error' ? (
-                  <span className="text-xs text-[#b42318]">{saveState.message}</span>
-                ) : null}
-              </div>
 
-              {result.compileSuggestions && result.compileSuggestions.length > 0 ? (
-                <div>
-                  <h3 className="text-sm font-semibold text-[#1f2937]">待编译回 Wiki</h3>
-                  <div className="mt-2 grid gap-2">
-                    {result.compileSuggestions.map((suggestion) => {
-                      const settled = suggestion.status !== 'pending';
-                      return (
-                        <div
-                          key={suggestion.id}
-                          className="rounded-[10px] border border-[#d9d9d6] bg-[#fbfbfa] p-3 text-xs leading-5"
-                        >
-                          <div className="grid gap-1">
-                            <div className="font-medium text-[#1f2937]">建议写回 Wiki</div>
-                            <div className="text-[#626965]">
-                              实体：<span className="text-[#1f2937]">{suggestion.entityTitle}</span>
-                            </div>
-                            <div className="text-[#626965]">
-                              字段：<span className="text-[#1f2937]">{suggestion.propertyLabel}</span>
-                            </div>
-                            <div className="text-[#626965]">
-                              建议值：<span className="text-[#1f2937]">{suggestion.propertyValue}</span>
-                            </div>
-                            <div className="flex flex-wrap gap-2 text-[#626965]">
-                              <span>
-                                状态：
-                                <span className="text-[#1f2937]">{compileSuggestionStatusLabel[suggestion.status]}</span>
-                              </span>
-                              <span>
-                                证据范围：
-                                <span className="text-[#1f2937]">{evidenceScopeLabel[suggestion.evidenceScope]}</span>
-                              </span>
-                              <span>
-                                置信度：
-                                <span className="text-[#1f2937]">{confidenceLabel(suggestion.confidence)}</span>
-                              </span>
-                            </div>
-                            <div className="mt-1 rounded-[8px] border border-[#e5e5e4] bg-white px-3 py-2 text-[#626965]">
-                              证据：{suggestion.evidenceSnippet}
-                            </div>
-                          </div>
-                          <div className="mt-2 flex flex-wrap gap-2">
-                            <button
-                              type="button"
-                              onClick={() => handleApplyCompileSuggestion(suggestion)}
-                              disabled={settled}
-                              className="inline-flex items-center gap-1 rounded-full border border-[#155eef] px-3 py-1 text-xs font-medium text-[#155eef] disabled:border-[#a8b7d8] disabled:text-[#7b8794]"
-                            >
-                              <Check size={13} />
-                              {suggestion.status === 'applied' ? '已写回' : '确认写回'}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleDismissCompileSuggestion(suggestion)}
-                              disabled={settled}
-                              className="inline-flex items-center gap-1 rounded-full border border-[#d9d9d6] px-3 py-1 text-xs font-medium text-[#4b5563] disabled:text-[#9ca3af]"
-                            >
-                              <X size={13} />
-                              忽略
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              ) : null}
-
-              <div>
-                <h3 className="text-sm font-semibold text-[#1f2937]">来源</h3>
-                {result.sources.length === 0 ? (
-                  <p className="mt-2 text-sm text-[#626965]">暂无来源。</p>
-                ) : (
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {result.sources.map((source) =>
-                      source.href ? (
-                        <Link
-                          key={`${source.type}:${source.id}`}
-                          to={source.href}
-                          className="rounded-full border border-[#d9d9d6] px-3 py-1 text-xs text-[#155eef]"
-                        >
-                          {sourceTypeLabel[source.type]} · {source.title}
-                        </Link>
-                      ) : (
-                        <span
-                          key={`${source.type}:${source.id}`}
-                          className="rounded-full border border-[#d9d9d6] px-3 py-1 text-xs text-[#626965]"
-                        >
-                          {sourceTypeLabel[source.type]} · {source.title}
-                        </span>
-                      ),
-                    )}
-                  </div>
-                )}
-              </div>
-
-              {result.trace && result.trace.length > 0 ? (
-                <div>
-                  <h3 className="text-sm font-semibold text-[#1f2937]">扫描轨迹</h3>
-                  <div className="mt-2 grid gap-2">
-                    {result.trace.map((step, index) => (
-                      <div
-                        key={`${step.layer}:${index}`}
-                        className="rounded-[10px] border border-[#e5e5e4] bg-[#fbfbfa] px-3 py-2 text-xs leading-5"
-                      >
-                        <div className="font-medium text-[#1f2937]">{step.label}</div>
-                        <div className="text-[#626965]">{step.detail}</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-
-              <div>
-                <h3 className="text-sm font-semibold text-[#1f2937]">追问建议</h3>
-                <div className="mt-2 flex flex-wrap gap-2">
-                  {result.suggestions.map((suggestion) => (
-                    <button
-                      key={suggestion}
-                      type="button"
-                      onClick={() => setQuestion(suggestion)}
-                      className="rounded-full border border-[#d9d9d6] px-3 py-1 text-xs text-[#4b5563]"
-                    >
-                      {suggestion}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-          )}
+          <div className="shrink-0 border-t border-[#ececeb] bg-white/95 p-4 shadow-[0_-10px_30px_rgba(15,23,42,0.04)]">
+            <QueryInput
+              key={draftSeed}
+              initialValue={draftSeed}
+              isSending={isResponding}
+              onSend={async (question) => {
+                setDraftSeed('');
+                await runConversationTurn(question);
+              }}
+            />
+          </div>
         </section>
+
+        {referencePanelOpen ? (
+          <QueryReferencePanel
+            reference={selectedReference}
+            onClose={() => {
+              setSelectedReference(null);
+              setReferencePanelOpen(false);
+            }}
+          />
+        ) : null}
       </div>
     </section>
   );
 }
 
-function AnswerPhaseBadge({ phase }: { phase: 'analyzing' | 'fast' | 'refining' | 'optimized' }) {
-  const config = {
-    analyzing: {
-      label: '快速分析中',
-      className: 'border-[#d9e5ff] bg-[#f4f8ff] text-[#155eef]',
-    },
-    fast: {
-      label: '快速答案',
-      className: 'border-[#d9d9d6] bg-[#fbfbfa] text-[#626965]',
-    },
-    refining: {
-      label: '优化中',
-      className: 'border-[#d9e5ff] bg-[#f4f8ff] text-[#155eef]',
-    },
-    optimized: {
-      label: '已优化',
-      className: 'border-[#cce8d8] bg-[#f3faf5] text-[#276749]',
-    },
-  }[phase];
+function buildConversationContextForQuery(
+  messages: QueryChatMessage[],
+  conversationId: string | null,
+  currentUserMessageId: string | undefined,
+  question: string,
+): QueryConversationContextMessage[] {
+  if (!conversationId || !shouldUseConversationContext(question)) return [];
 
-  return (
-    <span className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs font-medium ${config.className}`}>
-      {phase === 'analyzing' || phase === 'refining' ? <Loader2 size={12} className="animate-spin" /> : null}
-      {phase === 'optimized' ? <CheckCircle2 size={12} /> : null}
-      {config.label}
-    </span>
-  );
+  return messages
+    .filter((message) => message.conversationId === conversationId && message.id !== currentUserMessageId)
+    .slice(-6)
+    .map((message) => ({
+      role: message.role,
+      content: message.content,
+      references: message.references?.slice(0, 6).map((reference) => ({
+        title: reference.title,
+        href: reference.href,
+      })),
+    }));
 }
 
-function wait(ms: number) {
-  return new Promise((resolve) => {
-    window.setTimeout(resolve, ms);
-  });
-}
-
-const sourceTypeLabel: Record<StructuredQueryResult['sources'][number]['type'], string> = {
-  entity: '实体',
-  task: '任务',
-  entry: '原文',
-};
-
-const providerTypeLabel: Record<NonNullable<StructuredQueryResult['llm']>['provider'], string> = {
-  minimax: 'MiniMax',
-  deepseek: 'DeepSeek',
-};
-
-const evidenceScopeLabel: Record<NonNullable<StructuredQueryResult['compileSuggestions']>[number]['evidenceScope'], string> = {
-  'entity-source': '关联原始材料',
-  'global-fallback': '全库兜底',
-};
-
-const compileSuggestionStatusLabel: Record<NonNullable<StructuredQueryResult['compileSuggestions']>[number]['status'], string> = {
-  pending: '待确认',
-  applied: '已写回',
-  dismissed: '已忽略',
-  superseded: '已自动消解',
-};
-
-function replaceCompileSuggestion(
-  result: StructuredQueryResult | null,
-  suggestion: NonNullable<StructuredQueryResult['compileSuggestions']>[number],
-) {
-  if (!result?.compileSuggestions) return result;
-
-  return {
-    ...result,
-    compileSuggestions: result.compileSuggestions.map((item) =>
-      item.id === suggestion.id ? suggestion : item,
+function buildRetrievalQuestion(question: string, context: QueryConversationContextMessage[]) {
+  if (context.length === 0) return question;
+  const referenceTitles = Array.from(
+    new Set(
+      context
+        .flatMap((message) => message.references ?? [])
+        .map((reference) => reference.title.trim())
+        .filter(Boolean),
     ),
+  ).slice(0, 8);
+  const recentUserQuestions = context
+    .filter((message) => message.role === 'user')
+    .slice(-2)
+    .map((message) => compactForRetrieval(message.content, 80));
+  const subjectHint = [...referenceTitles, ...recentUserQuestions].join(' ');
+  return subjectHint ? `${subjectHint} ${question}` : question;
+}
+
+function buildPendingDeepResearchQueryResult(question: string, webResults: WebSearchResult[]) {
+  const sources = buildDeepResearchSources(webResults);
+  const references = buildDeepResearchReferences(webResults);
+  const result: StructuredQueryResult = {
+    answer: webResults.length
+      ? '正在根据上方网页来源生成补充研究结论，请稍候。'
+      : '没有检索到可用网页来源，正在整理当前搜索结果。',
+    sources,
+    suggestions: [],
+    trace: [
+      {
+        layer: 'web',
+        label: 'Web Search',
+        detail: `围绕“${question}”检索到 ${webResults.length} 条网页来源。`,
+      },
+    ],
+  };
+  return { result, references };
+}
+
+function buildDeepResearchQueryResult(
+  question: string,
+  payload: {
+    webResults: WebSearchResult[];
+    synthesis: string;
+    provider: string;
+    model: string;
+  },
+) {
+  const sources = buildDeepResearchSources(payload.webResults);
+  const references = buildDeepResearchReferences(payload.webResults);
+  const providerLabel = [payload.provider, payload.model].filter(Boolean).join(' / ');
+  const result: StructuredQueryResult = {
+    answer: payload.synthesis,
+    sources,
+    suggestions: ['把这条补充研究保存到 Wiki', '基于最新资料继续追问'],
+    trace: [
+      {
+        layer: 'web',
+        label: 'Web Search',
+        detail: `围绕“${question}”检索到 ${payload.webResults.length} 条网页来源。`,
+      },
+      {
+        layer: 'answer',
+        label: '补充/深度研究',
+        detail: providerLabel
+          ? `${providerLabel} 基于网页来源生成了补充研究回答。`
+          : '未检索到可用网页来源，已返回提示结果。',
+      },
+    ],
+    ...(providerLabel
+      ? {
+          llm: {
+            provider: payload.provider,
+            model: payload.model,
+          },
+        }
+      : {}),
+  };
+  return { result, references };
+}
+
+function buildDeepResearchErrorQueryResult(question: string, webResults: WebSearchResult[], errorMessage: string) {
+  const sources = buildDeepResearchSources(webResults);
+  const references = buildDeepResearchReferences(webResults);
+  const trace: NonNullable<StructuredQueryResult['trace']> = [];
+  if (webResults.length > 0) {
+    trace.push({
+      layer: 'web',
+      label: 'Web Search',
+      detail: `围绕“${question}”检索到 ${webResults.length} 条网页来源。`,
+    });
+  }
+  trace.push({
+    layer: 'answer',
+    label: '补充/深度研究',
+    detail: errorMessage,
+  });
+  return {
+    result: {
+      answer: `补充/深度研究失败：${errorMessage}`,
+      sources,
+      suggestions: ['检查深度研究 / Web Search 设置', '换一个更具体的问题再试'],
+      trace,
+    } satisfies StructuredQueryResult,
+    references,
   };
 }
 
-function confidenceLabel(confidence: number) {
-  if (confidence >= 0.8) return '高';
-  if (confidence >= 0.65) return '中';
-  return '低';
+function buildDeepResearchSources(webResults: WebSearchResult[]) {
+  return webResults.map((item) => ({
+    type: 'web' as const,
+    id: item.url,
+    title: item.title,
+    href: item.url,
+  }));
+}
+
+function buildDeepResearchReferences(webResults: WebSearchResult[]): QueryChatReference[] {
+  return webResults.map((item, index) => ({
+    key: `web:${item.url || index}`,
+    type: 'web',
+    title: item.title || item.source || `Web 来源 ${index + 1}`,
+    href: item.url,
+    preview: {
+      kind: 'web',
+      title: item.title || item.source || `Web 来源 ${index + 1}`,
+      url: item.url,
+      source: item.source || safeHost(item.url),
+      snippet: item.snippet,
+      content: item.snippet,
+    },
+  }));
+}
+
+function isDeepResearchMessage(message: QueryChatMessage) {
+  return Boolean(
+    message.result?.sources.some((source) => source.type === 'web') ||
+      message.result?.trace?.some((step) => step.layer === 'web'),
+  );
+}
+
+function safeHost(url: string) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return undefined;
+  }
+}
+
+function shouldUseConversationContext(question: string) {
+  return /(这个|这次|上述|上面|前面|刚才|它|它们|这里|这些|那些|此项目|该项目|这个项目)/.test(question);
+}
+
+function compactForRetrieval(value: string, maxLength: number) {
+  const text = value
+    .replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, '')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return text.length > maxLength ? text.slice(0, maxLength) : text;
+}
+
+function EmptyConversationState({ onStart }: { onStart: () => void }) {
+  return (
+    <div className="flex h-full min-h-[420px] flex-col items-center justify-center rounded-[16px] border border-dashed border-[#d9d9d6] bg-[#fbfbfa] px-6 py-10 text-center">
+      <div className="flex size-14 items-center justify-center rounded-full bg-white text-[#155eef] shadow-[0_10px_30px_rgba(15,23,42,0.05)]">
+        <MessageSquareText size={26} />
+      </div>
+      <h3 className="mt-4 text-lg font-semibold text-[#1f2937]">从一个问题开始</h3>
+      <p className="mt-2 max-w-xl text-sm leading-7 text-[#626965]">
+        现在的查询会以独立会话为单位保存，减少不同问题之间的上下文串扰。每条回答都会尽量保留引用，并支持复制、保存回 Wiki，以及在当前知识库不足时继续做补充研究。
+      </p>
+      <button
+        type="button"
+        onClick={onStart}
+        className="mt-5 rounded-full bg-[#155eef] px-4 py-2 text-sm font-medium text-white"
+      >
+        新建对话
+      </button>
+    </div>
+  );
 }

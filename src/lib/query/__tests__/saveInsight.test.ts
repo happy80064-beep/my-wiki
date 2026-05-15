@@ -32,6 +32,7 @@ describe('save query insight', () => {
       type: 'about',
     });
     expect(saved.entry.derivedEntities).toEqual(expect.arrayContaining([saved.entity.id, entity.id]));
+    expect(saved.entity.wikiMarkdown).toContain('桌面数字生命体的唤醒词是小林。');
     expect(saved.recompileJobId).toBeTruthy();
     expect(await db.ingestJobs.count()).toBe(1);
   });
@@ -49,5 +50,50 @@ describe('save query insight', () => {
     expect(second.reused).toBe(true);
     expect(second.entity.id).toBe(first.entity.id);
     expect(await db.ingestJobs.count()).toBe(1);
+  });
+
+  it('writes the query answer into wiki markdown immediately', async () => {
+    const entity = await createEntity({
+      type: 'project',
+      title: '福瑞新职场',
+      summary: '福瑞新职场搬迁项目。',
+    });
+    const result: StructuredQueryResult = {
+      answer: '根据现有材料，福瑞新职场是在中海广场。',
+      candidates: [entity],
+      sources: [{ type: 'entity', id: entity.id, title: entity.title, href: `/wiki/${entity.type}/${entity.id}` }],
+      suggestions: [],
+      llm: { provider: 'zhipu', model: 'glm-4.6v' },
+    };
+
+    const saved = await saveQueryInsight('福瑞新职场是在哪里？', result);
+    const stored = await db.entities.get(saved.entity.id);
+
+    expect(stored?.wikiMarkdown).toContain('福瑞新职场是在中海广场');
+    expect(stored?.wikiMarkdown).toContain('## 摘要');
+    expect(stored?.wikiMarkdown).not.toContain('## 问题');
+    expect(stored?.wikiCompileModel).toBe('zhipu/glm-4.6v');
+  });
+
+  it('refreshes stale wiki markdown when the same query insight is saved again', async () => {
+    const staleResult: StructuredQueryResult = {
+      answer: '当前材料暂未确认福瑞新职场的位置。',
+      sources: [],
+      suggestions: [],
+    };
+    const freshResult: StructuredQueryResult = {
+      answer: '后续材料已确认：福瑞新职场是在中海广场。',
+      sources: [],
+      suggestions: [],
+    };
+
+    const first = await saveQueryInsight('福瑞新职场是在哪里？', staleResult);
+    const second = await saveQueryInsight('福瑞新职场是在哪里？', freshResult);
+    const stored = await db.entities.get(first.entity.id);
+
+    expect(second.reused).toBe(true);
+    expect(second.entity.id).toBe(first.entity.id);
+    expect(stored?.wikiMarkdown).toContain('福瑞新职场是在中海广场');
+    expect(stored?.wikiMarkdown).not.toContain('当前材料暂未确认福瑞新职场的位置。');
   });
 });

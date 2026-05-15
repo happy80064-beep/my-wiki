@@ -1,22 +1,23 @@
 import { AlertTriangle, Archive, CheckCircle2, Database, Info, Search, Sparkles } from 'lucide-react';
 import { useLiveQuery } from 'dexie-react-hooks';
+import { WorkspaceStatusCard } from '@/components/workspace/WorkspaceStatusCard';
 import { runWikiLint } from '@/lib/graph';
 
 const milestones = [
   {
     icon: Database,
-    title: '本地知识库',
-    text: '四张核心表已作为 MVP 地基：entries、entities、relationships、tasks。',
+    title: '统一本地数据层',
+    text: 'v2 会把 Raw Inbox、Wiki Markdown、索引和运行状态收拢到同一个文件工作区，逐步替代分散的 IndexedDB 数据。',
   },
   {
     icon: Archive,
-    title: '捕获闭环',
-    text: '下一模块会优先打通文本捕获、AI 结构化建议和保存前编辑。',
+    title: '异步摄入闭环',
+    text: '采集先落入 Raw Inbox，AI 编译、审核和写回在后台推进，失败也不会丢失原始材料。',
   },
   {
     icon: Search,
-    title: '精确召回',
-    text: '查询会先走结构化过滤，再交给 AI 表达，避免任务归属污染。',
+    title: 'Wiki 优先查询',
+    text: '查询优先读取已编译 Wiki 页面和索引，必要时再查来源证据，减少每次都从原文重新推理。',
   },
 ];
 
@@ -29,15 +30,15 @@ export function DashboardPage() {
       <div className="max-w-3xl">
         <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-[#d9d9d6] bg-white px-3 py-1 text-xs text-[#155eef]">
           <Sparkles size={14} />
-          工程骨架与数据层
+          v2.0 产品化重构
         </div>
-        <h2 className="text-3xl font-semibold tracking-normal text-[#1d1d1b]">
-          第一版 MVP 已从稳定的数据地基开始。
-        </h2>
+        <h2 className="text-3xl font-semibold tracking-normal text-[#1d1d1b]">从 MVP 数据库，升级到可迁移的文件型 Wiki。</h2>
         <p className="mt-4 text-sm leading-7 text-[#5f625f]">
-          当前模块聚焦项目结构、类型系统和 IndexedDB 数据访问层。后续会按捕获、Wiki 浏览、AI 查询的顺序逐块开发，每块测试通过后再进入下一块。
+          当前阶段优先打通 Workspace 选择、项目模板、文件工作区初始化和状态展示。后续会把捕获、编译、查询、图谱和模型配置逐步接入同一套本地工作区。
         </p>
       </div>
+
+      <WorkspaceStatusCard />
 
       <div className="mt-8 grid gap-4 md:grid-cols-3">
         {milestones.map((item) => (
@@ -54,7 +55,7 @@ export function DashboardPage() {
       <section className="mt-8 rounded-[12px] border border-[#e5e5e4] bg-white p-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <p className="text-xs font-medium text-[#155eef]">Lint</p>
+            <p className="text-xs font-medium text-[#155eef]">健康检查</p>
             <h3 className="mt-2 text-lg font-semibold text-[#1f2937]">知识库健康检查</h3>
           </div>
           <div className="flex flex-wrap gap-2 text-xs">
@@ -98,5 +99,9 @@ function LintPill({ label, value, tone }: { label: string; value: number; tone: 
     info: 'border-[#bfdbfe] bg-[#eff6ff] text-[#155eef]',
   }[tone];
 
-  return <span className={`rounded-full border px-3 py-1 ${toneClass}`}>{label} {value}</span>;
+  return (
+    <span className={`rounded-full border px-3 py-1 ${toneClass}`}>
+      {label} {value}
+    </span>
+  );
 }

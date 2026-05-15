@@ -1,4 +1,6 @@
 import { db } from '@/lib/db';
+import { inferWikiTargetSpec } from '@/lib/wiki/markdownCompiler';
+import type { WikiPageType } from '@/lib/wiki/scanner';
 import type { Entity, Entry, Relationship, Task } from '@/types';
 
 export type MarkdownExportFile = {
@@ -35,7 +37,7 @@ export function buildMarkdownExportFilesFromRecords({
       content: buildReadme({ entries, entities, relationships, tasks }),
     },
     {
-      path: 'index.md',
+      path: 'wiki/index.md',
       content: buildIndex(entities),
     },
     {
@@ -47,7 +49,7 @@ export function buildMarkdownExportFilesFromRecords({
   for (const entity of entities) {
     files.push({
       path: buildEntityPath(entity),
-      content: buildEntityMarkdown(entity, relationships, tasks, entityById),
+      content: entity.wikiMarkdown?.trim() || buildEntityMarkdown(entity, relationships, tasks, entityById),
     });
   }
 
@@ -183,12 +185,37 @@ function buildReadme({
 }
 
 function buildIndex(entities: Entity[]) {
-  const grouped = groupBy(entities, (entity) => entity.type);
+  const grouped = groupBy(entities, (entity) => inferWikiTargetSpec(entity).type);
+  const typeOrder: WikiPageType[] = [
+    'overview',
+    'project',
+    'thesis',
+    'finding',
+    'methodology',
+    'entity',
+    'stakeholder',
+    'book',
+    'character',
+    'concept',
+    'theme',
+    'plot-thread',
+    'chapter',
+    'source',
+    'query',
+    'synthesis',
+    'comparison',
+    'decision',
+    'meeting',
+    'goal',
+    'habit',
+    'reflection',
+    'journal',
+  ];
   return [
     '# 知识目录',
     '',
-    ...(['project', 'topic', 'person', 'event'] as const).flatMap((type) => [
-      `## ${entityTypeLabel(type)}`,
+    ...typeOrder.flatMap((type) => [
+      `## ${wikiTypeLabel(type)}`,
       '',
       ...(grouped.get(type) ?? []).map((entity) => `- [[${withoutMd(buildEntityPath(entity))}|${entity.title}]]`),
       '',
@@ -225,11 +252,13 @@ function buildEntityMarkdown(
   return [
     buildFrontmatter({
       id: entity.id,
-      type: entity.type,
+      type: inferWikiTargetSpec(entity).type,
+      entity_type: entity.type,
       tags: entity.tags,
       scenes: entity.scenes,
       createdAt: entity.createdAt,
       updatedAt: entity.updatedAt,
+      sources: entity.sourceEntries,
     }),
     `# ${entity.title}`,
     '',
@@ -258,6 +287,14 @@ function buildEntityMarkdown(
     entity.sourceEntries.length > 0
       ? entity.sourceEntries.map((entryId) => `- [[raw/entries/${safeSegment(entryId)}|${entryId}]]`).join('\n')
       : '暂无来源。',
+    '',
+    '## 结构与板块',
+    '',
+    formatCategories(entity.categories),
+    '',
+    '## 关键指标',
+    '',
+    formatIndicators(entity.indicators),
   ].join('\n');
 }
 
@@ -318,6 +355,50 @@ function formatProperties(properties: unknown) {
     .join('\n');
 }
 
+function formatCategories(categories: Entity['categories']) {
+  if (!categories?.length) return '当前来源未提供明确结构板块。';
+
+  return categories
+    .map((category) => {
+      const items = category.items.length
+        ? category.items
+            .map((item) => `  - ${item.title}${item.kind ? `（${item.kind}）` : ''}${item.summary ? `：${item.summary}` : ''}`)
+            .join('\n')
+        : '  - 当前来源未列出下级条目。';
+      return [`- ${category.name}`, items, category.evidence ? `  - 证据：${category.evidence}` : ''].filter(Boolean).join('\n');
+    })
+    .join('\n');
+}
+
+function formatIndicators(indicators: Entity['indicators']) {
+  if (!indicators?.length) return '当前来源未提供明确指标。';
+
+  return [
+    '| 指标 | 数值 | 维度 | 置信度 | 证据 |',
+    '|---|---:|---|---|---|',
+    ...indicators.map((indicator) =>
+      [
+        indicator.name,
+        formatIndicatorValue(indicator),
+        [indicator.businessLine, indicator.categoryName].filter(Boolean).join(' / ') || '-',
+        indicator.confidence,
+        indicator.source?.excerpt ?? indicator.note ?? '-',
+      ]
+        .map(escapeTableCell)
+        .join(' | '),
+    ).map((row) => `| ${row} |`),
+  ].join('\n');
+}
+
+function formatIndicatorValue(indicator: NonNullable<Entity['indicators']>[number]) {
+  if (indicator.value === null) return indicator.rawValue || '未在当前来源中确认';
+  return `${indicator.value}${indicator.unit ? ` ${indicator.unit}` : ''}`;
+}
+
+function escapeTableCell(value: unknown) {
+  return String(value ?? '-').replace(/\|/g, '\\|').replace(/\s+/g, ' ').trim();
+}
+
 function formatPropertyValue(value: unknown): string {
   if (Array.isArray(value)) return value.map(formatPropertyValue).join('、');
   if (typeof value === 'object' && value) return JSON.stringify(value);
@@ -337,7 +418,7 @@ function formatRelationshipLine(
 }
 
 function buildEntityPath(entity: Entity) {
-  return `wiki/${entity.type}/${safeSegment(entity.title || entity.id)}.md`;
+  return inferWikiTargetSpec(entity).path;
 }
 
 function withoutMd(path: string) {
@@ -354,14 +435,33 @@ function safeSegment(value: string) {
   return cleaned || 'untitled';
 }
 
-function entityTypeLabel(type: Entity['type']) {
-  const labels: Record<Entity['type'], string> = {
-    project: '事项',
-    topic: '主题',
-    person: '人物',
-    event: '互动',
+function wikiTypeLabel(type: string) {
+  const labels: Record<string, string> = {
+    overview: '总览',
+    project: '项目',
+    entity: '实体',
+    concept: '概念',
+    source: '来源',
+    query: '查询',
+    synthesis: '综合',
+    comparison: '对比',
+    decision: '决策',
+    meeting: '会议',
+    stakeholder: '干系人',
+    thesis: '论点',
+    finding: '发现',
+    methodology: '方法',
+    book: '书籍',
+    character: '人物',
+    theme: '主题',
+    'plot-thread': '情节线',
+    chapter: '章节',
+    goal: '目标',
+    habit: '习惯',
+    reflection: '复盘',
+    journal: '日记',
   };
-  return labels[type];
+  return labels[type] ?? type;
 }
 
 function groupBy<T, TKey>(items: T[], getKey: (item: T) => TKey) {

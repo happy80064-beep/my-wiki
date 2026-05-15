@@ -13,6 +13,7 @@ import {
 } from '@/lib/db';
 import { defaultEntityProperties } from '@/lib/db/entities';
 import { refreshCompiledProfiles } from '@/lib/wikiIndex';
+import { runTopicAutoAggregation } from '@/lib/wikiIndex/topicAggregation';
 import type { CaptureDraft, DraftEntity } from './draft';
 import { getDraftEntities } from './draft';
 
@@ -25,6 +26,7 @@ export type CaptureCompilationSummary = {
   updatedRelationships: number;
   createdTasks: number;
   queuedCompileSuggestions: number;
+  autoAggregatedTopics: number;
 };
 
 export type PersistCaptureDraftOptions = {
@@ -63,6 +65,7 @@ export async function persistCaptureDraft(
     updatedRelationships: 0,
     createdTasks: 0,
     queuedCompileSuggestions: 0,
+    autoAggregatedTopics: 0,
   };
 
   const entities: Entity[] = [];
@@ -139,13 +142,21 @@ export async function persistCaptureDraft(
     'capture-ingest',
   );
   compilation.queuedCompileSuggestions = compileSuggestions.length;
+  const topicAggregation = await runTopicAutoAggregation(entities.map((entity) => entity.id), entry.id);
+  compilation.autoAggregatedTopics = topicAggregation.topicIds.length;
+
+  const derivedEntityIds = mergeUnique(entities.map((entity) => entity.id), topicAggregation.topicIds);
+  const derivedRelationshipIds = mergeUnique(
+    relationships.map((relationship) => relationship.id),
+    topicAggregation.linkedRelationships,
+  );
 
   await updateEntry(entry.id, {
-    derivedEntities: entities.map((entity) => entity.id),
-    derivedRelationships: relationships.map((relationship) => relationship.id),
+    derivedEntities: derivedEntityIds,
+    derivedRelationships: derivedRelationshipIds,
     derivedTasks: tasks.map((task) => task.id),
   });
-  await refreshCompiledProfiles(entities.map((entity) => entity.id));
+  await refreshCompiledProfiles(derivedEntityIds);
 
   return {
     entry: (await updateEntry(entry.id, {}))!,
@@ -153,6 +164,7 @@ export async function persistCaptureDraft(
     relationships,
     tasks,
     compilation,
+    topicAggregation,
   };
 }
 

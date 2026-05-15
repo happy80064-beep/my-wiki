@@ -1,6 +1,7 @@
 import type { Task, TaskStatus } from '@/types';
 import { db } from './schema';
 import { createId } from './ids';
+import { getClientId } from './clientId';
 
 export type CreateTaskInput = {
   description: string;
@@ -16,6 +17,7 @@ export type CreateTaskInput = {
 export async function createTask(input: CreateTaskInput) {
   const task: Task = {
     id: createId('task'),
+    clientId: getClientId(),
     description: input.description,
     owner: input.owner,
     assignedBy: input.assignedBy,

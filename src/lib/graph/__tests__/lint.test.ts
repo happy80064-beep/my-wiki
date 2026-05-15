@@ -38,6 +38,7 @@ describe('wiki lint', () => {
     });
     await db.relationships.add({
       id: 'rel_broken',
+      clientId: 'test-client',
       from: entity.id,
       to: 'missing_entity',
       type: 'related-to',
@@ -88,6 +89,7 @@ describe('wiki lint', () => {
     ];
     const compileSuggestions = Array.from({ length: 5 }, (_, index) => ({
       id: `compile_${index}`,
+      clientId: 'test-client',
       fingerprint: `topic_1:ownerNote:${index}`,
       entityId: 'topic_1',
       entityTitle: 'OpenMaic',
@@ -131,6 +133,7 @@ describe('wiki lint', () => {
 function createTestEntity(id: string, type: Entity['type'], title: string, now: number): Entity {
   return {
     id,
+    clientId: 'test-client',
     type,
     title,
     summary: '',

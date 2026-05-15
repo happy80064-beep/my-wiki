@@ -7,13 +7,15 @@ const navItems = [
   { to: '/wiki', label: '知识库' },
   { to: '/graph', label: '图谱' },
   { to: '/reviews', label: '审核' },
+  { to: '/lint', label: '巡检' },
   { to: '/query', label: '查询' },
+  { to: '/settings', label: '设置' },
 ];
 
 export function App() {
   return (
-    <main className="min-h-screen bg-[#f7f7f5] text-[#222222]">
-      <header className="border-b border-[#e5e5e4] bg-white">
+    <main className="flex h-screen flex-col overflow-hidden bg-[#f7f7f5] text-[#222222]">
+      <header className="shrink-0 border-b border-[#e5e5e4] bg-white">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-5 py-4">
           <div className="flex items-center gap-3">
             <div className="flex size-9 items-center justify-center rounded-[10px] border border-[#d9d9d6] bg-[#f4f8ff] text-[#155eef]">
@@ -44,7 +46,9 @@ export function App() {
         </div>
       </header>
 
-      <Outlet />
+      <div className="min-h-0 flex-1 overflow-auto">
+        <Outlet />
+      </div>
     </main>
   );
 }

@@ -1,4 +1,5 @@
 import { db } from '@/lib/db/schema';
+import { getClientId } from '@/lib/db/clientId';
 import { relationshipTypeLabel } from '@/lib/graph/answer';
 import type { CompiledEntityProfile, Entity, QueryCacheRecord, Relationship, Task } from '@/types';
 
@@ -105,6 +106,7 @@ export async function putQueryCache(input: Pick<QueryCacheRecord, 'key' | 'quest
   const dataUpdatedAt = await getKnowledgeUpdatedAt();
   await db.queryCache.put({
     ...input,
+    clientId: getClientId(),
     createdAt: now,
     updatedAt: now,
     dataUpdatedAt,

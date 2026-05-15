@@ -37,7 +37,7 @@ export type QueryComposePayload = {
 
 export type QueryComposeResult = {
   answer: string;
-  provider: 'minimax' | 'deepseek';
+  provider: string;
   model: string;
   fallbackFrom?: string;
 };

@@ -26,6 +26,7 @@ describe('graph relevance', () => {
 function entity(id: string, type: Entity['type'], title: string, sourceEntries: string[]): Entity {
   return {
     id,
+    clientId: 'test-client',
     type,
     title,
     summary: '',
@@ -41,6 +42,7 @@ function entity(id: string, type: Entity['type'], title: string, sourceEntries: 
 function relationship(id: string, from: string, to: string, type: Relationship['type']): Relationship {
   return {
     id,
+    clientId: 'test-client',
     from,
     to,
     type,
