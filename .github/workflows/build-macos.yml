@@ -15,6 +15,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Select macOS Rust toolchain
+        shell: bash
+        run: |
+          cat > src-tauri/rust-toolchain.toml <<'EOF'
+          [toolchain]
+          channel = "stable-aarch64-apple-darwin"
+          EOF
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
