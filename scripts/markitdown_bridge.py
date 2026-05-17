@@ -5,6 +5,16 @@ import sys
 from pathlib import Path
 
 
+def write_stdout(text: str) -> None:
+    sys.stdout.buffer.write(text.encode("utf-8", errors="replace"))
+    sys.stdout.buffer.flush()
+
+
+def write_stderr(text: str) -> None:
+    sys.stderr.buffer.write(f"{text}\n".encode("utf-8", errors="replace"))
+    sys.stderr.buffer.flush()
+
+
 def convert_file(path: Path) -> str:
     from markitdown import MarkItDown
 
@@ -23,16 +33,16 @@ def main() -> int:
 
     path = Path(args.path)
     if not path.exists() or not path.is_file():
-        print(f"File does not exist: {path}", file=sys.stderr)
+        write_stderr(f"File does not exist: {path}")
         return 2
 
     try:
         text = convert_file(path)
     except Exception as error:
-        print(str(error), file=sys.stderr)
+        write_stderr(str(error))
         return 1
 
-    sys.stdout.write(text)
+    write_stdout(text)
     return 0
 
 

@@ -1,11 +1,13 @@
 import type { Entity } from '@/types';
 import { parseMarkdownFrontmatter, stringifyMarkdownFrontmatter, type FrontmatterData, type FrontmatterValue } from './frontmatter';
 import { sanitizeWikiMarkdownOutput } from './markdownCompiler';
+import { normalizeWikiReferenceValue } from './references';
 
 export type WikiPageMetadata = {
   title: string;
   type: string;
   tags: string[];
+  aliases: string[];
   sources: string[];
   related: string[];
   created?: string;
@@ -15,7 +17,7 @@ export type WikiPageMetadata = {
   extras: Array<{ key: string; value: string }>;
 };
 
-const topLevelKeys = new Set(['title', 'type', 'tags', 'created', 'updated', 'description', 'sources', 'related', 'origin']);
+const topLevelKeys = new Set(['title', 'type', 'tags', 'aliases', 'created', 'updated', 'description', 'sources', 'related', 'origin']);
 
 export function buildWikiPageMetadata(markdown: string, fallback: Pick<Entity, 'title' | 'type' | 'tags'>): WikiPageMetadata {
   const cleaned = sanitizeWikiMarkdownOutput(markdown);
@@ -27,8 +29,9 @@ export function buildWikiPageMetadata(markdown: string, fallback: Pick<Entity, '
     title: stringValue(effectiveParsed.data.title) || fallback.title,
     type: stringValue(effectiveParsed.data.type) || fallback.type,
     tags: stringArray(effectiveParsed.data.tags, fallback.tags),
+    aliases: stringArray(effectiveParsed.data.aliases),
     sources: stringArray(effectiveParsed.data.sources),
-    related: stringArray(effectiveParsed.data.related),
+    related: stringArray(effectiveParsed.data.related).map(normalizeWikiReferenceValue).filter(Boolean),
     created: stringValue(effectiveParsed.data.created) || undefined,
     updated: stringValue(effectiveParsed.data.updated) || undefined,
     description: normalizeWikiDescription(stringValue(effectiveParsed.data.description), sanitizedBody, fallbackSummary),

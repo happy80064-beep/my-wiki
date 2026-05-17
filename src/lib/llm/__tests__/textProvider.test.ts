@@ -65,7 +65,20 @@ describe('text provider bridge', () => {
         model: 'MiniMax-M2.7',
         contextWindow: 200000,
       },
-      { ...baseInput, responseFormat: 'json_object' },
+      {
+        ...baseInput,
+        structuredOutput: {
+          name: 'capture_analysis',
+          description: 'Return capture analysis',
+          schema: {
+            type: 'object',
+            properties: {
+              entities: { type: 'array', items: { type: 'object' } },
+            },
+            required: ['entities'],
+          },
+        },
+      },
     );
 
     expect(request.url).toBe('https://api.minimaxi.com/anthropic/v1/messages');
@@ -77,6 +90,13 @@ describe('text provider bridge', () => {
       model: 'MiniMax-M2.7',
       system: baseInput.systemPrompt,
       messages: [{ role: 'user', content: baseInput.prompt }],
+      tools: [
+        {
+          name: 'capture_analysis',
+          input_schema: expect.objectContaining({ type: 'object' }),
+        },
+      ],
+      tool_choice: { type: 'tool', name: 'capture_analysis' },
     });
   });
 
@@ -95,6 +115,36 @@ describe('text provider bridge', () => {
     );
 
     expect(request.body.response_format).toEqual({ type: 'json_object' });
+  });
+
+  it('adds forced tool calls for OpenAI-compatible structured requests', () => {
+    const request = buildProviderTextRequest(
+      {
+        providerId: 'openai',
+        enabled: true,
+        apiMode: 'openai-compatible',
+        endpoint: 'https://api.openai.com/v1',
+        apiKey: 'sk-openai',
+        model: 'gpt-5.5',
+        contextWindow: 200000,
+      },
+      {
+        ...baseInput,
+        structuredOutput: {
+          name: 'capture_analysis',
+          description: 'Return capture analysis',
+          schema: { type: 'object', properties: { entities: { type: 'array' } }, required: ['entities'] },
+        },
+      },
+    );
+
+    expect(request.body.tools).toEqual([
+      expect.objectContaining({
+        type: 'function',
+        function: expect.objectContaining({ name: 'capture_analysis' }),
+      }),
+    ]);
+    expect(request.body.tool_choice).toEqual({ type: 'function', function: { name: 'capture_analysis' } });
   });
 
   it('builds Gemini-native requests without OpenAI-compatible auth headers', () => {

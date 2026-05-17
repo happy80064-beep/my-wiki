@@ -60,10 +60,53 @@ export async function syncIndexedDbKnowledgeToDefaultWorkspace(rootOverride?: st
     writtenFiles += 1;
   }
 
+  if (storage.writeBinaryFile) {
+    const rawAssets = await db.rawAssets.toArray();
+    for (const asset of rawAssets) {
+      const dataBase64 = asset.dataBase64 || (asset.blob ? await blobToBase64(asset.blob) : '');
+      if (!dataBase64) continue;
+      const relativePath = sanitizeWorkspaceRawAssetPath(asset.filename);
+      await storage.writeBinaryFile(joinWorkspacePath(initialized.layout.rawSources, relativePath), dataBase64);
+      writtenFiles += 1;
+    }
+  }
+
   const snapshotPath = joinWorkspacePath(initialized.layout.state, workspaceIndexedDbSnapshotFileName);
   await storage.writeTextFile(snapshotPath, `${JSON.stringify(await buildIndexedDbSnapshot(), null, 2)}\n`);
 
   return { root: initialized.layout.root, writtenFiles, snapshotPath };
+}
+
+function sanitizeWorkspaceRawAssetPath(value: string) {
+  try {
+    return assertSafeWorkspaceRelativePath(value);
+  } catch {
+    return (
+      value
+        .replace(/\\/g, '/')
+        .split('/')
+        .map((part) =>
+          part
+            .replace(/[<>:"/\\|?*\x00-\x1f]/g, '-')
+            .replace(/\s+/g, ' ')
+            .replace(/^\.+$/g, '')
+            .replace(/\.+$/g, '')
+            .trim()
+            .slice(0, 120),
+        )
+        .filter(Boolean)
+        .join('/') || 'unknown'
+    );
+  }
+}
+
+async function blobToBase64(blob: Blob) {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = '';
+  for (let index = 0; index < bytes.length; index += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+  }
+  return btoa(binary);
 }
 
 export async function restoreIndexedDbKnowledgeFromWorkspace(rootOverride?: string): Promise<WorkspaceRestoreResult | undefined> {

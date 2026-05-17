@@ -34,9 +34,17 @@ const statusLabel: Record<RawAssetStatus, string> = {
   compiled: '已入库',
   skipped: '已跳过',
   failed: '失败',
+  cancelled: '已取消',
+  wiki_compiling: '生成 Wiki 中',
+  wiki_failed: 'Wiki 失败',
 };
 
 const FROG_POSITION_KEY = 'mywiki.froggy.position';
+const BROWSER_WIDGET_WIDTH = 340;
+const BROWSER_WIDGET_HEIGHT = 360;
+const DESKTOP_WIDGET_WIDTH = 170;
+const DESKTOP_WIDGET_HEIGHT = 180;
+const DESKTOP_WIDGET_DETAILS_HEIGHT = 360;
 
 export function FrogWidgetPage() {
   const pageRef = useRef<HTMLElement | null>(null);
@@ -64,11 +72,11 @@ export function FrogWidgetPage() {
         (stats, asset) => {
           const displayStatus = getDisplayRawAssetStatus(asset, queueStatus);
           stats.total += 1;
-          if (displayStatus === 'raw' || displayStatus === 'extracting' || displayStatus === 'compiling') {
+          if (displayStatus === 'raw' || displayStatus === 'extracting' || displayStatus === 'compiling' || displayStatus === 'wiki_compiling') {
             stats.pending += 1;
           } else if (displayStatus === 'compiled') {
             stats.compiled += 1;
-          } else if (displayStatus === 'failed') {
+          } else if (displayStatus === 'failed' || displayStatus === 'wiki_failed') {
             stats.failed += 1;
           } else if (displayStatus === 'skipped') {
             stats.skipped += 1;
@@ -132,8 +140,8 @@ export function FrogWidgetPage() {
 
   useEffect(() => {
     if (!desktopShell) return;
-    const height = detailsOpen ? 610 : 360;
-    void getCurrentWindow().setSize(new LogicalSize(340, height)).catch(() => undefined);
+    const height = detailsOpen ? DESKTOP_WIDGET_DETAILS_HEIGHT : DESKTOP_WIDGET_HEIGHT;
+    void getCurrentWindow().setSize(new LogicalSize(DESKTOP_WIDGET_WIDTH, height)).catch(() => undefined);
   }, [desktopShell, detailsOpen]);
 
   useEffect(() => {
@@ -333,8 +341,8 @@ export function FrogWidgetPage() {
 
     function move(nextEvent: globalThis.PointerEvent) {
       setPosition({
-        x: clamp(startPosition.x + nextEvent.clientX - startX, 8, window.innerWidth - 340),
-        y: clamp(startPosition.y + nextEvent.clientY - startY, 8, window.innerHeight - 360),
+        x: clamp(startPosition.x + nextEvent.clientX - startX, 8, window.innerWidth - BROWSER_WIDGET_WIDTH),
+        y: clamp(startPosition.y + nextEvent.clientY - startY, 8, window.innerHeight - BROWSER_WIDGET_HEIGHT),
       });
     }
 
@@ -356,6 +364,29 @@ export function FrogWidgetPage() {
   const bubbleVisible = mood !== 'idle' || showIdleHint;
   const bubbleMessage = mood === 'idle' ? '我饿了，有文件可以喂给我' : message;
   const queueRunning = queueStatus?.stage === 'running';
+  const widgetSizeClass = desktopShell ? 'frog-widget-compact w-[160px] rounded-[14px]' : 'w-[320px] rounded-[18px]';
+  const widgetChromeClass = desktopShell
+    ? 'border border-transparent bg-transparent p-1.5 shadow-none'
+    : 'border border-[#d9e4d7] bg-[#fbfffb]/95 p-4 shadow-[0_20px_50px_rgb(31_41_55_/_0.16)] backdrop-blur';
+  const dropZoneClass = desktopShell
+    ? 'h-[112px] rounded-[14px] px-1.5 pb-2 pt-5 shadow-[0_10px_24px_rgb(31_41_55_/_0.10)]'
+    : 'h-[220px] rounded-[18px] px-3 pb-4 pt-7 shadow-[0_16px_40px_rgb(31_41_55_/_0.10)]';
+  const topControlClass = desktopShell ? 'absolute right-1.5 top-1.5 z-10 flex gap-1' : 'absolute right-3 top-3 z-10 flex gap-1';
+  const iconButtonClass = desktopShell
+    ? 'inline-flex h-6 w-6 items-center justify-center rounded-full border border-[#d9e4d7] bg-white/90 text-[#4b5563] shadow-sm'
+    : 'inline-flex h-8 w-8 items-center justify-center rounded-full border border-[#d9e4d7] bg-white/90 text-[#4b5563] shadow-sm';
+  const frogTopClass = desktopShell ? 'absolute inset-x-0 top-4' : 'absolute inset-x-0 top-8';
+  const statusButtonLabel = desktopShell
+    ? detailsOpen
+      ? '收起状态'
+      : isBusy
+        ? '编译中'
+        : '状态/队列'
+    : detailsOpen
+      ? '收起消化状态'
+      : isBusy
+        ? '正在消化，点开查看'
+        : '消化状态与队列';
 
   return (
     <main
@@ -368,7 +399,7 @@ export function FrogWidgetPage() {
       tabIndex={0}
     >
       <section
-        className={`frog-widget fixed w-[320px] rounded-[18px] ${mood === 'hover' ? 'frog-widget-hover' : ''} ${desktopShell ? 'border border-transparent bg-transparent p-2 shadow-none' : 'border border-[#d9e4d7] bg-[#fbfffb]/95 p-4 shadow-[0_20px_50px_rgb(31_41_55_/_0.16)] backdrop-blur'} ${isDraggingWidget ? 'cursor-grabbing' : 'cursor-grab'}`}
+        className={`frog-widget fixed ${widgetSizeClass} ${mood === 'hover' ? 'frog-widget-hover' : ''} ${widgetChromeClass} ${isDraggingWidget ? 'cursor-grabbing' : 'cursor-grab'}`}
         style={{ left: position.x, top: position.y }}
         onPointerDown={handlePointerDown}
         onDragOver={handleDragOver}
@@ -376,7 +407,7 @@ export function FrogWidgetPage() {
         onDrop={handleDrop}
         aria-label="MyWiki 蛙蛙捕获入口"
       >
-        <div className="absolute right-3 top-3 z-10 flex gap-1" data-no-widget-drag>
+        <div className={topControlClass} data-no-widget-drag>
           <div className="hidden">
             <p className="text-xs font-medium text-[#155eef]">Froggy Capture</p>
             <h1 className="mt-1 text-base font-semibold">MyWiki 捕获蛙</h1>
@@ -384,27 +415,27 @@ export function FrogWidgetPage() {
           {desktopShell ? (
             <button
               type="button"
-              className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-[#d9e4d7] bg-white/90 text-[#4b5563] shadow-sm"
+              className={iconButtonClass}
               title="最小化"
               aria-label="最小化"
               data-no-widget-drag
               onClick={handleMinimize}
             >
-              <Minus size={15} />
+              <Minus size={desktopShell ? 12 : 15} />
             </button>
           ) : null}
           <a
             href="/capture"
-            className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-[#d9e4d7] bg-white/90 text-[#155eef] shadow-sm"
+            className={iconButtonClass.replace('text-[#4b5563]', 'text-[#155eef]')}
             title="打开捕获页"
             aria-label="打开捕获页"
           >
-            <FileDown size={17} />
+            <FileDown size={desktopShell ? 13 : 17} />
           </a>
         </div>
 
-        <div className="frog-drop-zone pointer-events-none relative h-[220px] rounded-[18px] border border-dashed border-[#cfe1cf] bg-white/80 px-3 pb-4 pt-7 shadow-[0_16px_40px_rgb(31_41_55_/_0.10)] backdrop-blur">
-          <div className="absolute inset-x-0 top-8">
+        <div className={`frog-drop-zone pointer-events-none relative border border-dashed border-[#cfe1cf] bg-white/80 backdrop-blur ${dropZoneClass}`}>
+          <div className={frogTopClass}>
             <FrogFace mood={mood} />
           </div>
           {bubbleVisible ? (
@@ -412,25 +443,31 @@ export function FrogWidgetPage() {
               {bubbleMessage}
             </div>
           ) : null}
-          <p className="absolute inset-x-0 bottom-4 text-center text-xs text-[#65736a]">拖入文件 / 粘贴图片或文本</p>
+          <p className={`absolute inset-x-0 text-center text-[#65736a] ${desktopShell ? 'bottom-2 text-[10px]' : 'bottom-4 text-xs'}`}>
+            {desktopShell ? '拖入 / 粘贴' : '拖入文件 / 粘贴图片或文本'}
+          </p>
         </div>
 
         <button
           type="button"
-          className="mt-2 flex w-full items-center justify-between rounded-full border border-[#d9e4d7] bg-white/90 px-3 py-2 text-xs text-[#2f3f35] shadow-sm"
+          className={`flex w-full items-center justify-between rounded-full border border-[#d9e4d7] bg-white/90 text-[#2f3f35] shadow-sm ${desktopShell ? 'mt-1 px-2 py-1 text-[10px]' : 'mt-2 px-3 py-2 text-xs'}`}
           data-no-widget-drag
           onPointerDown={(event) => event.stopPropagation()}
           onClick={() => setDetailsOpen((open) => !open)}
           aria-expanded={detailsOpen}
         >
           <span className="inline-flex items-center gap-1.5">
-            <Settings2 size={13} />
-            {detailsOpen ? '收起消化状态' : isBusy ? '正在消化，点开查看' : '消化状态与队列'}
+            <Settings2 size={desktopShell ? 11 : 13} />
+            {statusButtonLabel}
           </span>
-          {detailsOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+          {detailsOpen ? <ChevronUp size={desktopShell ? 12 : 14} /> : <ChevronDown size={desktopShell ? 12 : 14} />}
         </button>
 
-        <div className={detailsOpen ? 'block' : 'hidden'} data-no-widget-drag onPointerDown={(event) => event.stopPropagation()}>
+        <div
+          className={detailsOpen ? (desktopShell ? 'block max-h-[225px] overflow-y-auto pr-0.5' : 'block') : 'hidden'}
+          data-no-widget-drag
+          onPointerDown={(event) => event.stopPropagation()}
+        >
           <div className="mt-2 flex items-center justify-end rounded-[12px] border border-[#e2ebe1] bg-white/95 px-3 py-2">
           <button
             type="button"
@@ -555,7 +592,7 @@ function getDisplayRawAssetStatus(
 ): RawAssetStatus {
   const isQueuedRetry =
     queueStatus?.stage === 'running' &&
-    asset.status === 'failed' &&
+    (asset.status === 'failed' || asset.status === 'wiki_failed') &&
     (queueStatus.currentAssetId === asset.id || Boolean(queueStatus.queuedAssetIds?.includes(asset.id)));
   return isQueuedRetry ? 'compiling' : asset.status;
 }
@@ -616,7 +653,7 @@ function mimeExtension(mimeType: string) {
 
 function loadPosition(): WidgetPosition {
   if (isTauriRuntime()) {
-    return { x: 16, y: 16 };
+    return { x: 5, y: 5 };
   }
 
   try {

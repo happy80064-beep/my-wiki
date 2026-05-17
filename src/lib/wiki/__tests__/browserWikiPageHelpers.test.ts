@@ -62,8 +62,109 @@ describe('browser wiki page helpers', () => {
       tags: ['产业园区', '智算中心'],
       updatedAt: 123456,
     });
-    expect(patch.wikiMarkdown.startsWith('---')).toBe(true);
-    expect(patch.wikiMarkdown).not.toContain('<think>');
+    expect((patch.wikiMarkdown ?? '').startsWith('---')).toBe(true);
+    expect(patch.wikiMarkdown ?? '').not.toContain('<think>');
+  });
+
+  it('updates the entity type when edited frontmatter moves a page between wiki groups', async () => {
+    const entity = await createEntity({
+      type: 'project',
+      title: 'Flexible staffing model',
+      summary: 'Old summary.',
+      tags: ['project'],
+      sourceEntries: [],
+    });
+
+    const patch = buildBrowserEntityMarkdownPatch(
+      entity,
+      [
+        '---',
+        'type: concept',
+        'title: "Flexible staffing model"',
+        'tags: [concept]',
+        'sources: []',
+        'related: []',
+        '---',
+        '',
+        '# Flexible staffing model',
+        '',
+        '## Summary',
+        'A concept page after manual editing.',
+      ].join('\n'),
+    );
+
+    expect(patch).toMatchObject({
+      type: 'topic',
+      tags: ['concept'],
+    });
+  });
+
+  it('accepts Chinese page type names when manually editing wiki frontmatter', async () => {
+    const entity = await createEntity({
+      type: 'project',
+      title: '目标市场界定',
+      summary: 'Old summary.',
+      tags: ['project', '项目'],
+      sourceEntries: [],
+    });
+
+    const patch = buildBrowserEntityMarkdownPatch(
+      entity,
+      [
+        '---',
+        'type: 概念',
+        'title: "目标市场界定"',
+        'tags: [概念]',
+        'sources: []',
+        'related: []',
+        '---',
+        '',
+        '# 目标市场界定',
+        '',
+        '## 摘要',
+        '目标市场界定应作为概念页维护。',
+      ].join('\n'),
+    );
+
+    expect(patch).toMatchObject({
+      type: 'topic',
+      tags: ['概念'],
+    });
+    expect(patch.wikiMarkdown).toContain('type: concept');
+  });
+
+  it('moves a page when the visible type tags are edited from project to concept', async () => {
+    const entity = await createEntity({
+      type: 'project',
+      title: '项目目标市场界定',
+      summary: 'Old summary.',
+      tags: ['project', '项目'],
+      sourceEntries: [],
+    });
+
+    const patch = buildBrowserEntityMarkdownPatch(
+      entity,
+      [
+        '---',
+        'type: project',
+        'title: "项目目标市场界定"',
+        'tags: [concept, 概念]',
+        'sources: []',
+        'related: []',
+        '---',
+        '',
+        '# 项目目标市场界定',
+        '',
+        '## 摘要',
+        '用户将类型标签从项目改成概念后，知识树应同步移动。',
+      ].join('\n'),
+    );
+
+    expect(patch).toMatchObject({
+      type: 'topic',
+      tags: ['concept', '概念'],
+    });
+    expect(patch.wikiMarkdown).toContain('type: concept');
   });
 
   it('builds an initial markdown scaffold for entities that do not yet have wikiMarkdown', async () => {

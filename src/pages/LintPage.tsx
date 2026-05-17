@@ -34,6 +34,7 @@ import {
   buildBrowserEntityMarkdownPatch,
 } from '@/lib/wiki/browserWikiPageHelpers';
 import { buildWikiPageMetadata } from '@/lib/wiki/pageMetadata';
+import { normalizeWikiReferenceValue } from '@/lib/wiki/references';
 import {
   runStructuralWikiLint,
   type WikiLintContextMap,
@@ -184,6 +185,7 @@ export function LintPage() {
           type: page.type,
           path: page.path,
           slug: page.slug,
+          aliases: page.aliases,
           absolutePath: page.absolutePath,
           markdown,
           related: page.related,
@@ -711,6 +713,7 @@ function buildBrowserLintPages(entities: Entity[]): WikiLintPage[] {
       type: metadata.type || entity.type,
       path: `wiki/${folder}/${slug}.md`,
       slug,
+      aliases: metadata.aliases,
       markdown,
       related: metadata.related,
     };
@@ -760,7 +763,15 @@ function browserTypeFolder(type: string) {
 function findLintPage(pages: WikiLintPage[], reference: string) {
   const referenceKeys = buildReferenceLookupKeys(reference);
   return pages.find((page) => {
-    const keys = [page.path, page.path.replace(/^wiki\//i, ''), page.path.replace(/^wiki\//i, '').replace(/\.md$/i, ''), page.slug ?? '', page.title, slugFromPath(page.path)];
+    const keys = [
+      page.path,
+      page.path.replace(/^wiki\//i, ''),
+      page.path.replace(/^wiki\//i, '').replace(/\.md$/i, ''),
+      page.slug ?? '',
+      page.title,
+      ...(page.aliases ?? []),
+      slugFromPath(page.path),
+    ];
     const pageKeys = new Set(keys.flatMap(buildReferenceLookupKeys));
     return referenceKeys.some((key) => pageKeys.has(key));
   });
@@ -822,7 +833,7 @@ function slugFromPath(path: string) {
 }
 
 function normalizeReference(value: string) {
-  return value
+  return normalizeWikiReferenceValue(value)
     .replace(/\\/g, '/')
     .replace(/^wiki\//i, '')
     .replace(/\.md$/i, '')

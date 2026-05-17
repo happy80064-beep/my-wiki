@@ -12,6 +12,7 @@ function page(type: WikiPageIndexEntry['type'], title: string): WikiPageIndexEnt
     title,
     summary: '',
     tags: [],
+    aliases: [],
     related: [],
     sources: [],
     frontmatter: {},

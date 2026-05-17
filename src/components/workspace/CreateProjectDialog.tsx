@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { FolderOpen, Loader2, X } from 'lucide-react';
 import {
   projectTemplates,
@@ -6,6 +7,7 @@ import {
   type ProjectOutputLanguage,
   type ProjectTemplateId,
 } from '@/lib/workspace';
+import { isTauriRuntime } from '@/lib/runtime/tauri';
 
 type CreateProjectDialogProps = {
   open: boolean;
@@ -33,9 +35,14 @@ export function CreateProjectDialog({
   const [parentDirectory, setParentDirectory] = useState(defaultParentDirectory);
   const [templateId, setTemplateId] = useState<ProjectTemplateId>('general');
   const [outputLanguage, setOutputLanguage] = useState<ProjectOutputLanguage>('zh-CN');
+  const [directoryError, setDirectoryError] = useState('');
+  const canChooseParentDirectory = isTauriRuntime();
 
   useEffect(() => {
-    if (open) setParentDirectory(defaultParentDirectory);
+    if (open) {
+      setParentDirectory(defaultParentDirectory);
+      setDirectoryError('');
+    }
   }, [defaultParentDirectory, open]);
 
   if (!open) return null;
@@ -47,6 +54,28 @@ export function CreateProjectDialog({
       templateId,
       outputLanguage,
     });
+  }
+
+  async function chooseParentDirectory() {
+    if (!canChooseParentDirectory) {
+      setDirectoryError('浏览器预览不能直接打开本地目录选择器，请手动输入父目录。');
+      return;
+    }
+
+    setDirectoryError('');
+    try {
+      const selected = await openDialog({
+        title: '选择知识库父目录',
+        directory: true,
+        multiple: false,
+        defaultPath: parentDirectory || defaultParentDirectory || undefined,
+      });
+      if (typeof selected === 'string') {
+        setParentDirectory(selected.replace(/\\/g, '/'));
+      }
+    } catch (error) {
+      setDirectoryError(error instanceof Error ? error.message : '打开目录选择器失败。');
+    }
   }
 
   return (
@@ -135,18 +164,20 @@ export function CreateProjectDialog({
               />
               <button
                 type="button"
-                className="flex size-10 shrink-0 items-center justify-center rounded-[8px] border border-[#d9d9d6] text-[#626965]"
-                title="目录选择器将在桌面版后续接入"
-                disabled
+                className="flex size-10 shrink-0 items-center justify-center rounded-[8px] border border-[#d9d9d6] text-[#626965] hover:border-[#155eef] hover:text-[#155eef] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-[#d9d9d6] disabled:hover:text-[#626965]"
+                title={canChooseParentDirectory ? '选择父目录' : '浏览器预览请手动输入父目录'}
+                aria-label="选择父目录"
+                onClick={() => void chooseParentDirectory()}
+                disabled={creating || !canChooseParentDirectory}
               >
                 <FolderOpen size={17} />
               </button>
             </div>
           </label>
 
-          {error ? (
+          {directoryError || error ? (
             <div className="rounded-[8px] border border-[#fecaca] bg-[#fff5f5] px-3 py-2 text-sm leading-6 text-[#b42318]">
-              {error}
+              {directoryError || error}
             </div>
           ) : null}
         </div>

@@ -1,8 +1,13 @@
 import { getLlmProviderPreset } from '@/lib/llm/providers';
 import { getProviderConfigForRole, type LlmProviderSettings } from '@/lib/llm/providerSettings';
-import type { CompiledEntityProfile, Entity, Entry } from '@/types';
+import { defaultEntityProperties } from '@/lib/db';
+import type { CompiledEntityProfile, Entity, Entry, EntityType } from '@/types';
+import { parseMarkdownFrontmatter, stringifyMarkdownFrontmatter } from './frontmatter';
 import { extractMarkdownSummary, inferWikiTargetSpec, sanitizeWikiMarkdownOutput } from './markdownCompiler';
 import { buildWikiPageMetadata, repairWikiMarkdownDescription } from './pageMetadata';
+import type { WikiPageMetadata } from './pageMetadata';
+import { normalizeWikiPageType } from './schemaRules';
+import type { WikiPageType } from './scanner';
 
 export function getWikiCompileProviderSummary(settings: LlmProviderSettings) {
   const config = getProviderConfigForRole(settings, 'wiki-compile');
@@ -18,19 +23,27 @@ export function getWikiCompileProviderSummary(settings: LlmProviderSettings) {
 export function buildBrowserEntityMarkdownPatch(entity: Entity, markdown: string, updatedAt = Date.now()) {
   const cleaned = sanitizeWikiMarkdownOutput(markdown).trim();
   const metadata = buildWikiPageMetadata(cleaned, entity);
-  return {
+  const pageType = resolveEditedWikiPageType(metadata, entity);
+  const normalizedMarkdown = normalizeEditedWikiMarkdownType(cleaned, pageType);
+  const nextEntityType = wikiPageTypeToEntityType(pageType, entity.type);
+  const patch: Partial<Entity> = {
     title: metadata.title,
-    summary: extractMarkdownSummary(cleaned) || metadata.description || entity.summary,
+    summary: extractMarkdownSummary(normalizedMarkdown) || metadata.description || entity.summary,
     tags: metadata.tags,
-    wikiMarkdown: cleaned,
+    wikiMarkdown: normalizedMarkdown,
     updatedAt,
   };
+  if (nextEntityType !== entity.type) {
+    patch.type = nextEntityType;
+    patch.properties = defaultEntityProperties(nextEntityType);
+  }
+  return patch;
 }
 
-export function buildInitialBrowserEntityMarkdown(entity: Entity) {
+export function buildInitialBrowserEntityMarkdown(entity: Entity, schema?: string) {
   if (entity.wikiMarkdown?.trim()) return sanitizeWikiMarkdownOutput(entity.wikiMarkdown).trim();
 
-  const inferredTarget = inferWikiTargetSpec(entity);
+  const inferredTarget = inferWikiTargetSpec(entity, { schema });
   const metadata = buildWikiPageMetadata('', entity);
   const created = Number.isFinite(entity.createdAt) ? new Date(entity.createdAt).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
   const updated = Number.isFinite(entity.updatedAt) ? new Date(entity.updatedAt).toISOString().slice(0, 10) : created;
@@ -181,4 +194,60 @@ function compactMarkdownBlocks(blocks: string[]) {
     .map((block) => block.trim())
     .filter(Boolean)
     .join('\n\n');
+}
+
+function resolveEditedWikiPageType(metadata: WikiPageMetadata, entity: Entity): WikiPageType {
+  const metadataType = normalizeWikiPageType(metadata.type);
+  const tagType = metadata.tags
+    .map((tag) => normalizeWikiPageType(tag))
+    .find((type): type is WikiPageType => Boolean(type && !['schema', 'purpose', 'overview'].includes(type)));
+  const currentType = entityTypeToWikiPageType(entity.type);
+
+  if (metadataType && metadataType !== currentType) return metadataType;
+  if (tagType && tagType !== metadataType) return tagType;
+  return metadataType ?? tagType ?? currentType;
+}
+
+function normalizeEditedWikiMarkdownType(markdown: string, pageType: WikiPageType) {
+  const parsed = parseMarkdownFrontmatter(markdown);
+  if (!parsed.raw) return markdown;
+  const currentType = normalizeWikiPageType(typeof parsed.data.type === 'string' ? parsed.data.type : undefined);
+  if (currentType === pageType && parsed.data.type === pageType) return markdown;
+
+  const nextData = {
+    ...parsed.data,
+    type: pageType,
+  };
+  return `${stringifyMarkdownFrontmatter(nextData)}\n\n${parsed.body.trimStart()}`.trim();
+}
+
+function entityTypeToWikiPageType(type: EntityType): WikiPageType {
+  if (type === 'project') return 'project';
+  if (type === 'topic') return 'concept';
+  return 'entity';
+}
+
+function wikiPageTypeToEntityType(type: WikiPageType, fallback: EntityType): EntityType {
+  if (type === 'project') return 'project';
+  if (
+    [
+      'concept',
+      'query',
+      'synthesis',
+      'comparison',
+      'methodology',
+      'finding',
+      'thesis',
+      'theme',
+      'plot-thread',
+      'chapter',
+      'goal',
+      'habit',
+      'reflection',
+      'journal',
+    ].includes(type)
+  ) {
+    return 'topic';
+  }
+  return fallback;
 }

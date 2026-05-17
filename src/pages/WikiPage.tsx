@@ -10,11 +10,32 @@ import {
 import { buildMarkdownExportFiles, buildMarkdownZipBlob } from '@/lib/export/markdown';
 import { isTauriRuntime } from '@/lib/runtime/tauri';
 import {
+  cancelActiveRawAssetQueueTasks,
+  cancelRawAssetQueueTask,
+  clearTerminalRawAssetQueueTasks,
+  createRawAssetFromFile,
+  loadRawAssetWorkspaceQueue,
   processRawAssetQueue,
+  reconcileInterruptedRawAssetQueueRun,
+  retryRawAssetQueueTask,
+  summarizeRawAssetWorkspaceQueue,
   subscribeRawAssetQueueStatus,
   type RawAssetQueueSnapshot,
+  type RawAssetWorkspaceQueueTask,
 } from '@/lib/rawAssets';
-import { canUseWorkspaceStorage, syncIndexedDbKnowledgeToDefaultWorkspace } from '@/lib/workspace';
+import { isSupportedImportFile } from '@/lib/import/fileText';
+import {
+  assertSafeWorkspaceRelativePath,
+  canUseWorkspaceStorage,
+  createWorkspaceStorage,
+  getPersistedWorkspaceRoot,
+  getWorkspaceDefaultRoot,
+  initializeWorkspace,
+  joinWorkspacePath,
+  resolveActiveWorkspaceSchemaContext,
+  syncIndexedDbKnowledgeToDefaultWorkspace,
+  useWorkspaceRuntimeStore,
+} from '@/lib/workspace';
 import { resizeTriPaneLayout, type TriPaneLayout } from '@/lib/ui/triPaneLayout';
 import { loadProviderSettings } from '@/lib/llm/providerSettings';
 import { recompileBrowserEntityWikiPage } from '@/lib/wiki/browserRecompile';
@@ -39,10 +60,17 @@ import {
 import { inferWikiTargetSpec } from '@/lib/wiki/markdownCompiler';
 import { buildWikiPageMetadata, type WikiPageMetadata } from '@/lib/wiki/pageMetadata';
 import { groupWikiPagesByType } from '@/lib/wiki/pageTree';
-import { WIKI_PAGE_TYPES, WIKI_PAGE_TYPE_ORDER, type WikiPageIndexEntry, type WikiPageType } from '@/lib/wiki/scanner';
+import { normalizeWikiReferenceValue } from '@/lib/wiki/references';
+import { normalizeWikiPageType } from '@/lib/wiki/schemaRules';
+import { WIKI_PAGE_TYPE_ORDER, type WikiPageIndexEntry, type WikiPageType } from '@/lib/wiki/scanner';
 import type { Entity, Entry, RawAsset } from '@/types';
 
-type BrowserWikiTreePage = WikiPageIndexEntry & { entity: Entity };
+type BrowserWikiTreePage = WikiPageIndexEntry & { entity: Entity; wikiStatus: BrowserWikiEntityStatus };
+type BrowserWikiEntityStatus = {
+  state: 'complete' | 'draft' | 'structured';
+  label: string;
+  detail: string;
+};
 type BrowserWikiSearchDocument = {
   entity: Entity;
   title: string;
@@ -96,7 +124,8 @@ function DesktopWikiPage() {
 }
 
 export function BrowserIndexedDbWikiPage() {
-  const importInputRef = useRef<HTMLInputElement | null>(null);
+  const rawImportInputRef = useRef<HTMLInputElement | null>(null);
+  const backupImportInputRef = useRef<HTMLInputElement | null>(null);
   const repairRunningRef = useRef(false);
   const [importStatus, setImportStatus] = useState('');
   const [selected, setSelected] = useState<{ kind: 'entity'; id: string } | { kind: 'entry'; id: string } | null>(null);
@@ -108,8 +137,14 @@ export function BrowserIndexedDbWikiPage() {
   const [restoreStatus, setRestoreStatus] = useState('');
   const [compilingEntityId, setCompilingEntityId] = useState<string | null>(null);
   const [queueStatus, setQueueStatus] = useState<RawAssetQueueSnapshot | null>(null);
+  const [workspaceQueueTasks, setWorkspaceQueueTasks] = useState<RawAssetWorkspaceQueueTask[]>([]);
+  const [workspaceQueuePath, setWorkspaceQueuePath] = useState('');
+  const [workspaceQueueActionStatus, setWorkspaceQueueActionStatus] = useState('');
   const [wikiBatchStatus, setWikiBatchStatus] = useState<WikiBatchCompileSnapshot | null>(null);
   const [dbOpenError, setDbOpenError] = useState('');
+  const [activeWorkspaceSchema, setActiveWorkspaceSchema] = useState('');
+  const activeWorkspaceRoot = useWorkspaceRuntimeStore((state) => state.activeRoot);
+  const activeWorkspaceSnapshotRoot = useWorkspaceRuntimeStore((state) => state.snapshot?.layout.root);
   const searchParams = useMemo(
     () => new URLSearchParams(typeof window === 'undefined' ? '' : window.location.search),
     [],
@@ -146,10 +181,13 @@ export function BrowserIndexedDbWikiPage() {
     rawAssetCountLive !== undefined &&
     tasksLive !== undefined &&
     relationshipsLive !== undefined;
-  const sortedEntities = useMemo(() => sortBrowserEntities(entities), [entities]);
-  const browserWikiPages = useMemo(() => buildBrowserWikiTreePages(sortedEntities), [sortedEntities]);
+  const sortedEntities = useMemo(() => sortBrowserEntities(entities, activeWorkspaceSchema), [entities, activeWorkspaceSchema]);
+  const browserWikiPages = useMemo(() => buildBrowserWikiTreePages(sortedEntities, activeWorkspaceSchema), [sortedEntities, activeWorkspaceSchema]);
   const deferredWikiSearchQuery = useDeferredValue(wikiSearchQuery);
-  const browserWikiSearchDocuments = useMemo(() => buildBrowserWikiSearchDocuments(sortedEntities), [sortedEntities]);
+  const browserWikiSearchDocuments = useMemo(
+    () => buildBrowserWikiSearchDocuments(sortedEntities, activeWorkspaceSchema),
+    [sortedEntities, activeWorkspaceSchema],
+  );
   const browserWikiSearchResults = useMemo(
     () => searchBrowserWikiDocuments(browserWikiSearchDocuments, deferredWikiSearchQuery),
     [browserWikiSearchDocuments, deferredWikiSearchQuery],
@@ -182,6 +220,20 @@ export function BrowserIndexedDbWikiPage() {
   useEffect(() => {
     void reconcileInterruptedWikiBatchRun();
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void resolveActiveWorkspaceSchemaContext()
+      .then((context) => {
+        if (!cancelled) setActiveWorkspaceSchema(context.schema);
+      })
+      .catch(() => {
+        if (!cancelled) setActiveWorkspaceSchema('');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeWorkspaceRoot, activeWorkspaceSnapshotRoot]);
 
   useEffect(() => {
     const handleOnline = () => {
@@ -303,6 +355,26 @@ export function BrowserIndexedDbWikiPage() {
     [],
   );
 
+  useEffect(() => {
+    let cancelled = false;
+    void reconcileInterruptedRawAssetQueueRun()
+      .catch(() => 0)
+      .then(() => loadRawAssetWorkspaceQueue())
+      .then((snapshot) => {
+        if (cancelled) return;
+        setWorkspaceQueueTasks(snapshot?.tasks ?? []);
+        setWorkspaceQueuePath(snapshot?.path ?? '');
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setWorkspaceQueueTasks([]);
+        setWorkspaceQueuePath('');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeWorkspaceRoot, activeWorkspaceSnapshotRoot, rawAssetCountLive, queueStatus?.updatedAt]);
+
   useEffect(
     () =>
       subscribeWikiBatchCompileStatus((snapshot) => {
@@ -363,7 +435,7 @@ export function BrowserIndexedDbWikiPage() {
       '导入备份会清空当前浏览器/桌面壳里的本地知识库，并用备份文件恢复。请确认你选择的是正确备份。',
     );
     if (!confirmed) {
-      if (importInputRef.current) importInputRef.current.value = '';
+      if (backupImportInputRef.current) backupImportInputRef.current.value = '';
       return;
     }
 
@@ -376,20 +448,55 @@ export function BrowserIndexedDbWikiPage() {
     } catch (error) {
       setImportStatus(error instanceof Error ? error.message : '导入失败，请确认文件来自 MyWiki Markdown 备份。');
     } finally {
-      if (importInputRef.current) importInputRef.current.value = '';
+      if (backupImportInputRef.current) backupImportInputRef.current.value = '';
+    }
+  }
+
+  async function handleImportRawFile(file?: File) {
+    if (!file) return;
+
+    if (!isSupportedImportFile(file.name, file.type)) {
+      setImportStatus(`${file.name} 的格式暂不支持。`);
+      if (rawImportInputRef.current) rawImportInputRef.current.value = '';
+      return;
+    }
+
+    setImportStatus(`正在导入原文件：${file.name}...`);
+    try {
+      const result = await createRawAssetFromFile(file);
+      if (result.asset.entryId) {
+        setSelected({ kind: 'entry', id: result.asset.entryId });
+        setEditing(false);
+      }
+      setSaveStatus('');
+      setCompileStatus('');
+      setImportStatus(
+        result.reused
+          ? `原始材料已存在：${file.name}。可点击“原文件结构化入库”继续处理。`
+          : `已导入原始材料：${file.name}。可点击“原文件结构化入库”生成知识树。`,
+      );
+      await syncIndexedDbKnowledgeToDefaultWorkspace().catch(() => undefined);
+    } catch (error) {
+      setImportStatus(error instanceof Error ? error.message : `导入原文件失败：${file.name}`);
+    } finally {
+      if (rawImportInputRef.current) rawImportInputRef.current.value = '';
     }
   }
 
   function startEdit(entity: Entity) {
-    setDraftMarkdown(buildInitialBrowserEntityMarkdown(entity));
+    setDraftMarkdown(buildInitialBrowserEntityMarkdown(entity, activeWorkspaceSchema));
     setSaveStatus('');
     setCompileStatus('');
     setEditing(true);
   }
 
   async function saveEntityDraft(entity: Entity) {
-    await db.entities.update(entity.id, buildBrowserEntityMarkdownPatch(entity, draftMarkdown));
+    const previousPath = inferWikiTargetSpec(entity, { schema: activeWorkspaceSchema }).path;
+    const patch = buildBrowserEntityMarkdownPatch(entity, draftMarkdown);
+    await db.entities.update(entity.id, patch);
+    const updatedEntity = (await db.entities.get(entity.id)) ?? ({ ...entity, ...patch } as Entity);
     await syncIndexedDbKnowledgeToDefaultWorkspace().catch(() => undefined);
+    await deleteMovedWorkspaceWikiFile(previousPath, inferWikiTargetSpec(updatedEntity, { schema: activeWorkspaceSchema }).path).catch(() => undefined);
     setEditing(false);
     setSaveStatus('已保存页面。');
   }
@@ -481,25 +588,107 @@ export function BrowserIndexedDbWikiPage() {
     if (wikiBatchRunning || recoverableWikiBatchJob) {
       setCompileStatus(
         wikiBatchRunning
-          ? 'Wiki 页面正在批量生成/更新中，请等待当前任务完成后再执行原文件结构化入库。'
-          : '存在未完成的 Wiki 批量任务，请先继续或完成它，再执行原文件结构化入库。',
+          ? 'Wiki 页面正在批量生成/更新中，请等待当前任务完成后再执行原文件入库并生成 Wiki。'
+          : '存在未完成的 Wiki 批量任务，请先继续或完成它，再执行原文件入库并生成 Wiki。',
       );
       return;
     }
 
-    setCompileStatus('正在原文件结构化入库...');
+    setCompileStatus('正在执行原文件入库并生成 Wiki...');
     try {
-      const result = await processRawAssetQueue({ owner: 'wiki' });
+      const result = await processRawAssetQueue({ owner: 'wiki', compileWiki: true });
       if (result.total === 0) {
-        setCompileStatus('暂无需要结构化入库的原文件；这个按钮只处理 Raw Inbox 中待解析或失败的原文件。');
+        setCompileStatus('暂无需要处理的原文件；这个按钮只处理 Raw Inbox 中待解析、失败或 Wiki 生成失败的文件。');
       } else if (result.failed > 0) {
-        setCompileStatus(`原文件结构化入库完成，但仍有 ${result.failed} 个材料失败。`);
+        setCompileStatus(`原文件入库并生成 Wiki 完成，但仍有 ${result.failed} 个材料失败。`);
       } else {
-        setCompileStatus(`原文件结构化入库完成：成功处理 ${result.processed}/${result.total} 个材料。`);
+        setCompileStatus(`原文件入库并生成 Wiki 完成：成功处理 ${result.processed}/${result.total} 个材料。`);
       }
       await syncIndexedDbKnowledgeToDefaultWorkspace().catch(() => undefined);
     } catch (error) {
-      setCompileStatus(error instanceof Error ? error.message : '原文件结构化入库失败。');
+      setCompileStatus(error instanceof Error ? error.message : '原文件入库并生成 Wiki 失败。');
+    }
+  }
+
+  async function refreshWorkspaceQueueState() {
+    const snapshot = await loadRawAssetWorkspaceQueue();
+    setWorkspaceQueueTasks(snapshot?.tasks ?? []);
+    setWorkspaceQueuePath(snapshot?.path ?? '');
+    return snapshot;
+  }
+
+  async function handleRetryWorkspaceQueueTask(taskId: string) {
+    setWorkspaceQueueActionStatus('正在重试队列任务...');
+    try {
+      const ok = await retryRawAssetQueueTask(taskId);
+      await refreshWorkspaceQueueState();
+      if (!ok) {
+        setWorkspaceQueueActionStatus('未找到要重试的队列任务。');
+        return;
+      }
+      setWorkspaceQueueActionStatus('已重新加入队列，开始处理。');
+      if (!queueRunning && !wikiBatchRunning && !hasRecoverableWikiBatchJob && !compilingEntityId) {
+        void handleCompileRawQueue();
+      }
+    } catch (error) {
+      setWorkspaceQueueActionStatus(error instanceof Error ? error.message : '重试队列任务失败。');
+    }
+  }
+
+  async function handleRetryFailedWorkspaceQueueTasks() {
+    const failedTasks = workspaceQueueTasks.filter((task) => task.status === 'failed');
+    if (!failedTasks.length) {
+      setWorkspaceQueueActionStatus('没有失败队列任务需要重试。');
+      return;
+    }
+
+    setWorkspaceQueueActionStatus(`正在重试 ${failedTasks.length} 个失败队列任务...`);
+    try {
+      let retried = 0;
+      for (const task of failedTasks) {
+        if (await retryRawAssetQueueTask(task.id)) retried += 1;
+      }
+      await refreshWorkspaceQueueState();
+      setWorkspaceQueueActionStatus(retried > 0 ? `已重新加入队列 ${retried} 个任务，开始继续处理。` : '没有可重试的失败队列任务。');
+      if (retried > 0 && !queueRunning && !wikiBatchRunning && !hasRecoverableWikiBatchJob && !compilingEntityId) {
+        void handleCompileRawQueue();
+      }
+    } catch (error) {
+      setWorkspaceQueueActionStatus(error instanceof Error ? error.message : '重试失败队列任务失败。');
+    }
+  }
+
+  async function handleCancelWorkspaceQueueTask(taskId: string) {
+    setWorkspaceQueueActionStatus('正在取消队列任务...');
+    try {
+      const ok = await cancelRawAssetQueueTask(taskId);
+      await refreshWorkspaceQueueState();
+      setWorkspaceQueueActionStatus(ok ? '已取消队列任务。' : '未找到要取消的队列任务。');
+    } catch (error) {
+      setWorkspaceQueueActionStatus(error instanceof Error ? error.message : '取消队列任务失败。');
+    }
+  }
+
+  async function handleCancelActiveWorkspaceQueueTasks() {
+    if (!window.confirm('确定取消所有排队中和正在处理的原文件入库任务？正在请求模型的任务会在当前请求返回后停止后续处理。')) return;
+    setWorkspaceQueueActionStatus('正在取消活跃队列任务...');
+    try {
+      const count = await cancelActiveRawAssetQueueTasks();
+      await refreshWorkspaceQueueState();
+      setWorkspaceQueueActionStatus(count > 0 ? `已取消 ${count} 个队列任务。` : '没有可取消的队列任务。');
+    } catch (error) {
+      setWorkspaceQueueActionStatus(error instanceof Error ? error.message : '取消队列任务失败。');
+    }
+  }
+
+  async function handleClearWorkspaceQueueTasks() {
+    setWorkspaceQueueActionStatus('正在清理队列记录...');
+    try {
+      const count = await clearTerminalRawAssetQueueTasks();
+      await refreshWorkspaceQueueState();
+      setWorkspaceQueueActionStatus(count > 0 ? `已清理 ${count} 条队列记录。` : '没有可清理的队列记录。');
+    } catch (error) {
+      setWorkspaceQueueActionStatus(error instanceof Error ? error.message : '清理队列记录失败。');
     }
   }
 
@@ -638,15 +827,34 @@ export function BrowserIndexedDbWikiPage() {
     setCompileStatus('');
   }
 
-  const queueButtonLabel = queueRunning ? `结构化入库中 ${queueStatus?.percent ?? 0}%` : '原文件结构化入库';
+  const queueButtonLabel = queueRunning ? `入库并生成 Wiki 中 ${queueStatus?.percent ?? 0}%` : '原文件入库并生成 Wiki';
   const showRawQueuePanelStatus = Boolean(queueStatus && (queueRunning || Date.now() - queueStatus.updatedAt < 7000));
   const rawQueuePanelMessage = queueStatus
     ? queueStatus.stage === 'running'
-      ? `原文件结构化入库中 ${queueStatus.percent}%：${queueStatus.label}${queueStatus.detail ? `（${queueStatus.detail}）` : ''}`
+      ? `原文件入库并生成 Wiki 中 ${queueStatus.percent}%：${queueStatus.label}${queueStatus.detail ? `（${queueStatus.detail}）` : ''}`
       : queueStatus.stage === 'failed'
-        ? `原文件结构化入库完成，但有 ${queueStatus.failed} 个失败。${queueStatus.detail ? ` ${queueStatus.detail}` : ''}`
-        : `原文件结构化入库完成。${queueStatus.detail ? ` ${queueStatus.detail}` : ''}`
+        ? `原文件入库并生成 Wiki 完成，但有 ${queueStatus.failed} 个失败。${queueStatus.detail ? ` ${queueStatus.detail}` : ''}`
+        : `原文件入库并生成 Wiki 完成。${queueStatus.detail ? ` ${queueStatus.detail}` : ''}`
     : '';
+  const workspaceQueueSummary = useMemo(() => summarizeRawAssetWorkspaceQueue(workspaceQueueTasks), [workspaceQueueTasks]);
+  const visibleWorkspaceQueueTasks = useMemo(
+    () =>
+      workspaceQueueTasks
+        .filter((task) => task.status !== 'done' || Date.now() - (task.completedAt ?? task.updatedAt) < 10 * 60 * 1000)
+        .sort((left, right) => left.addedAt - right.addedAt)
+        .slice(0, 8),
+    [workspaceQueueTasks],
+  );
+  const showWorkspaceQueueTasks =
+    visibleWorkspaceQueueTasks.length > 0 &&
+    (workspaceQueueSummary.pending + workspaceQueueSummary.processing + workspaceQueueSummary.failed + workspaceQueueSummary.cancelled > 0 || queueRunning);
+  const workspaceQueueHasActive = workspaceQueueSummary.pending + workspaceQueueSummary.processing > 0;
+  const workspaceQueueHasClearable = workspaceQueueSummary.done + workspaceQueueSummary.cancelled > 0;
+  const workspaceQueueSummaryLabel = formatRawWorkspaceQueueSummary(workspaceQueueSummary);
+  const canResumeWorkspaceQueue =
+    workspaceQueueHasActive && !queueRunning && !wikiBatchRunning && !hasRecoverableWikiBatchJob && !compilingEntityId;
+  const canRetryFailedWorkspaceQueue =
+    workspaceQueueSummary.failed > 0 && !queueRunning && !wikiBatchRunning && !hasRecoverableWikiBatchJob && !compilingEntityId;
   const showWikiBatchPanelStatus = Boolean(wikiBatchStatus && (wikiBatchRunning || hasRecoverableWikiBatchJob || Date.now() - wikiBatchStatus.updatedAt < 7000));
   const wikiBatchPanelMessage = wikiBatchStatus
     ? wikiBatchStatus.stage === 'paused'
@@ -709,7 +917,7 @@ export function BrowserIndexedDbWikiPage() {
 		                      ? '存在 Wiki 批量生成/更新任务'
 	                      : queueRunning
 	                        ? queueStatus?.label
-	                        : '把 Frog、捕获页和上传文件暂存的原文件解析、理解并结构化写入知识库'
+	                        : '把 Frog、捕获页和上传文件暂存的原文件解析、结构化入库，并生成或更新相关 Wiki 页面'
 	                  }
 	                >
                   {queueRunning ? <Loader2 size={13} className="animate-spin" /> : <RotateCcw size={13} />}
@@ -724,7 +932,24 @@ export function BrowserIndexedDbWikiPage() {
                   导出
                 </button>
                 <input
-                  ref={importInputRef}
+                  ref={rawImportInputRef}
+                  data-testid="raw-file-import-input"
+                  type="file"
+                  className="hidden"
+                  onChange={(event) => void handleImportRawFile(event.target.files?.[0])}
+                />
+                <button
+                  type="button"
+                  onClick={() => rawImportInputRef.current?.click()}
+                  className="inline-flex items-center gap-1 rounded-full border border-[#d9d9d6] px-2.5 py-1 text-xs font-medium text-[#1f2937] transition hover:bg-[#f7f7f5]"
+                  title="选择任意单个原文件加入原始材料，之后可执行原文件结构化入库"
+                >
+                  <Upload size={13} />
+                  导入原文件
+                </button>
+                <input
+                  ref={backupImportInputRef}
+                  data-testid="backup-import-input"
                   type="file"
                   accept=".zip,application/zip"
                   className="hidden"
@@ -732,11 +957,12 @@ export function BrowserIndexedDbWikiPage() {
                 />
                 <button
                   type="button"
-                  onClick={() => importInputRef.current?.click()}
+                  onClick={() => backupImportInputRef.current?.click()}
                   className="inline-flex items-center gap-1 rounded-full border border-[#d9d9d6] px-2.5 py-1 text-xs font-medium text-[#1f2937] transition hover:bg-[#f7f7f5]"
+                  title="导入 MyWiki 导出的 zip 备份，会先确认再恢复"
                 >
                   <Upload size={13} />
-                  导入
+                  导入备份
                 </button>
               </div>
             }
@@ -746,6 +972,99 @@ export function BrowserIndexedDbWikiPage() {
 	            {importStatus ? <p className="mb-3 rounded-[10px] border border-[#dbe7ff] bg-[#f5f8ff] p-3 text-xs leading-5 text-[#315078]">{importStatus}</p> : null}
 	            {showRawQueuePanelStatus ? (
 	              <p className="mb-3 rounded-[10px] border border-[#dbe7ff] bg-[#f5f8ff] p-3 text-xs leading-5 text-[#315078]">{rawQueuePanelMessage}</p>
+	            ) : null}
+	            {showWorkspaceQueueTasks ? (
+	              <div className="mb-3 rounded-[10px] border border-[#dbe7ff] bg-[#f8fbff] p-3 text-xs text-[#315078]">
+	                <div className="mb-2 flex items-center justify-between gap-2">
+	                  <span className="font-semibold">入库队列</span>
+	                  <div className="flex shrink-0 items-center gap-1.5">
+	                    <span className="text-[#626965]">{workspaceQueueSummaryLabel}</span>
+	                    {canResumeWorkspaceQueue ? (
+	                      <button
+	                        type="button"
+	                        onClick={() => void handleCompileRawQueue()}
+	                        className="rounded-[7px] border border-[#155eef] px-1.5 py-0.5 text-[11px] font-medium text-[#155eef] hover:bg-[#eef4ff]"
+	                        title="继续处理排队中的原文件入库任务"
+	                      >
+	                        继续
+	                      </button>
+	                    ) : null}
+	                    {canRetryFailedWorkspaceQueue ? (
+	                      <button
+	                        type="button"
+	                        onClick={() => void handleRetryFailedWorkspaceQueueTasks()}
+	                        className="rounded-[7px] border border-[#155eef] px-1.5 py-0.5 text-[11px] font-medium text-[#155eef] hover:bg-[#eef4ff]"
+	                        title="重试失败的原文件入库任务，并从未完成的 Wiki 词条继续生成"
+	                      >
+	                        重试失败项
+	                      </button>
+	                    ) : null}
+	                    {workspaceQueueHasActive ? (
+	                      <button
+	                        type="button"
+	                        onClick={() => void handleCancelActiveWorkspaceQueueTasks()}
+	                        className="rounded-[7px] border border-[#f5b5ae] px-1.5 py-0.5 text-[11px] font-medium text-[#b42318] hover:bg-[#fff1f2]"
+	                        title="取消所有排队中和正在处理的原文件入库任务"
+	                      >
+	                        取消全部
+	                      </button>
+	                    ) : null}
+	                    {workspaceQueueHasClearable ? (
+	                      <button
+	                        type="button"
+	                        onClick={() => void handleClearWorkspaceQueueTasks()}
+	                        className="rounded-[7px] border border-[#d9d9d6] px-1.5 py-0.5 text-[11px] font-medium text-[#626965] hover:bg-[#f7f7f5]"
+	                        title="清理已完成和已取消的队列记录"
+	                      >
+	                        清理
+	                      </button>
+	                    ) : null}
+	                  </div>
+	                </div>
+	                {workspaceQueueActionStatus ? (
+	                  <p className="mb-2 rounded-[8px] bg-white px-2 py-1 text-[11px] text-[#626965]">{workspaceQueueActionStatus}</p>
+	                ) : null}
+	                <div className="grid gap-1.5">
+	                  {visibleWorkspaceQueueTasks.map((task) => (
+	                    <div key={task.id} className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-2 rounded-[8px] bg-white px-2 py-1.5">
+	                      <span className={rawWorkspaceQueueStatusDotClass(task.status)} />
+	                      <span className="min-w-0 truncate" title={task.sourcePath}>
+	                        {task.filename}
+	                      </span>
+	                      <span className="shrink-0 text-[#626965]">{rawWorkspaceQueueTaskLabel(task)}</span>
+	                      <span className="flex shrink-0 items-center gap-1">
+	                        {task.status === 'failed' || task.status === 'cancelled' ? (
+	                          <button
+	                            type="button"
+	                            onClick={() => void handleRetryWorkspaceQueueTask(task.id)}
+	                            className="flex size-6 items-center justify-center rounded-[7px] text-[#155eef] hover:bg-[#eef4ff]"
+	                            aria-label={`重试 ${task.filename}`}
+	                            title="重试"
+	                          >
+	                            <RotateCcw size={13} />
+	                          </button>
+	                        ) : null}
+	                        {task.status === 'pending' || task.status === 'processing' ? (
+	                          <button
+	                            type="button"
+	                            onClick={() => void handleCancelWorkspaceQueueTask(task.id)}
+	                            className="flex size-6 items-center justify-center rounded-[7px] text-[#b42318] hover:bg-[#fff1f2]"
+	                            aria-label={`取消 ${task.filename}`}
+	                            title="取消"
+	                          >
+	                            <XCircle size={13} />
+	                          </button>
+	                        ) : null}
+	                      </span>
+	                    </div>
+	                  ))}
+	                </div>
+	                {workspaceQueuePath ? (
+	                  <p className="mt-2 truncate text-[11px] text-[#8a8f89]" title={workspaceQueuePath}>
+	                    {workspaceQueuePath}
+	                  </p>
+	                ) : null}
+	              </div>
 	            ) : null}
             {sourceItems.length === 0 ? (
               <p className="rounded-[10px] border border-[#e5e5e4] px-3 py-4 text-sm text-[#626965]">暂无原始材料。</p>
@@ -974,6 +1293,55 @@ export function BrowserIndexedDbWikiPage() {
   );
 }
 
+async function deleteMovedWorkspaceWikiFile(previousPath: string, nextPath: string) {
+  if (!canUseWorkspaceStorage()) return;
+
+  const previousRelativePath = assertSafeWorkspaceRelativePath(previousPath, ['wiki']);
+  const nextRelativePath = assertSafeWorkspaceRelativePath(nextPath, ['wiki']);
+  if (previousRelativePath === nextRelativePath) return;
+
+  const storage = createWorkspaceStorage();
+  if (!storage.deletePath) return;
+
+  const root = getPersistedWorkspaceRoot() ?? (await getWorkspaceDefaultRoot());
+  const initialized = await initializeWorkspace(storage, root, { outputLanguage: 'zh-CN' });
+  const absolutePreviousPath = joinWorkspacePath(initialized.layout.root, previousRelativePath);
+  const absoluteNextPath = joinWorkspacePath(initialized.layout.root, nextRelativePath);
+  if (absolutePreviousPath === absoluteNextPath) return;
+  if (!(await storage.exists(absolutePreviousPath))) return;
+
+  await storage.deletePath(initialized.layout.root, absolutePreviousPath);
+}
+
+function formatRawWorkspaceQueueSummary(summary: ReturnType<typeof summarizeRawAssetWorkspaceQueue>) {
+  const parts = [
+    summary.pending > 0 ? `排队 ${summary.pending}` : '',
+    summary.processing > 0 ? `处理中 ${summary.processing}` : '',
+    summary.failed > 0 ? `失败 ${summary.failed}` : '',
+    summary.cancelled > 0 ? `已取消 ${summary.cancelled}` : '',
+  ].filter(Boolean);
+  return parts.length ? parts.join(' · ') : '队列空闲';
+}
+
+function rawWorkspaceQueueTaskLabel(task: RawAssetWorkspaceQueueTask) {
+  if (task.status === 'processing') {
+    return task.stage === 'wiki' ? '生成 Wiki' : task.stage === 'structuring' ? '结构化' : '解析中';
+  }
+  if (task.status === 'pending') return task.retryCount > 0 ? `等待继续 ${task.retryCount}` : '排队';
+  if (task.status === 'failed') return task.retryCount > 0 ? `失败 ${task.retryCount} 次` : '失败';
+  if (task.status === 'cancelled') return '已取消';
+  return '完成';
+}
+
+function rawWorkspaceQueueStatusDotClass(status: RawAssetWorkspaceQueueTask['status']) {
+  const base = 'size-2 rounded-full';
+  if (status === 'processing') return `${base} bg-[#155eef]`;
+  if (status === 'pending') return `${base} bg-[#f59e0b]`;
+  if (status === 'failed') return `${base} bg-[#d92d20]`;
+  if (status === 'cancelled') return `${base} bg-[#8a8f89]`;
+  return `${base} bg-[#039855]`;
+}
+
 function StatCard({ label, value }: { label: string; value: number }) {
   return (
     <div className="min-w-[150px] rounded-[12px] border border-[#e5e5e4] bg-white p-4">
@@ -1062,6 +1430,19 @@ function BrowserWikiTreeGroup({
               >
                 <span className="block truncate">{page.title}</span>
               </button>
+              {page.wikiStatus.state === 'complete' ? null : (
+                <span
+                  className={[
+                    'shrink-0 rounded-full border px-1.5 py-0.5 text-[10px] font-medium',
+                    page.wikiStatus.state === 'draft'
+                      ? 'border-[#f2d08f] bg-[#fff8e6] text-[#8a5a00]'
+                      : 'border-[#e5e5e4] bg-[#fbfbfa] text-[#626965]',
+                  ].join(' ')}
+                  title={page.wikiStatus.detail}
+                >
+                  {page.wikiStatus.state === 'draft' ? '草稿' : '未生成'}
+                </span>
+              )}
               <button
                 type="button"
                 className="pointer-events-none mr-1 flex size-7 shrink-0 items-center justify-center rounded-[8px] text-[#8a8f8b] opacity-0 transition hover:bg-[#fff1f2] hover:text-[#b42318] focus-visible:pointer-events-auto focus-visible:opacity-100 group-hover/tree-row:pointer-events-auto group-hover/tree-row:opacity-100"
@@ -1090,23 +1471,38 @@ function BrowserEntityPreview({
 }) {
   if (entity.wikiMarkdown) {
     const metadata = buildWikiPageMetadata(entity.wikiMarkdown, entity);
+    const wikiStatus = getBrowserWikiEntityStatus(entity, metadata);
+    const displayType = resolveBrowserWikiDisplayType(metadata, normalizeBrowserWikiPageType(metadata.type) ?? inferWikiTargetSpec(entity).type);
     return (
       <article className="max-h-[620px] overflow-auto px-6 py-5">
         <BrowserWikiHeaderCard
           metadata={metadata}
+          displayType={displayType}
+          wikiStatus={wikiStatus}
           compileModel={entity.wikiCompileModel}
           compiledAt={entity.wikiCompiledAt}
           onOpenSource={onOpenSource}
           onOpenRelated={onOpenRelated}
         />
+        {wikiStatus.state === 'draft' ? <BrowserWikiStatusNotice status={wikiStatus} /> : null}
         <BrowserMarkdownPreview markdown={metadata.body} />
       </article>
     );
   }
 
+  const metadata = buildWikiPageMetadata('', entity);
+  const wikiStatus = getBrowserWikiEntityStatus(entity, metadata);
+  const displayType = resolveBrowserWikiDisplayType(metadata, inferWikiTargetSpec(entity).type);
   return (
     <article className="max-h-[620px] overflow-auto px-6 py-5">
-      <BrowserWikiHeaderCard metadata={buildWikiPageMetadata('', entity)} onOpenSource={onOpenSource} onOpenRelated={onOpenRelated} />
+      <BrowserWikiHeaderCard
+        metadata={metadata}
+        displayType={displayType}
+        wikiStatus={wikiStatus}
+        onOpenSource={onOpenSource}
+        onOpenRelated={onOpenRelated}
+      />
+      <BrowserWikiStatusNotice status={wikiStatus} />
       <section className="mt-5">
         <h2 className="text-lg font-semibold text-[#1f2937]">摘要</h2>
         <p className="mt-2 whitespace-pre-wrap text-sm leading-7 text-[#1f2937]">{entity.summary || '暂无摘要。'}</p>
@@ -1138,12 +1534,16 @@ function BrowserEntityPreview({
 
 function BrowserWikiHeaderCard({
   metadata,
+  displayType,
+  wikiStatus,
   compileModel,
   compiledAt,
   onOpenSource,
   onOpenRelated,
 }: {
   metadata: WikiPageMetadata;
+  displayType?: WikiPageType;
+  wikiStatus?: BrowserWikiEntityStatus;
   compileModel?: string;
   compiledAt?: number;
   onOpenSource?: (reference: string) => void;
@@ -1159,8 +1559,9 @@ function BrowserWikiHeaderCard({
           <h1 className="text-xl font-semibold leading-7 text-[#111827]">{metadata.title}</h1>
           <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
             <span className="rounded bg-[#dbeafe] px-1.5 py-0.5 font-semibold uppercase tracking-wide text-[#155eef]">
-              {metadata.type}
+              {displayType ?? metadata.type}
             </span>
+            {wikiStatus ? <BrowserWikiStatusBadge status={wikiStatus} /> : null}
             {(metadata.updated ?? metadata.created) ? (
               <span className="inline-flex items-center gap-1 rounded bg-white px-1.5 py-0.5 text-[#626965]">
                 <Calendar size={12} />
@@ -1491,7 +1892,15 @@ function BrowserWikiSearchResults({
                 <FileText size={15} />
               </span>
               <div className="min-w-0 flex-1">
-                <p className="text-lg font-semibold leading-7 text-[#111827]">{renderSearchHighlightedText(result.title, result.matchedTerms)}</p>
+                <p
+                  className="text-lg font-semibold leading-7 text-[#111827]"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onSelect(result);
+                  }}
+                >
+                  {renderSearchHighlightedText(result.title, result.matchedTerms)}
+                </p>
                 <p className="mt-1 text-xs leading-5 text-[#7b8794]">{renderSearchHighlightedText(result.path, result.matchedTerms)}</p>
                 <p className="mt-2 line-clamp-3 text-sm leading-6 text-[#4b5563]">
                   {renderSearchHighlightedText(result.snippet, result.matchedTerms)}
@@ -1523,10 +1932,44 @@ function PaneResizer({ onMouseDown }: { onMouseDown: (event: React.MouseEvent<HT
 
 function findBrowserEntityByReference(reference: string, entities: Entity[]) {
   const normalized = normalizeBrowserReference(reference);
+  const normalizedStem = normalizeBrowserReference(stripBrowserExtension(slugFromBrowserReference(reference)));
   return (
-    entities.find((entity) => normalizeBrowserReference(entity.title) === normalized) ??
-    entities.find((entity) => normalizeBrowserReference(entity.id) === normalized) ??
+    entities.find((entity) => buildBrowserEntityReferenceKeys(entity).some((key) => key === normalized || key === normalizedStem)) ??
     null
+  );
+}
+
+function BrowserWikiStatusNotice({ status }: { status: BrowserWikiEntityStatus }) {
+  return (
+    <div
+      className={[
+        'mb-5 rounded-[12px] border p-3 text-sm leading-6',
+        status.state === 'draft'
+          ? 'border-[#f2d08f] bg-[#fff8e6] text-[#6f4a00]'
+          : 'border-[#dbe7ff] bg-[#f5f8ff] text-[#315078]',
+      ].join(' ')}
+    >
+      <p className="font-semibold">{status.label}</p>
+      <p className="mt-1 text-xs leading-5">{status.detail}</p>
+    </div>
+  );
+}
+
+function BrowserWikiStatusBadge({ status }: { status: BrowserWikiEntityStatus }) {
+  return (
+    <span
+      className={[
+        'rounded px-1.5 py-0.5 font-medium',
+        status.state === 'complete'
+          ? 'bg-[#ecfdf3] text-[#027a48]'
+          : status.state === 'draft'
+            ? 'bg-[#fff8e6] text-[#8a5a00]'
+            : 'bg-[#f2f4f7] text-[#475467]',
+      ].join(' ')}
+      title={status.detail}
+    >
+      {status.label}
+    </span>
   );
 }
 
@@ -1542,10 +1985,10 @@ function findBrowserEntryByReference(reference: string, entries: Entry[]) {
   );
 }
 
-function sortBrowserEntities(entities: Entity[]) {
+function sortBrowserEntities(entities: Entity[], schema?: string) {
   return [...entities].sort((left, right) => {
-    const leftTarget = inferWikiTargetSpec(left);
-    const rightTarget = inferWikiTargetSpec(right);
+    const leftTarget = inferWikiTargetSpec(left, { schema });
+    const rightTarget = inferWikiTargetSpec(right, { schema });
     const typeOrder = wikiTypeSortOrder(leftTarget.type) - wikiTypeSortOrder(rightTarget.type);
     if (typeOrder !== 0) return typeOrder;
 
@@ -1559,13 +2002,13 @@ function sortBrowserEntities(entities: Entity[]) {
   });
 }
 
-function buildBrowserWikiTreePages(entities: Entity[]): BrowserWikiTreePage[] {
+function buildBrowserWikiTreePages(entities: Entity[], schema?: string): BrowserWikiTreePage[] {
   return entities.map((entity) => {
-    const markdown = entity.wikiMarkdown?.trim() || buildInitialBrowserEntityMarkdown(entity);
+    const markdown = entity.wikiMarkdown?.trim() || buildInitialBrowserEntityMarkdown(entity, schema);
     const metadata = buildWikiPageMetadata(markdown, entity);
-    const fallbackTarget = inferWikiTargetSpec(entity);
-    const type = normalizeBrowserWikiPageType(metadata.type) ?? fallbackTarget.type;
-    const target = inferWikiTargetSpec(entity, { preferredType: type });
+    const fallbackTarget = inferWikiTargetSpec(entity, { schema });
+    const type = resolveBrowserWikiDisplayType(metadata, fallbackTarget.type);
+    const target = inferWikiTargetSpec(entity, { schema, preferredType: type });
     const path = target.path;
     const slug = path.split('/').pop()?.replace(/\.md$/i, '') || entity.id;
 
@@ -1578,23 +2021,25 @@ function buildBrowserWikiTreePages(entities: Entity[]): BrowserWikiTreePage[] {
       title: metadata.title || entity.title,
       summary: metadata.description || entity.summary || '',
       tags: metadata.tags,
+      aliases: metadata.aliases,
       related: metadata.related,
       sources: metadata.sources,
       updated: metadata.updated,
       frontmatter: {},
       wikilinks: extractBrowserWikiLinks(metadata.body),
       entity,
+      wikiStatus: getBrowserWikiEntityStatus(entity, metadata),
     };
   });
 }
 
-function buildBrowserWikiSearchDocuments(entities: Entity[]): BrowserWikiSearchDocument[] {
+function buildBrowserWikiSearchDocuments(entities: Entity[], schema?: string): BrowserWikiSearchDocument[] {
   return entities.map((entity) => {
-    const markdown = entity.wikiMarkdown?.trim() || buildInitialBrowserEntityMarkdown(entity);
+    const markdown = entity.wikiMarkdown?.trim() || buildInitialBrowserEntityMarkdown(entity, schema);
     const metadata = buildWikiPageMetadata(markdown, entity);
-    const fallbackTarget = inferWikiTargetSpec(entity);
-    const type = normalizeBrowserWikiPageType(metadata.type) ?? fallbackTarget.type;
-    const target = inferWikiTargetSpec(entity, { preferredType: type });
+    const fallbackTarget = inferWikiTargetSpec(entity, { schema });
+    const type = resolveBrowserWikiDisplayType(metadata, fallbackTarget.type);
+    const target = inferWikiTargetSpec(entity, { schema, preferredType: type });
     const summary = metadata.description || entity.summary || '';
     const body = buildBrowserSearchText([
       metadata.body,
@@ -1767,8 +2212,44 @@ function renderSearchHighlightedText(text: string, terms: string[]) {
 }
 
 function normalizeBrowserWikiPageType(value: string | undefined): WikiPageType | undefined {
-  const allowed = new Set<WikiPageType>(WIKI_PAGE_TYPES);
-  return value && allowed.has(value as WikiPageType) ? (value as WikiPageType) : undefined;
+  return normalizeWikiPageType(value);
+}
+
+function resolveBrowserWikiDisplayType(metadata: WikiPageMetadata, fallback: WikiPageType): WikiPageType {
+  const metadataType = normalizeBrowserWikiPageType(metadata.type);
+  const tagType = metadata.tags
+    .map((tag) => normalizeBrowserWikiPageType(tag))
+    .find((type): type is WikiPageType => Boolean(type && !['schema', 'purpose', 'overview'].includes(type)));
+  if (tagType && tagType !== metadataType) return tagType;
+  return metadataType ?? tagType ?? fallback;
+}
+
+function getBrowserWikiEntityStatus(entity: Entity, metadata?: WikiPageMetadata): BrowserWikiEntityStatus {
+  const markdown = entity.wikiMarkdown?.trim() ?? '';
+  if (!markdown) {
+    return {
+      state: 'structured',
+      label: '未生成 Wiki',
+      detail: '当前仅展示结构化入库档案，不是完整 Wiki Markdown。可点击“AI 生成/更新”或“批量生成/更新wiki页”生成完整页面。',
+    };
+  }
+
+  const sectionCount = (metadata?.body ?? markdown).match(/^##\s+/gm)?.length ?? 0;
+  if (entity.wikiCompiledAt || entity.wikiCompileModel || (markdown.length >= 1200 && sectionCount >= 2)) {
+    return {
+      state: 'complete',
+      label: '完整 Wiki',
+      detail: entity.wikiCompileModel
+        ? `已生成完整 Wiki，模型：${entity.wikiCompileModel}。`
+        : '已有较完整的 Wiki Markdown 内容。',
+    };
+  }
+
+  return {
+    state: 'draft',
+    label: 'Wiki 草稿',
+    detail: '当前有 Markdown 内容，但没有完整生成记录，内容也偏短。建议点击“AI 生成/更新”补全为正式 Wiki 页面。',
+  };
 }
 
 function normalizeLocalRestoreRecords(payload: LocalRestorePayload): MarkdownImportRecords {
@@ -1808,7 +2289,7 @@ function buildBrowserSourceItems(entries: Entry[], rawAssets: RawAsset[]): Brows
     entryId: asset.entryId,
     rawAssetId: asset.id,
     title: asset.filename,
-    summary: `${asset.kind} · ${asset.status}${asset.error ? ` · ${asset.error}` : ''}`,
+    summary: buildRawAssetSourceSummary(asset),
   }));
   const entryItems = entries.map((entry) => ({
     id: entry.id,
@@ -1825,11 +2306,71 @@ function buildBrowserSourceItems(entries: Entry[], rawAssets: RawAsset[]): Brows
   });
 }
 
+function buildRawAssetSourceSummary(asset: RawAsset) {
+  const parts = [rawAssetKindLabel(asset.kind), rawAssetStatusLabel(asset.status)];
+  if (asset.status === 'wiki_failed') {
+    parts.push('结构化内容已保留，Wiki 生成可重试');
+  }
+  if (asset.error) parts.push(asset.error);
+  return parts.join(' · ');
+}
+
+function rawAssetKindLabel(kind: RawAsset['kind']) {
+  if (kind === 'pdf') return 'PDF';
+  if (kind === 'word') return 'Word';
+  if (kind === 'presentation') return 'PPT';
+  if (kind === 'spreadsheet') return 'Excel';
+  if (kind === 'image') return '图片';
+  return '文本';
+}
+
+function rawAssetStatusLabel(status: RawAsset['status']) {
+  switch (status) {
+    case 'raw':
+      return '待入库';
+    case 'extracting':
+      return '解析中';
+    case 'compiling':
+      return '结构化中';
+    case 'compiled':
+      return '已入库';
+    case 'skipped':
+      return '已复用缓存';
+    case 'failed':
+      return '入库失败';
+    case 'cancelled':
+      return '已取消';
+    case 'wiki_compiling':
+      return '生成 Wiki 中';
+    case 'wiki_failed':
+      return 'Wiki 生成失败';
+    default:
+      return status;
+  }
+}
+
 function stripBrowserExtension(value: string) {
   const index = value.lastIndexOf('.');
   return index < 0 ? value : value.slice(0, index);
 }
 
 function normalizeBrowserReference(value: string) {
-  return value.trim().replace(/\\/g, '/').toLowerCase();
+  return normalizeWikiReferenceValue(value).replace(/\\/g, '/').replace(/^wiki\//i, '').replace(/\.md$/i, '').trim().toLowerCase();
+}
+
+function slugFromBrowserReference(value: string) {
+  return normalizeWikiReferenceValue(value)
+    .replace(/\\/g, '/')
+    .split('/')
+    .pop()
+    ?.trim() ?? '';
+}
+
+function buildBrowserEntityReferenceKeys(entity: Entity) {
+  const target = inferWikiTargetSpec(entity);
+  const path = target.path;
+  const relative = path.replace(/^wiki\//i, '');
+  const withoutExtension = relative.replace(/\.md$/i, '');
+  const slug = path.split('/').pop()?.replace(/\.md$/i, '') ?? '';
+  return [entity.title, entity.id, path, relative, withoutExtension, slug].map(normalizeBrowserReference).filter(Boolean);
 }

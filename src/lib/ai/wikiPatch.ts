@@ -1,6 +1,11 @@
 import type { EntityType, RelationshipType, Scene, TaskStatus } from '../../types';
 import type { CaptureDraft, DraftEntity } from '../capture/draft';
 import { createDraftId } from '../capture/draft';
+import {
+  buildWikiSchemaRulesTable,
+  normalizeWikiPageType,
+  parseWikiSchemaPageTypes,
+} from '../wiki/schemaRules';
 
 export type WikiPatchType =
   | 'CREATE_ENTITY'
@@ -15,6 +20,8 @@ export type CaptureAnalysis = {
   entities: Array<{
     title: string;
     type: EntityType;
+    pageType?: string;
+    tags?: string[];
     aliases?: string[];
     evidence: string;
     existsLikely?: boolean;
@@ -64,6 +71,43 @@ export type CaptureAnalysis = {
     reason: string;
   }>;
 };
+
+export type CaptureWorkspaceContext = {
+  purpose?: string;
+  schema?: string;
+  templateId?: string;
+};
+
+function buildCaptureWorkspaceContextBlock(context?: CaptureWorkspaceContext) {
+  const purpose = context?.purpose?.trim();
+  const schema = context?.schema?.trim();
+  if (!purpose && !schema) {
+    return [
+      '## Current Knowledge Base Schema',
+      '(No active workspace schema was provided. Use the built-in general Page Types.)',
+    ].join('\n');
+  }
+
+  const pageTypes = schema ? buildWikiSchemaRulesTable(schema) : '';
+  return [
+    '## Current Knowledge Base Schema',
+    context?.templateId ? `templateId: ${context.templateId}` : '',
+    purpose ? `### purpose.md\n${truncateCaptureContextText(purpose, 2400)}` : '',
+    pageTypes ? `### schema.md Page Types\n${pageTypes}` : '',
+    schema ? `### schema.md excerpt\n${truncateCaptureContextText(schema, 5000)}` : '',
+    'Schema routing rule: choose entities[].pageType from the Page Types table above when possible, and also include that pageType in entities[].tags.',
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+}
+
+function truncateCaptureContextText(value: string, maxChars: number) {
+  const trimmed = value.trim();
+  if (trimmed.length <= maxChars) return trimmed;
+  const head = Math.round(maxChars * 0.62);
+  const tail = maxChars - head;
+  return `${trimmed.slice(0, head)}\n\n...[workspace context truncated]...\n\n${trimmed.slice(-tail)}`;
+}
 
 export type WikiPatch =
   | {
@@ -144,18 +188,30 @@ export const allowedWikiPatchPropertyKeys = [
 ] as const;
 
 export const CAPTURE_STRUCTURED_SOURCE_MAX_CHARS = 50000;
+export const CAPTURE_DIGEST_FALLBACK_THRESHOLD = 3000;
 
-export function shouldUseCaptureDigest(content: string, threshold = 3000) {
+export function shouldUseCaptureDigest(content: string, threshold = CAPTURE_DIGEST_FALLBACK_THRESHOLD) {
   return content.trim().length > threshold;
+}
+
+export function resolveCaptureDigestThreshold(contextWindow?: number, maxChars = CAPTURE_STRUCTURED_SOURCE_MAX_CHARS) {
+  if (!Number.isFinite(contextWindow) || !contextWindow || contextWindow <= 0) {
+    return CAPTURE_DIGEST_FALLBACK_THRESHOLD;
+  }
+
+  const promptBudget = Math.floor(contextWindow * 0.45);
+  return Math.max(CAPTURE_DIGEST_FALLBACK_THRESHOLD, Math.min(maxChars, promptBudget));
 }
 
 export function buildCaptureSourceForStructuredProcessing(content: string, maxChars = CAPTURE_STRUCTURED_SOURCE_MAX_CHARS) {
   const trimmed = content.trim();
   if (trimmed.length <= maxChars) return trimmed;
+  const truncationNotice = `[...truncated to ${maxChars} characters before structured capture; the complete source is still stored in the raw material entry...]`;
+  const excerptBudget = Math.max(0, maxChars - truncationNotice.length - 2);
   return [
-    trimmed.slice(0, maxChars),
+    trimmed.slice(0, excerptBudget),
     '',
-    `[...truncated to ${maxChars} characters before structured capture; the complete source is still stored in the raw material entry...]`,
+    truncationNotice,
   ].join('\n');
 }
 
@@ -206,7 +262,7 @@ export function buildStructuredCaptureExcerpt(content: string, maxChars = 28000)
   return [
     '# 长文档本地摘录',
     '',
-    '长文档摘要模型调用失败或不可用，以下为本地保留的开头、关键行和结尾摘录。请基于这些内容继续生成结构化 Wiki 草稿；完整原文仍保存在 Raw Entry 中。',
+    '以下为本地保留的开头、关键行和结尾摘录。请基于这些内容核验证据并生成结构化 Wiki 草稿；完整原文仍保存在 Raw Entry 中。',
     '',
     '--- 开头 ---',
     trimmed.slice(0, headerBudget),
@@ -220,10 +276,26 @@ export function buildStructuredCaptureExcerpt(content: string, maxChars = 28000)
     .slice(0, maxChars + 320);
 }
 
-export function buildCaptureDigestPrompt(content: string, chunkIndex = 1, totalChunks = 1) {
+export function buildCaptureSourceIdentityBlock(content: string) {
+  const lines = content.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const title = lines.find((line) => /^#\s*导入文件[:：]/.test(line));
+  if (!title) return '';
+
+  const metadata = lines.filter((line) => /^(来源格式|文件大小|内容指纹)[:：]/.test(line)).slice(0, 6);
+  return [title, ...metadata].join('\n');
+}
+
+export function buildCaptureDigestPrompt(
+  content: string,
+  chunkIndex = 1,
+  totalChunks = 1,
+  workspaceContext?: CaptureWorkspaceContext,
+) {
   return `你是 MyWiki 的长文档阅读 Agent。请把下面这段原始材料整理成 Markdown 阅读摘要，先不要输出 JSON。
 
 材料分块：${chunkIndex}/${totalChunks}
+
+${buildCaptureWorkspaceContextBlock(workspaceContext)}
 
 原始材料：
 ${content}
@@ -251,7 +323,229 @@ ${content}
 - 不要输出 JSON，不要输出代码块。`;
 }
 
-export function buildCaptureAnalysisPrompt(content: string, entityIndexJson: string) {
+export function buildCaptureMarkdownAnalysisPrompt(
+  content: string,
+  entityIndexJson: string,
+  workspaceContext?: CaptureWorkspaceContext,
+) {
+  return `你是 MyWiki 的原文件阅读 Agent。请参考旧版 llm-wiki 的稳定入库方式：先把原始材料理解成 Markdown 分析文本，不要在这一轮输出 JSON。
+
+原始材料：
+${content}
+
+当前 Wiki 目录：
+${entityIndexJson}
+
+${buildCaptureWorkspaceContextBlock(workspaceContext)}
+
+请输出 Markdown，包含这些小节：
+
+## 材料概览
+- 这份原文件是什么，围绕什么项目、主题、对象或事件展开
+- 如果是 PDF/Word/Excel/PPT/图片，说明来源文件本身和文件中真正讲到的知识对象
+
+## 应入库的 Page Types
+- source：来源文件页标题、证据
+- project/entity/topic/event/concept：应该创建或更新的 Wiki 词条标题、类型、证据
+- 必须参考上方 schema.md 的 Page Types；如果当前知识库是 personal-growth/research/reading/business 等模板，优先使用该 schema 里的 goal/habit/reflection/journal/thesis/finding/book/chapter 等类型名称作为归类建议。
+
+## 关键事实与关系
+- 主体｜属性或关系｜对象/数值｜证据短句
+
+## 层级结构与指标
+- 业态/板块/模块/分类：父实体 -> 分类 -> 子项
+- 数值指标：主体/维度｜指标名｜数值或 null｜单位｜证据
+
+## 冲突、待审核与后续动作
+- 只记录真实矛盾、明显不确定、待补证、待深度研究的事项
+
+规则：
+- 只根据材料，不要补充外部知识。
+- 保留原文中的专名、日期、路径、模型名、项目名和数值单位。
+- 对导入文件，不要只总结“导入文件：xxx”；必须尽量识别文件中真正讲到的项目、主题、方法、指标、任务。
+- 如果材料很长，优先保留标题、摘要、目录后的正文结论、指标表、业务/项目描述、风险、行动项。
+- 不要输出 JSON，不要输出代码块。`;
+}
+
+export function buildCaptureAnalysisFromMarkdownPrompt(input: {
+  sourceExcerpt: string;
+  markdownAnalysis: string;
+  entityIndexJson: string;
+  workspaceContext?: CaptureWorkspaceContext;
+}) {
+  return `你是 MyWiki 的结构化入库 Agent。上一轮已经把原文件读成 Markdown 分析；这一轮只把分析结果整理成程序可解析的结构化对象。
+
+上一轮 Markdown 分析：
+${input.markdownAnalysis.slice(0, 16000)}
+
+原始材料摘录（用于核验证据，不要全文复述）：
+${input.sourceExcerpt}
+
+当前 Wiki 目录：
+${input.entityIndexJson}
+
+${buildCaptureWorkspaceContextBlock(input.workspaceContext)}
+
+如果当前接口支持 tool/function call，请调用指定的结构化输出工具并把对象放进 tool input / function arguments；如果接口不支持工具，请只输出 JSON 对象，字段为：
+{
+  "entities": [{"title": "", "type": "person|project|event|topic", "pageType": "schema Page Type", "tags": [], "aliases": [], "evidence": "", "existsLikely": false}],
+  "concepts": [{"title": "", "evidence": ""}],
+  "claims": [{"subject": "", "predicate": "", "object": "", "evidence": "", "confidence": "high|medium|low"}],
+  "hierarchies": [{"parentTitle": "", "categoryName": "", "items": [{"title": "", "kind": "", "evidence": ""}], "evidence": "", "confidence": "high|medium|low"}],
+  "indicators": [{"entityTitle": "", "name": "", "value": null, "rawValue": "", "unit": "", "businessLine": "", "categoryName": "", "evidence": "", "confidence": "high|medium|low", "note": ""}],
+  "contradictions": [{"title": "", "evidence": ""}],
+  "recommendedUpdates": [{"targetTitle": "", "action": "CREATE_ENTITY|UPDATE_ENTITY_INDICATORS|UPDATE_ENTITY_PROPERTY|CREATE_RELATIONSHIP|CREATE_TASK|REVIEW_REQUIRED", "reason": ""}]
+}
+
+硬性规则：
+- 第一字符必须是 {，最后一个字符必须是 }；不要 Markdown，不要解释。
+- 所有 key 使用英文双引号；数组分隔只能用英文逗号。
+- 对导入文件，必须包含来源文件本身对应的 recommendedUpdates，并至少包含一个文件中真正讲到的 project/topic/concept/entity，除非材料完全没有可读知识。
+- entities[].pageType 必须优先从当前 schema.md 的 Page Types 中选择；同时把这个 pageType 放进 tags，方便知识树按 schema 分类。
+- 不要把来源文件标题当作唯一知识项；source 页和知识对象要分开。
+- event 只用于明确的会议、访谈、时间点事件；报告、方案、表格、截图通常不是 event。
+- indicators 必须有 entityTitle、name、evidence、confidence；没有明确数值时 value 用 null 并写 note。
+- evidence 必须是 Markdown 分析或原始摘录中能找到的短句。
+- 不要生成数据库 ID。`;
+}
+
+export function buildCaptureAnalysisStructuredOutput(name = 'capture_analysis') {
+  return {
+    name,
+    description: 'MyWiki source ingestion analysis object used to create or update wiki page types.',
+    schema: {
+      type: 'object',
+      properties: {
+        entities: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              title: { type: 'string' },
+              type: { type: 'string', enum: ['person', 'project', 'event', 'topic'] },
+              pageType: { type: 'string' },
+              tags: { type: 'array', items: { type: 'string' } },
+              aliases: { type: 'array', items: { type: 'string' } },
+              evidence: { type: 'string' },
+              existsLikely: { type: 'boolean' },
+            },
+            required: ['title', 'type', 'evidence'],
+          },
+        },
+        concepts: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              title: { type: 'string' },
+              evidence: { type: 'string' },
+            },
+            required: ['title', 'evidence'],
+          },
+        },
+        claims: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              subject: { type: 'string' },
+              predicate: { type: 'string' },
+              object: { type: 'string' },
+              evidence: { type: 'string' },
+              confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+            },
+            required: ['subject', 'predicate', 'object', 'evidence', 'confidence'],
+          },
+        },
+        hierarchies: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              parentTitle: { type: 'string' },
+              categoryName: { type: 'string' },
+              items: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    title: { type: 'string' },
+                    kind: { type: 'string' },
+                    evidence: { type: 'string' },
+                  },
+                  required: ['title', 'evidence'],
+                },
+              },
+              evidence: { type: 'string' },
+              confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+            },
+            required: ['parentTitle', 'categoryName', 'items', 'evidence', 'confidence'],
+          },
+        },
+        indicators: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              entityTitle: { type: 'string' },
+              name: { type: 'string' },
+              value: { type: ['number', 'null'] },
+              rawValue: { type: 'string' },
+              unit: { type: 'string' },
+              businessLine: { type: 'string' },
+              categoryName: { type: 'string' },
+              evidence: { type: 'string' },
+              confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+              note: { type: 'string' },
+              asOfDate: { type: 'string' },
+            },
+            required: ['entityTitle', 'name', 'value', 'evidence', 'confidence'],
+          },
+        },
+        contradictions: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              title: { type: 'string' },
+              evidence: { type: 'string' },
+            },
+            required: ['title', 'evidence'],
+          },
+        },
+        recommendedUpdates: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              targetTitle: { type: 'string' },
+              action: {
+                type: 'string',
+                enum: [
+                  'CREATE_ENTITY',
+                  'UPDATE_ENTITY_INDICATORS',
+                  'UPDATE_ENTITY_PROPERTY',
+                  'CREATE_RELATIONSHIP',
+                  'CREATE_TASK',
+                  'REVIEW_REQUIRED',
+                ],
+              },
+              reason: { type: 'string' },
+            },
+            required: ['targetTitle', 'action', 'reason'],
+          },
+        },
+      },
+      required: ['entities', 'concepts', 'claims', 'hierarchies', 'indicators', 'contradictions', 'recommendedUpdates'],
+    },
+  };
+}
+
+export function buildCaptureAnalysisPrompt(
+  content: string,
+  entityIndexJson: string,
+  workspaceContext?: CaptureWorkspaceContext,
+) {
   return `你是 MyWiki 的摄入分析 Agent。你只负责理解材料，不负责写入数据库。
 
 原始材料：
@@ -260,9 +554,11 @@ ${content}
 当前 Wiki 目录：
 ${entityIndexJson}
 
+${buildCaptureWorkspaceContextBlock(workspaceContext)}
+
 请输出 JSON，字段为：
 {
-  "entities": [{"title": "", "type": "person|project|event|topic", "aliases": [], "evidence": "", "existsLikely": false}],
+  "entities": [{"title": "", "type": "person|project|event|topic", "pageType": "schema Page Type", "tags": [], "aliases": [], "evidence": "", "existsLikely": false}],
   "concepts": [{"title": "", "evidence": ""}],
   "claims": [{"subject": "", "predicate": "", "object": "", "evidence": "", "confidence": "high|medium|low"}],
   "hierarchies": [{"parentTitle": "", "categoryName": "", "items": [{"title": "", "kind": "", "evidence": ""}], "evidence": "", "confidence": "high|medium|low"}],
@@ -274,6 +570,7 @@ ${entityIndexJson}
 规则：
 - 只提取材料中有证据的内容。
 - entities 必须对照当前 Wiki 目录判断 existsLikely；名称相近、别名相近、摘要相近都应视为可能已存在。
+- entities[].pageType 必须优先从当前 schema.md 的 Page Types 中选择；同时把 pageType 放进 tags，供知识树和 Wiki 编译路由使用。
 - 对 PDF、Word、表格、图片等“导入文件”材料，必须先识别“来源文件本身”与“文件中讲到的知识对象”：来源文件用于生成 source 页面；关键项目/业务/对象用 project/entity/topic；关键方法/模型/机制/路线用 concepts。不要只输出“导入文件：xxx”这种保底主题。
 - 导入材料如果围绕一个长期项目、商业案例、研究对象、软件系统或可研方案展开，entities 至少应包含该 project/topic；如果材料只是截图，也要根据视觉描述提取可见的项目、概念、指标或任务。
 - 不要因为正文中出现“会、会议、同步、讨论”等普通词就创建 event。只有材料本身明确是在记录一次具体会议、沟通、访谈或时间点事件时，才允许 type=event。
@@ -293,14 +590,19 @@ ${entityIndexJson}
 - 不要生成数据库 ID，不要输出 markdown。`;
 }
 
-export function buildCaptureAnalysisJsonRepairPrompt(rawText: string, content: string, entityIndexJson: string) {
+export function buildCaptureAnalysisJsonRepairPrompt(
+  rawText: string,
+  content: string,
+  entityIndexJson: string,
+  workspaceContext?: CaptureWorkspaceContext,
+) {
   return `你是 MyWiki 的 JSON 修复 Agent。上一轮摄入分析模型输出不能被程序解析。
 
 你的任务：只根据“原始材料”和“当前 Wiki 目录”重新输出一个合法 JSON 对象。不要解释，不要 Markdown，不要代码块。
 
 必须输出这个 schema：
 {
-  "entities": [{"title": "", "type": "person|project|event|topic", "aliases": [], "evidence": "", "existsLikely": false}],
+  "entities": [{"title": "", "type": "person|project|event|topic", "pageType": "schema Page Type", "tags": [], "aliases": [], "evidence": "", "existsLikely": false}],
   "concepts": [{"title": "", "evidence": ""}],
   "claims": [{"subject": "", "predicate": "", "object": "", "evidence": "", "confidence": "high|medium|low"}],
   "hierarchies": [{"parentTitle": "", "categoryName": "", "items": [{"title": "", "kind": "", "evidence": ""}], "evidence": "", "confidence": "high|medium|low"}],
@@ -314,6 +616,7 @@ export function buildCaptureAnalysisJsonRepairPrompt(rawText: string, content: s
 - 所有 key 必须使用英文双引号。
 - 数组分隔只能用英文逗号，不能用中文顿号、中文逗号或分号。
 - 如果没有内容，输出空数组，不要省略字段。
+- entities[].pageType 必须优先从当前 schema.md 的 Page Types 中选择；同时把 pageType 放进 tags。
 - 对“# 导入文件：...”材料，至少识别来源文件本身；如果材料中有项目/表格/报告对象，也要识别对应 project/topic。
 - 只保留有原文证据的内容，不要猜测。
 
@@ -322,6 +625,8 @@ ${content}
 
 当前 Wiki 目录：
 ${entityIndexJson}
+
+${buildCaptureWorkspaceContextBlock(workspaceContext)}
 
 上一轮不可解析输出，仅供参考，不能照抄其中的格式错误：
 ${rawText.slice(0, 12000)}`;
@@ -417,6 +722,8 @@ export function normalizeCaptureAnalysis(rawText: string): CaptureAnalysis {
       .map((entity) => ({
         title: stringValue(entity.title),
         type: pickEnum(entity.type, entityTypes, 'topic'),
+        pageType: normalizeWikiPageType(stringValue(entity.pageType ?? entity.wikiPageType ?? entity.schemaType)) ?? undefined,
+        tags: normalizeAnalysisTags(entity.tags),
         aliases: toArray(entity.aliases).map((alias) => String(alias).trim()).filter(Boolean),
         evidence: stringValue(entity.evidence),
         existsLikely: Boolean(entity.existsLikely),
@@ -622,7 +929,11 @@ export function normalizeWikiPatchesToCaptureDraft(patches: WikiPatch[], content
   return { primaryEntity, relatedEntities, relationships, tasks, compileSuggestions };
 }
 
-export function normalizeCaptureAnalysisToCaptureDraft(analysis: CaptureAnalysis, content: string): CaptureDraft {
+export function normalizeCaptureAnalysisToCaptureDraft(
+  analysis: CaptureAnalysis,
+  content: string,
+  workspaceContext?: CaptureWorkspaceContext,
+): CaptureDraft {
   const entityByTitle = new Map<string, DraftEntity>();
   const importedSource = extractImportedSourceInfo(content);
   let importedSourceClientId: string | undefined;
@@ -661,7 +972,12 @@ export function normalizeCaptureAnalysisToCaptureDraft(analysis: CaptureAnalysis
   }
 
   for (const entity of analysis.entities.slice(0, 18)) {
-    ensureEntity(entity.title, entity.type, entity.evidence, defaultTagsForEntityType(entity.type));
+    ensureEntity(
+      entity.title,
+      entity.type,
+      entity.evidence,
+      buildSchemaAwareEntityTags(entity, workspaceContext?.schema),
+    );
   }
 
   for (const concept of analysis.concepts.slice(0, 18)) {
@@ -703,6 +1019,19 @@ export function normalizeCaptureAnalysisToCaptureDraft(analysis: CaptureAnalysis
         asOfDate: indicator.asOfDate,
       },
     ]);
+  }
+
+  for (const update of analysis.recommendedUpdates.slice(0, 16)) {
+    const inferred = inferEntityFromRecommendedUpdate(update, importedSource, workspaceContext?.schema);
+    if (!inferred) continue;
+    ensureEntity(update.targetTitle, inferred.type, update.reason, inferred.tags);
+  }
+
+  if (importedSource && countNonSourceEntities(entityByTitle) === 0) {
+    const inferred = inferImportedKnowledgeEntity(content, importedSource);
+    if (inferred) {
+      ensureEntity(inferred.title, inferred.type, inferred.summary, inferred.tags);
+    }
   }
 
   const compileSuggestions = analysis.claims
@@ -827,6 +1156,152 @@ function defaultTagsForEntityType(type: EntityType) {
     topic: ['topic'],
   };
   return tags[type];
+}
+
+function normalizeAnalysisTags(value: unknown) {
+  return toArray(value)
+    .map((tag) => String(tag).trim())
+    .filter(Boolean)
+    .slice(0, 12);
+}
+
+function buildSchemaAwareEntityTags(
+  entity: CaptureAnalysis['entities'][number],
+  schema?: string,
+) {
+  const tags = mergeUniqueStrings(defaultTagsForEntityType(entity.type), entity.tags ?? []);
+  const pageType = normalizeWikiPageType(entity.pageType);
+  if (pageType && isPageTypeAvailableInSchema(pageType, schema)) {
+    tags.push(pageType);
+  }
+  return mergeUniqueStrings([], tags);
+}
+
+function isPageTypeAvailableInSchema(pageType: string, schema?: string) {
+  const normalized = normalizeWikiPageType(pageType);
+  if (!normalized) return false;
+  return parseWikiSchemaPageTypes(schema).some((rule) => rule.type === normalized);
+}
+
+function inferEntityFromRecommendedUpdate(
+  update: CaptureAnalysis['recommendedUpdates'][number],
+  importedSource: ReturnType<typeof extractImportedSourceInfo>,
+  schema?: string,
+): { type: EntityType; tags: string[] } | undefined {
+  const title = update.targetTitle.trim();
+  if (!title) return undefined;
+
+  const sourceKey = importedSource ? normalizeTitle(importedSource.title) : '';
+  const titleKey = normalizeTitle(title);
+  if (importedSource && titleKey && titleKey === sourceKey) {
+    return { type: 'topic', tags: importedSource.tags };
+  }
+
+  const text = `${title} ${update.reason}`;
+  const explicitPageType = parseWikiSchemaPageTypes(schema).find((rule) =>
+    new RegExp(`(^|[^a-z0-9-])${escapeRegExp(rule.type)}([^a-z0-9-]|$)`, 'i').test(text),
+  )?.type;
+  const tags = explicitPageType ? [explicitPageType] : [];
+  const type = inferEntityTypeFromKnowledgeText(text);
+  return { type, tags: mergeUniqueStrings(defaultTagsForEntityType(type), tags) };
+}
+
+function countNonSourceEntities(entityByTitle: Map<string, DraftEntity>) {
+  return Array.from(entityByTitle.values()).filter((entity) => !isSourceDraftEntity(entity)).length;
+}
+
+function isSourceDraftEntity(entity: Pick<DraftEntity, 'tags'>) {
+  return entity.tags.some((tag) => {
+    const normalized = tag.trim().toLowerCase();
+    return normalized === 'source' || normalized === '来源' || normalized === '源文件';
+  });
+}
+
+function inferImportedKnowledgeEntity(
+  content: string,
+  importedSource: NonNullable<ReturnType<typeof extractImportedSourceInfo>>,
+): { title: string; type: EntityType; summary: string; tags: string[] } | undefined {
+  const candidates = extractImportedKnowledgeTitleCandidates(content);
+  const sourceKey = normalizeTitle(importedSource.title);
+  const selected = candidates.find((candidate) => {
+    const key = normalizeTitle(candidate);
+    return key && key !== sourceKey;
+  });
+  if (!selected) return undefined;
+
+  const type = inferEntityTypeFromKnowledgeText(selected);
+  return {
+    title: selected,
+    type,
+    summary: buildSourceSummary(importedSource.filename, content),
+    tags: defaultTagsForEntityType(type),
+  };
+}
+
+function extractImportedKnowledgeTitleCandidates(content: string) {
+  const lines = content
+    .replace(/^#\s*导入文件[:：].*$/m, '')
+    .replace(/^#\s*原始文件[:：].*$/m, '')
+    .split(/\r?\n/)
+    .flatMap((line) => splitCandidateLine(line))
+    .map(cleanCandidateTitle)
+    .filter(Boolean);
+
+  return [...new Set(lines)]
+    .map((title) => ({ title, score: scoreKnowledgeTitleCandidate(title) }))
+    .filter((item) => item.score > 0)
+    .sort((left, right) => right.score - left.score || left.title.length - right.title.length)
+    .map((item) => item.title)
+    .slice(0, 12);
+}
+
+function splitCandidateLine(line: string) {
+  const trimmed = line.trim();
+  if (!trimmed) return [];
+  const withoutHeading = trimmed.replace(/^#{1,6}\s+/, '');
+  return withoutHeading
+    .split(/\s*[|｜\t]\s*/)
+    .flatMap((part) => part.split(/\s{2,}/))
+    .map((part) => part.trim());
+}
+
+function cleanCandidateTitle(value: string) {
+  return value
+    .replace(/^[-*+\d.、\s]+/, '')
+    .replace(/^[：:]+|[：:]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 96);
+}
+
+function scoreKnowledgeTitleCandidate(value: string) {
+  const title = value.trim();
+  if (title.length < 4 || title.length > 96) return -10;
+  if (/^(来源格式|文件大小|内容指纹|采集状态|导入文件|原始文件|工作表|Sheet\d*|第\s*\d+\s*页|--\s*\d+\s+of\s+\d+)/i.test(title)) {
+    return -10;
+  }
+  if (/^\d+(?:[.,]\d+)?$/.test(title)) return -10;
+  if (/^[|｜\-.·\s]+$/.test(title)) return -10;
+
+  let score = 0;
+  if (/(项目|可研|报告|方案|测算|计划|规划|平台|系统|业务|模型|疗法|技术|Project|Study|Report|Plan|Platform|System)/i.test(title)) {
+    score += 6;
+  }
+  if (/(目标|习惯|复盘|日记|goal|habit|reflection|journal)/i.test(title)) score += 4;
+  if (/(摘要|结论|建议|风险|指标|收入|成本|投资|面积)/i.test(title)) score += 2;
+  if (/[:：]/.test(title)) score -= 1;
+  if (title.length <= 48) score += 1;
+  return score;
+}
+
+function inferEntityTypeFromKnowledgeText(value: string): EntityType {
+  if (/(项目|可研|方案|测算|计划|规划|Project|Study|Plan)/i.test(value)) return 'project';
+  if (/(会议|纪要|访谈|meeting|minutes|interview)/i.test(value)) return 'event';
+  return 'topic';
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function mergeUniqueStrings(left: string[], right: string[]) {

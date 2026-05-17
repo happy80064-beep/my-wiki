@@ -1,0 +1,155 @@
+name: Release Packages
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to publish, for example v0.1.1"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Windows packages
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.26.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build Windows package
+        shell: powershell
+        run: pnpm desktop:build:windows
+
+      - name: Collect Windows release assets
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path release\windows | Out-Null
+          Copy-Item -Force src-tauri\target\release\bundle\nsis\*.exe release\windows\
+          Copy-Item -Force src-tauri\target\release\bundle\msi\*.msi release\windows\
+          Get-FileHash -Algorithm SHA256 release\windows\* | ForEach-Object {
+            "$($_.Hash)  $([System.IO.Path]::GetFileName($_.Path))"
+          } | Set-Content release\windows\SHA256SUMS-windows.txt
+
+      - name: Upload Windows release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: mywiki-windows-x64
+          path: release/windows/*
+
+  build-macos:
+    name: macOS packages
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Select macOS Rust toolchain
+        shell: bash
+        run: |
+          cat > src-tauri/rust-toolchain.toml <<'EOF'
+          [toolchain]
+          channel = "stable-aarch64-apple-darwin"
+          EOF
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.26.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build macOS package
+        run: pnpm desktop:build:macos
+
+      - name: Collect macOS release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release/macos
+          app_path="$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app' -type d | head -n 1)"
+          if [[ -n "$app_path" ]]; then
+            ditto -c -k --keepParent "$app_path" "release/macos/MyWiki_macos_${RUNNER_ARCH}.app.zip"
+          fi
+          find src-tauri/target/release/bundle/dmg -name '*.dmg' -type f -exec cp {} release/macos/ \;
+          shasum -a 256 release/macos/* > release/macos/SHA256SUMS-macos.txt
+
+      - name: Upload macOS release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: mywiki-macos-${{ runner.arch }}
+          path: release/macos/*
+
+  publish-release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs:
+      - build-windows
+      - build-macos
+
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Create or update draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ inputs.tag || github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t assets < <(find release-assets -type f | sort)
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" "${assets[@]}" --clobber
+          else
+            gh release create "$TAG_NAME" "${assets[@]}" \
+              --draft \
+              --title "MyWiki ${TAG_NAME}" \
+              --notes "MyWiki ${TAG_NAME} release package. Review the assets and publish when ready."
+          fi

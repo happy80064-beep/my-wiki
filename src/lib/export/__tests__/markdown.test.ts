@@ -99,6 +99,34 @@ describe('markdown export', () => {
     expect(isSafeExportPath('wiki/project/demo.md')).toBe(true);
   });
 
+  it('marks structured-only fallback pages so they are not confused with generated wiki', () => {
+    const now = Date.now();
+    const entity: Entity = {
+      id: 'project_status',
+      clientId: 'test-client',
+      type: 'project',
+      title: '结构化档案页',
+      summary: '只有结构化摘要。',
+      tags: ['project'],
+      scenes: ['work'],
+      properties: { status: 'active' },
+      sourceEntries: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const files = buildMarkdownExportFilesFromRecords({
+      entries: [],
+      entities: [entity],
+      relationships: [],
+      tasks: [],
+    });
+    const page = files.find((file) => file.path.includes('结构化档案页'))?.content ?? '';
+
+    expect(page).toContain('mywiki_status: "structured_only"');
+    expect(page).toContain('未生成完整 Wiki');
+  });
+
   it('writes source-tagged entities into wiki source pages and the wiki index', () => {
     const now = Date.now();
     const entry: Entry = {

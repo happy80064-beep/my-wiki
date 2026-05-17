@@ -346,6 +346,20 @@ describe('BrowserIndexedDbWikiPage', () => {
     });
   });
 
+  it('imports a single raw file from the wiki source column without using backup restore', async () => {
+    render(<BrowserIndexedDbWikiPage />);
+
+    const file = new File(['# 单文件导入\n\n这是一份原始材料。'], 'single-import.md', { type: 'text/markdown' });
+    fireEvent.change(screen.getByTestId('raw-file-import-input'), { target: { files: [file] } });
+
+    await waitFor(async () => {
+      expect(await db.rawAssets.count()).toBe(1);
+      expect(await db.entries.count()).toBe(1);
+    });
+    expect((await screen.findAllByText('single-import.md')).length).toBeGreaterThan(0);
+    expect(window.confirm).not.toHaveBeenCalled();
+  });
+
   it('opens related entities and source entries from metadata chips', async () => {
     const sourceEntry = await createEntry({
       content: 'Source entry body',
@@ -404,6 +418,50 @@ describe('BrowserIndexedDbWikiPage', () => {
 
     await waitFor(() => {
       expect(within(rightPanel as HTMLElement).getAllByText(/Source entry body/i).length).toBeGreaterThan(0);
+    });
+  });
+
+  it('opens related pages when frontmatter related values are wikilink paths', async () => {
+    await createEntity({
+      type: 'topic',
+      title: '运营经理',
+      summary: '岗位页面',
+      tags: ['concept'],
+    });
+
+    const primary = await createEntity({
+      type: 'person',
+      title: '李俊杰',
+      summary: '人物页面',
+      tags: ['人物'],
+    });
+
+    await db.entities.update(primary.id, {
+      wikiMarkdown: [
+        '---',
+        'type: entity',
+        'title: "李俊杰"',
+        'tags: [人物]',
+        'sources: []',
+        'related: ["[[concepts/运营经理]]"]',
+        '---',
+        '',
+        '# 李俊杰',
+        '',
+        '## 摘要',
+        '李俊杰曾任 [[concepts/运营经理]]。',
+      ].join('\n'),
+    });
+
+    render(<BrowserIndexedDbWikiPage />);
+
+    fireEvent.click(await screen.findByText('李俊杰'));
+    const rightPanel = document.querySelectorAll('aside')[1];
+    expect(rightPanel).toBeTruthy();
+    fireEvent.click(within(rightPanel as HTMLElement).getByRole('button', { name: /concepts\/运营经理/i }));
+
+    await waitFor(() => {
+      expect(screen.getAllByText('运营经理').length).toBeGreaterThan(0);
     });
   });
 

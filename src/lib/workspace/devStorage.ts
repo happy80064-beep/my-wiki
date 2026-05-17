@@ -15,6 +15,9 @@ export function createDevWorkspaceStorage(): TauriWorkspaceStorage {
     writeTextFile(path, content) {
       return postWorkspaceJson<void>('/api/workspace/write-text-file', { path, content });
     },
+    writeBinaryFile(path, dataBase64) {
+      return postWorkspaceJson<void>('/api/workspace/write-binary-file', { path, dataBase64 });
+    },
     listMarkdownFiles(root) {
       return postWorkspaceJson<string[]>('/api/workspace/list-markdown-files', { root });
     },

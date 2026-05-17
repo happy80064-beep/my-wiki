@@ -17,6 +17,9 @@ export function createTauriWorkspaceStorage(invoke: TauriInvoke = tauriInvoke): 
     writeTextFile(path, content) {
       return invoke<void>('workspace_write_text_file', { path, content });
     },
+    writeBinaryFile(path, dataBase64) {
+      return invoke<void>('workspace_write_binary_file', { path, dataBase64 });
+    },
     listMarkdownFiles(wikiRoot) {
       return invoke<string[]>('workspace_list_markdown_files', { root: wikiRoot });
     },

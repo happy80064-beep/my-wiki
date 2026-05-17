@@ -1,8 +1,18 @@
-import { fireEvent, render, screen } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { CreateProjectDialog } from '../CreateProjectDialog';
 
+vi.mock('@tauri-apps/plugin-dialog', () => ({
+  open: vi.fn(),
+}));
+
 describe('CreateProjectDialog', () => {
+  afterEach(() => {
+    vi.clearAllMocks();
+    delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+  });
+
   it('renders a Chinese-first project creation flow', () => {
     render(
       <CreateProjectDialog
@@ -57,5 +67,48 @@ describe('CreateProjectDialog', () => {
     );
 
     expect(screen.queryByText('创建新的 Wiki 知识库')).toBeNull();
+  });
+
+  it('keeps the parent directory picker disabled outside the desktop shell', () => {
+    render(
+      <CreateProjectDialog
+        open
+        defaultParentDirectory="D:/Knowledge"
+        onClose={() => undefined}
+        onCreate={() => undefined}
+      />,
+    );
+
+    expect((screen.getByRole('button', { name: '选择父目录' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('updates the parent directory from the desktop directory picker', async () => {
+    Object.defineProperty(window, '__TAURI_INTERNALS__', {
+      value: {},
+      configurable: true,
+    });
+    vi.mocked(openDialog).mockResolvedValue('C:\\Knowledge\\Projects');
+
+    render(
+      <CreateProjectDialog
+        open
+        defaultParentDirectory="D:/Knowledge"
+        onClose={() => undefined}
+        onCreate={() => undefined}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '选择父目录' }));
+
+    await waitFor(() => {
+      expect(openDialog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          directory: true,
+          multiple: false,
+          title: '选择知识库父目录',
+        }),
+      );
+      expect(screen.getByDisplayValue('C:/Knowledge/Projects')).toBeTruthy();
+    });
   });
 });

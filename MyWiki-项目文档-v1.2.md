@@ -275,7 +275,7 @@ type Task = {
 
 **为什么 owner 必填**：这是解决"虾总的任务包含了不属于他的项目任务"这类幻觉的核心。查询永远按 `owner` 字段精确过滤，不依赖 AI 推断。
 
-**同步预留字段（Local-First 路线）**：四张核心表（`entries / entities / relationships / tasks`）后续都应包含 `updatedAt` 和 `clientId`。当前 Web MVP 可先保持已有字段，桌面化或 schema 迁移时补齐：
+**同步预留字段（Local-First 路线）**：核心业务表应包含 `updatedAt` 和 `clientId`。当前 MVP 已开始在 Dexie schema 中落地 `clientId`，旧 IndexedDB 数据通过迁移补齐当前设备标识；后续同步模块仍需继续补完整的冲突解决策略。
 - `clientId` 在应用首次启动时生成并持久化，如 `desktop-{uuid}`。
 - `updatedAt` 在每次修改记录时更新，用于增量导出、多端同步和冲突解决。
 - `syncStatus` 暂不作为 MVP 必需字段，等真正加入同步模块再启用。
@@ -1203,6 +1203,27 @@ MyWiki 自身不实现以下能力：
 
 官方推荐的合规路径是：飞书/钉钉走平台授权的自建应用或机器人，并且只采集被用户标记的消息；微信保持分享、复制粘贴、截图等用户主动路径。
 
+### 9.7 桌面生产版密钥边界
+
+当前 MVP 的 LLM 调用仍以开发模式为主：前端调用本地 Vite dev middleware，由本机 `.env` 提供 MiniMax / DeepSeek 等 API key 并完成转发。这种方式适合本地开发和验证，但**不能直接作为 Tauri release 生产打包方案**。
+
+生产版发布前必须完成以下约束：
+- **API key 不进入前端 bundle**：不得把任何 LLM API key 写入 Vite 环境变量并打包到 JS 产物中。
+- **桌面侧安全存储**：Tauri 桌面版应把 API key 存放在系统 keychain / Windows Credential Vault，或至少使用用户本机受限权限的加密存储。
+- **LLM 调用迁移到可信边界**：正式版优先由 Tauri/Rust side 或本地 sidecar 进程发起 LLM 请求，前端只通过 IPC/invoke 传递任务参数。
+- **开发/生产模式显式区分**：如果仍使用 Vite middleware，只能标记为 dev-only；release 构建必须阻止或提示“当前 LLM 中转不可用于生产”。
+- **用户可见的数据流说明**：设置页应明确显示当前模型 Provider、密钥存储位置和哪些内容会发送给外部 LLM API。
+
+多端同步预留要求也从 MVP 开始落实：所有新建业务记录应带 `clientId`，旧 IndexedDB 数据通过迁移补齐当前设备的 `clientId`。这不是立即启用同步，而是避免未来做增量导出、冲突合并和多端同步时无法判断记录来源。
+
+**当前已知存储边界**：Tauri 桌面壳使用 WebView2 的独立 IndexedDB 存储空间，普通浏览器访问 `http://localhost:5173` 使用浏览器自己的 IndexedDB。两者在现阶段不会自动共享知识库数据，因此桌面壳和网页浏览器里的实体、关系、任务数量可能不同。短期应在 UI 上明确标注“桌面库 / 浏览器库”，并提供导出导入或一键迁移；中期应把核心数据迁到 Tauri/SQLite 或本地服务统一持久化，前端只通过同一个数据访问边界读写，避免多入口产生两套库。
+
+统一数据层的当前决策：
+- **原网页版知识库作为迁移基准**：在统一持久化完成前，以浏览器 `http://localhost:5173` 中已经形成的知识库为主库，不再把桌面壳中的独立 IndexedDB 当作权威数据源。
+- **桌面壳 IndexedDB 可重置**：项目根目录提供 `清空桌面壳知识库.bat`，用于停止 Tauri 桌面壳、备份并清空 WebView2 的 IndexedDB。该操作不影响普通浏览器里的 IndexedDB。
+- **统一前限制认知**：Froggy 桌面壳现阶段仍会写入自己的 WebView2 IndexedDB，因此它适合继续验证桌面交互和 Raw Inbox 体验；正式沉淀知识前，应优先使用网页版主库，或等待 Tauri/SQLite 统一数据层完成。
+- **后续迁移路线**：先补全浏览器主库的完整 JSON 导出，再实现 Tauri/SQLite 导入和统一读写边界，最后让网页入口、主窗口和 Froggy 悬窗都通过同一份本地库读写。
+
 ---
 
 ## 10. AI 提示词模板（关键参考）
@@ -1691,12 +1712,45 @@ MVP 验收：
 
 ---
 
+## 16. 2026-05-08 执行状态校准
+
+本轮根据 MVP 代码评估报告，把“已做核心部分”和“仍未真正完成”的边界重新校准：
+
+1. **稳定性与安全边界：MVP 级补强完成，统一数据层未完成**
+   - 已完成：`clientId` 预留、IndexedDB 迁移、AI API dev-only guard、桌面壳与浏览器数据库不一致问题的风险说明。
+   - 本轮新增：知识库页提供正式“导入备份”入口，可把 MyWiki Markdown zip 备份恢复到当前运行环境，避免以后再用临时 restore 页面抢救数据库。
+   - 仍未完成：真正把浏览器、主窗口、Froggy 桌面壳统一到同一份 Tauri/SQLite 或本地服务数据库。这是后续架构级任务，不能用两套 IndexedDB 互相同步来假装完成。
+
+2. **查询系统分层：核心拆分已完成，继续保留真实案例回归**
+   - 已完成：语言规则、指标抽取、来源筛选从巨型查询文件拆出；查询快答和 LLM 优化表达已形成两段式体验。
+   - 仍需持续：用更多“人数 / 面积 / 收入 / 时间节点 / 跨业态对比”真实案例补回归，避免规则扩展时再次串用证据。
+
+3. **查询兜底回流：MVP 闭环已完成**
+   - 已完成：指标兜底结果进入“待编译回 Wiki”，携带 `businessLine / categoryName`、置信度和证据，默认待确认，不自动污染知识库。
+   - 仍需持续：扩大真实案例测试，特别是旧数据没有 indicators 时的原文兜底场景。
+
+4. **Topic 自动汇集和 AI 编译：已启动 MVP，AI 编译仍未完成**
+   - 本轮新增：捕获保存后会根据实体标签和层级分类，确定性创建/更新 `auto-topic` 主题页，把 entry 写入 `autoCollectedSnippets`，并建立 topic `about` 实体的关系；保存后同步刷新 compiledProfile。
+   - 当前边界：这一步只做“素材自动汇集”和主题页生长雏形，还没有实现阈值触发的 LLM 主题综述 `aiCompiledSummary`、观点冲突检查和主题页三层展示。
+   - 下一步：以 `autoCollectedSnippets >= N` 或超过时间间隔为触发条件，加入异步 AI 编译队列，生成主题综述，并让用户可审阅、保存和回滚。
+
+阶段判断：第 1-3 步已经进入可持续迭代状态；第 4 步刚开始落地，不应再标记为“未开始”，但也不能标记为“完成”。真正统一本地数据层仍是下一阶段的最大技术债。
+
+---
+
 ## 文档版本
 
 v1.2 · 2025-04-28
 基于产品负责人与 AI 共创讨论，并参考 Karpathy LLM Wiki 模式。
 
 变更记录：
+- v1.2 落地：知识库页新增 Markdown zip 备份导入/恢复入口，可恢复实体、关系、任务和原文记录；导入前明确提示会清空当前运行环境的本地库
+- v1.2 落地：Topic 自动汇集 MVP 启动，捕获保存后根据标签和层级分类确定性创建/更新 `auto-topic` 主题页、写入 `autoCollectedSnippets`，并建立 topic `about` 实体关系
+- v1.2 校准：明确 Tauri/SQLite 或本地服务统一数据层仍未完成，当前桌面壳与浏览器 IndexedDB 不能继续作为长期双库方案
+- v1.2 落地：IndexedDB schema 升级到 `clientId` 版本，`entries / entities / relationships / tasks / rawAssets / ingestJobs / compileSuggestions / queryCache` 等新旧记录都补齐本机 `clientId`，为后续多端同步和增量导出打底
+- v1.2 落地：前端 AI 客户端增加 dev-only API guard，生产构建不会静默调用 Vite 中转；正式桌面版需迁移到 Tauri/Rust side 或本地 sidecar 后再启用外部 LLM
+- v1.2 落地：待编译指标写回保留 `businessLine / categoryName`，指纹去重也纳入业态维度；同一数值在住宅、医疗等不同业态下不会互相吞并或串线
+- v1.2 落地：查询语言层、指标抽取层和来源证据筛选开始从巨型 `query.ts` 中拆分，CJK/业态/指标范围词表进入 `language.ts`，面积/收入/人数等指标证据抽取进入 `metrics.ts`，答案采用证据过滤进入 `sourceFilter.ts`，并补充文旅多数字邻近选择、跨业态不串用的回归测试
 - v1.2 补充：Froggy Capture 阶段 3 桌面化开始落地，引入 Tauri v2 桌面壳、MyWiki 主窗口、透明置顶 Froggy 窗口、系统托盘显示/隐藏入口和桌面脚本
 - v1.2 补充：Raw Inbox 与 Froggy Capture 增加 CSV/Excel/表格、网页 HTML 采集与编译解析支持，延续 Karpathy raw-first 思路，入口尽量不要求用户先做格式转换
 - v1.2 补充：新增 Froggy Capture 拟物化捕获入口路线，并落地 `/frog` Web Widget MVP；支持拖拽文件、粘贴图片/文本、Raw Inbox 先收件、自动消化开关、进度反馈和位置记忆，为后续 Tauri 常驻透明悬窗打基础

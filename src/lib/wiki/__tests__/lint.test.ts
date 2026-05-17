@@ -68,6 +68,36 @@ describe('wiki lint core', () => {
     expect(results.some((result) => result.type === 'broken-link')).toBe(false);
   });
 
+  it('matches wikilinks by explicit page aliases and index aliases', () => {
+    const pages: WikiLintPage[] = [
+      page('wiki/concepts/个体化巨噬细胞疗法.md', '个体化巨噬细胞疗法', [
+        '---',
+        'type: concept',
+        'title: 个体化巨噬细胞疗法',
+        'updated: 2026-05-10',
+        'aliases: ["macrophage-cell-therapy"]',
+        '---',
+        '',
+        '[[furuai-health-tech-park-phase-3]]',
+      ]),
+      page('wiki/projects/福瑞健康科技园三期项目.md', '福瑞健康科技园三期项目', [
+        '---',
+        'type: project',
+        'title: 福瑞健康科技园三期项目',
+        'updated: 2026-05-10',
+        '---',
+        '',
+        '[[macrophage-cell-therapy]]',
+      ]),
+    ];
+
+    const results = runStructuralWikiLint(pages, {
+      index: '- [[projects/福瑞健康科技园三期项目|furuai-health-tech-park-phase-3]]',
+    });
+
+    expect(results.some((result) => result.type === 'broken-link')).toBe(false);
+  });
+
   it('matches Chinese wiki links with folder prefixes, spacing, and punctuation variants', () => {
     const pages: WikiLintPage[] = [
       page('wiki/projects/乌兰察布集宁区康养项目.md', '乌兰察布集宁区康养项目', [
@@ -93,6 +123,44 @@ describe('wiki lint core', () => {
         'type: concept',
         'title: FMT（粪菌移植）疗法',
         'updated: 2026-05-10',
+        '---',
+        '',
+        'Body',
+      ]),
+    ];
+
+    const results = runStructuralWikiLint(pages);
+
+    expect(results.some((result) => result.type === 'broken-link')).toBe(false);
+  });
+
+  it('resolves related frontmatter entries that are written as wikilinks', () => {
+    const pages: WikiLintPage[] = [
+      page('wiki/entities/李俊杰.md', '李俊杰', [
+        '---',
+        'type: entity',
+        'title: 李俊杰',
+        'updated: 2026-05-15',
+        'related: ["[[concepts/运营经理]]", "[[[concepts/2026年5月1日]]]", "[[entities/内蒙古福瑞医疗科技股份有限公司|内蒙古福瑞医疗科技股份有限公司]]"]',
+        '---',
+        '',
+        '# 李俊杰',
+      ]),
+      page('wiki/concepts/运营经理.md', '运营经理', ['---', 'type: concept', 'title: 运营经理', 'updated: 2026-05-15', '---', '', 'Body']),
+      page('wiki/concepts/2026年5月1日.md', '2026年5月1日', [
+        '---',
+        'type: concept',
+        'title: 2026年5月1日',
+        'updated: 2026-05-15',
+        '---',
+        '',
+        'Body',
+      ]),
+      page('wiki/entities/内蒙古福瑞医疗科技股份有限公司.md', '内蒙古福瑞医疗科技股份有限公司', [
+        '---',
+        'type: entity',
+        'title: 内蒙古福瑞医疗科技股份有限公司',
+        'updated: 2026-05-15',
         '---',
         '',
         'Body',

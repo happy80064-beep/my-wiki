@@ -2,9 +2,11 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
+    process::Command,
     time::Duration,
 };
 mod import_extract;
+use base64::{engine::general_purpose, Engine as _};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -14,6 +16,7 @@ use tauri::{
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_window_state::Builder::new().build())
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -39,11 +42,13 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             http_post_json,
+            open_external_url,
             import_extract::import_extract_text,
             workspace_default_root,
             workspace_ensure_dir,
             workspace_exists,
             workspace_write_text_file,
+            workspace_write_binary_file,
             workspace_read_text_file,
             workspace_list_markdown_files,
             workspace_list_files,
@@ -75,7 +80,7 @@ async fn http_post_json(request: HttpJsonRequest) -> Result<HttpJsonResponse, St
     }
 
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(180))
+        .timeout(Duration::from_secs(600))
         .build()
         .map_err(|error| error.to_string())?;
     let mut builder = client.post(url).json(&request.body);
@@ -93,6 +98,41 @@ async fn http_post_json(request: HttpJsonRequest) -> Result<HttpJsonResponse, St
         ok: status.is_success(),
         body,
     })
+}
+
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    let target = url.trim();
+    if !(target.starts_with("https://") || target.starts_with("http://")) {
+        return Err("Only HTTP(S) URLs can be opened.".to_string());
+    }
+    if target.chars().any(|ch| ch.is_control()) {
+        return Err("URL contains an invalid control character.".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("rundll32");
+        command.arg("url.dll,FileProtocolHandler").arg(target);
+        command
+    };
+
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(target);
+        command
+    };
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(target);
+        command
+    };
+
+    command.spawn().map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -122,6 +162,22 @@ fn workspace_write_text_file(path: String, content: String) -> Result<(), String
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
     fs::write(path_buf, content).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn workspace_write_binary_file(path: String, data_base64: String) -> Result<(), String> {
+    let path_buf = PathBuf::from(&path);
+    if let Some(parent) = path_buf.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let data = data_base64
+        .split_once(',')
+        .map(|(_, value)| value)
+        .unwrap_or(data_base64.as_str());
+    let bytes = general_purpose::STANDARD
+        .decode(data)
+        .map_err(|error| format!("Failed to decode base64 file data: {error}"))?;
+    fs::write(path_buf, bytes).map_err(|error| error.to_string())
 }
 
 #[tauri::command]

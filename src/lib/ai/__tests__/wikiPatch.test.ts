@@ -1,18 +1,24 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildCaptureAnalysisFromMarkdownPrompt,
   buildCaptureAnalysisPrompt,
+  buildCaptureAnalysisStructuredOutput,
   buildCaptureDigestPrompt,
+  buildCaptureMarkdownAnalysisPrompt,
+  buildCaptureSourceIdentityBlock,
   buildCaptureSourceForStructuredProcessing,
   buildWikiPatchPrompt,
   normalizeCaptureAnalysisToCaptureDraft,
   normalizeCaptureAnalysis,
   normalizeWikiPatchesToCaptureDraft,
   normalizeWikiPatchResponse,
+  resolveCaptureDigestThreshold,
   shouldUseCaptureDigest,
   splitCaptureContentIntoChunks,
   validateWikiPatch,
   type CaptureAnalysis,
 } from '@/lib/ai/wikiPatch';
+import { inferWikiTargetSpec } from '@/lib/wiki/markdownCompiler';
 
 describe('wiki patch prompts', () => {
   it('builds two-step ingestion prompts with patch constraints', () => {
@@ -73,15 +79,191 @@ describe('wiki patch prompts', () => {
     expect(digestPrompt).toContain('不要输出 JSON');
   });
 
+  it('builds reference-style markdown-first prompts before structured ingestion', () => {
+    const markdownPrompt = buildCaptureMarkdownAnalysisPrompt(
+      '# 导入文件：项目测算.pdf\n\n来源格式：PDF\n\n福瑞健康科技园三期项目包含医疗与健康中心。',
+      '[]',
+    );
+    const structuredPrompt = buildCaptureAnalysisFromMarkdownPrompt({
+      markdownAnalysis: '## 应入库的 Page Types\n- source：项目测算\n- project：福瑞健康科技园三期项目',
+      sourceExcerpt: '福瑞健康科技园三期项目包含医疗与健康中心。',
+      entityIndexJson: '[]',
+    });
+
+    expect(markdownPrompt).toContain('先把原始材料理解成 Markdown 分析文本');
+    expect(markdownPrompt).toContain('不要在这一轮输出 JSON');
+    expect(markdownPrompt).toContain('应入库的 Page Types');
+    expect(structuredPrompt).toContain('上一轮 Markdown 分析');
+    expect(structuredPrompt).toContain('"entities"');
+    expect(structuredPrompt).toContain('source 页和知识对象要分开');
+
+    const structuredOutput = buildCaptureAnalysisStructuredOutput();
+    expect(structuredOutput.name).toBe('capture_analysis');
+    expect(structuredOutput.schema).toMatchObject({
+      type: 'object',
+      properties: {
+        entities: expect.any(Object),
+        recommendedUpdates: expect.any(Object),
+      },
+    });
+  });
+
+  it('carries workspace schema Page Types into structured drafts', () => {
+    const schema = [
+      '# Wiki Schema',
+      '',
+      '## Page Types',
+      '| Type | Directory | Purpose |',
+      '|---|---|---|',
+      '| goal | wiki/goals/ | Concrete outcomes being pursued. |',
+      '| habit | wiki/habits/ | Repeatable behaviors to track. |',
+      '| reflection | wiki/reflections/ | Review notes and lessons. |',
+      '| source | wiki/sources/ | Source documents. |',
+    ].join('\n');
+    const workspaceContext = {
+      purpose: 'Personal growth wiki.',
+      schema,
+      templateId: 'personal-growth',
+    };
+
+    const prompt = buildCaptureAnalysisFromMarkdownPrompt({
+      markdownAnalysis: '## Page Types\n- goal: Run 5km habit goal',
+      sourceExcerpt: 'Run 5km is the current training goal.',
+      entityIndexJson: '[]',
+      workspaceContext,
+    });
+    const analysis = normalizeCaptureAnalysis(
+      JSON.stringify({
+        entities: [
+          {
+            title: 'Run 5km',
+            type: 'topic',
+            pageType: 'goal',
+            tags: ['fitness'],
+            evidence: 'Run 5km is the current training goal.',
+          },
+        ],
+        concepts: [],
+        claims: [],
+        hierarchies: [],
+        indicators: [],
+        contradictions: [],
+        recommendedUpdates: [],
+      }),
+    );
+    const draft = normalizeCaptureAnalysisToCaptureDraft(
+      analysis,
+      'Run 5km is the current training goal.',
+      workspaceContext,
+    );
+
+    expect(prompt).toContain('| goal | wiki/goals/ |');
+    expect(analysis.entities[0]).toMatchObject({ pageType: 'goal', tags: ['fitness'] });
+    expect(draft.primaryEntity.tags).toEqual(expect.arrayContaining(['goal', 'fitness']));
+    expect(
+      inferWikiTargetSpec(
+        {
+          id: draft.primaryEntity.clientId,
+          type: draft.primaryEntity.type,
+          title: draft.primaryEntity.title,
+          tags: draft.primaryEntity.tags,
+        },
+        { schema },
+      ),
+    ).toMatchObject({ type: 'goal', path: 'wiki/goals/run-5km.md' });
+  });
+
+  it('materializes recommended updates as knowledge entities when the model omits entities', () => {
+    const analysis = normalizeCaptureAnalysis(
+      JSON.stringify({
+        entities: [],
+        concepts: [],
+        claims: [],
+        hierarchies: [],
+        indicators: [],
+        contradictions: [],
+        recommendedUpdates: [
+          {
+            targetTitle: '福瑞健康科技园三期项目',
+            action: 'CREATE_ENTITY',
+            reason: '材料围绕福瑞健康科技园三期项目可研报告展开。',
+          },
+        ],
+      }),
+    );
+    const draft = normalizeCaptureAnalysisToCaptureDraft(
+      analysis,
+      '# 导入文件：福瑞健康科技园三期项目可研报告.pdf\n\n来源格式：PDF\n\n福瑞健康科技园三期项目可行性研究报告。',
+    );
+    const entities = [draft.primaryEntity, ...draft.relatedEntities];
+
+    expect(entities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ title: '福瑞健康科技园三期项目可研报告', tags: expect.arrayContaining(['source']) }),
+        expect.objectContaining({ title: '福瑞健康科技园三期项目', type: 'project', tags: expect.arrayContaining(['project']) }),
+      ]),
+    );
+  });
+
+  it('derives one evidence-based knowledge entity from imported content when structured output only identifies the source', () => {
+    const analysis = normalizeCaptureAnalysis(
+      JSON.stringify({
+        entities: [],
+        concepts: [],
+        claims: [],
+        hierarchies: [],
+        indicators: [],
+        contradictions: [],
+        recommendedUpdates: [],
+      }),
+    );
+    const draft = normalizeCaptureAnalysisToCaptureDraft(
+      analysis,
+      '# 导入文件：long-pdf-regression.pdf\n\n来源格式：PDF\n\nLong PDF Regression Knowledge Platform 2026\n\nThe platform plan tracks model routing and audit workflows.',
+    );
+    const entities = [draft.primaryEntity, ...draft.relatedEntities];
+
+    expect(entities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ title: 'long-pdf-regression', tags: expect.arrayContaining(['source']) }),
+        expect.objectContaining({ title: 'Long PDF Regression Knowledge Platform 2026', type: 'topic' }),
+      ]),
+    );
+  });
+
   it('keeps the reference-project style 50k source window before long document digesting', () => {
     const content = `${'a'.repeat(50000)}TAIL_SHOULD_NOT_ENTER_STRUCTURED_CAPTURE`;
     const bounded = buildCaptureSourceForStructuredProcessing(content);
     const chunks = splitCaptureContentIntoChunks(bounded);
 
     expect(bounded).toContain('[...truncated to 50000 characters before structured capture');
+    expect(bounded.length).toBeLessThanOrEqual(50000);
     expect(bounded).not.toContain('TAIL_SHOULD_NOT_ENTER_STRUCTURED_CAPTURE');
     expect(chunks.join('\n')).toContain('aaaa');
     expect(chunks.length).toBeLessThanOrEqual(5);
+  });
+
+  it('preserves imported source identity for long document markdown summaries', () => {
+    const content = [
+      '# 导入文件：long-pdf-regression.pdf',
+      '',
+      '来源格式：PDF',
+      '文件大小：12345 bytes',
+      '',
+      'Long PDF Regression Knowledge Platform 2026',
+    ].join('\n');
+
+    expect(buildCaptureSourceIdentityBlock(content)).toContain('# 导入文件：long-pdf-regression.pdf');
+    expect(buildCaptureSourceIdentityBlock(content)).toContain('来源格式：PDF');
+  });
+
+  it('uses the configured context window before falling back to markdown digesting', () => {
+    const structuredContent = 'a'.repeat(50000);
+    const miniMaxConfiguredWindow = 200000;
+
+    expect(resolveCaptureDigestThreshold(miniMaxConfiguredWindow)).toBe(50000);
+    expect(shouldUseCaptureDigest(structuredContent, resolveCaptureDigestThreshold(miniMaxConfiguredWindow))).toBe(false);
+    expect(shouldUseCaptureDigest(structuredContent, resolveCaptureDigestThreshold(8000))).toBe(true);
   });
 
   it('validates property whitelist and review options', () => {
@@ -239,6 +421,13 @@ describe('wiki patch prompts', () => {
       entityTitle: '福瑞健康科技园三期项目',
       propertyKey: 'ownerNote',
     });
+    expect(
+      entities.some(
+        (entity) =>
+          entity.title === '福瑞健康科技园三期项目可研报告' &&
+          inferWikiTargetSpec({ id: entity.clientId, type: entity.type, title: entity.title, tags: entity.tags }).type === 'source',
+      ),
+    ).toBe(true);
   });
 
   it('adds a source page entity when WikiPatch succeeds for an imported file', () => {

@@ -4,7 +4,11 @@ import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import * as XLSX from 'xlsx';
 import { extractCaptureDraft } from '@/lib/ai/captureClient';
-import { buildCaptureAnalysisPrompt, normalizeCaptureAnalysis } from '@/lib/ai/wikiPatch';
+import {
+  buildCaptureAnalysisFromMarkdownPrompt,
+  buildCaptureMarkdownAnalysisPrompt,
+  normalizeCaptureAnalysis,
+} from '@/lib/ai/wikiPatch';
 import { requestConfiguredProviderText } from '@/lib/llm/runtimeProvider';
 import { createRawAssetFromFile, processRawAssetQueue } from '@/lib/rawAssets';
 import { db, resetDatabase } from '@/lib/db';
@@ -38,7 +42,7 @@ describe.skipIf(!runRealApi)('real API Frog-style raw asset compilation', () => 
   });
 
   it(
-    'requests structured MiniMax JSON successfully when settings use Anthropic-compatible mode',
+    'requests MiniMax markdown-first structured capture successfully when settings use Anthropic-compatible mode',
     async () => {
       const apiKey = process.env.MINIMAX_API_KEY;
       if (!apiKey) throw new Error('MINIMAX_API_KEY is required for RUN_REAL_API=1.');
@@ -52,6 +56,25 @@ describe.skipIf(!runRealApi)('real API Frog-style raw asset compilation', () => 
         '项目包含医疗与健康中心、文旅与科普园和智算中心三类业态。',
         '预计总收入 40307 万元，其中医疗与健康中心 18059 万元，智算中心 21648 万元。',
       ].join('\n');
+      const markdownResult = await requestConfiguredProviderText(
+        {
+          providerId: 'minimax-cn',
+          enabled: true,
+          apiMode: 'anthropic-compatible',
+          endpoint: 'https://api.minimaxi.com/anthropic',
+          apiKey,
+          model: process.env.MINIMAX_MODEL || 'MiniMax-M2.7',
+          contextWindow: 200000,
+        },
+        {
+          prompt: buildCaptureMarkdownAnalysisPrompt(content, '[]'),
+          systemPrompt: '你是 MyWiki 原文件阅读 Agent。只输出 Markdown 分析文本，不要输出 JSON。',
+          maxTokens: 1600,
+        },
+      );
+      expect(markdownResult.ok).toBe(true);
+      if (!markdownResult.ok) throw new Error(markdownResult.error);
+
       const result = await requestConfiguredProviderText(
         {
           providerId: 'minimax-cn',
@@ -63,9 +86,13 @@ describe.skipIf(!runRealApi)('real API Frog-style raw asset compilation', () => 
           contextWindow: 200000,
         },
         {
-          prompt: buildCaptureAnalysisPrompt(content, '[]'),
-          systemPrompt: '你是 MyWiki 摄入分析 Agent。只输出符合 schema 的 JSON 对象。',
-          maxTokens: 1600,
+          prompt: buildCaptureAnalysisFromMarkdownPrompt({
+            sourceExcerpt: content,
+            markdownAnalysis: markdownResult.text,
+            entityIndexJson: '[]',
+          }),
+          systemPrompt: '你是 MyWiki 结构化入库 Agent。只输出符合 schema 的 JSON 对象。',
+          maxTokens: 2200,
           responseFormat: 'json_object',
         },
       );
@@ -159,6 +186,48 @@ describe.skipIf(!runRealApi)('real API Frog-style raw asset compilation', () => 
   );
 
   it(
+    'compiles the real project spreadsheet without JSON fallback or failed raw assets',
+    async () => {
+      const spreadsheetPath = resolveRealSpreadsheetPath();
+      const bytes = await readFile(spreadsheetPath);
+      await createRawAssetFromFile(
+        new File([bytes], 'real-spreadsheet-regression.xlsx', {
+          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        }),
+      );
+
+      const extractionModes: string[] = [];
+      const result = await processRawAssetQueue({
+        owner: 'frog',
+        extractor: async (content) => {
+          expect(content.length).toBeGreaterThan(500);
+          const extraction = await extractCaptureDraft(content);
+          if (extraction.fallbackFrom) {
+            throw new Error(`Unexpected Wiki compile fallback: ${extraction.fallbackFrom}`);
+          }
+          extractionModes.push(extraction.mode ?? 'unknown');
+          return { draft: extraction.draft };
+        },
+      });
+      const rawAssets = await db.rawAssets.orderBy('createdAt').toArray();
+      const entries = await db.entries.toArray();
+      const entities = await db.entities.toArray();
+      const pageTypes = new Set(entities.map((entity) => inferWikiTargetSpec(entity).type));
+
+      expect(result).toMatchObject({ total: 1, processed: 1, failed: 0 });
+      expect(extractionModes).toEqual(['two-step']);
+      expect(rawAssets.map((asset) => ({ filename: asset.filename, status: asset.status, error: asset.error }))).toEqual([
+        expect.objectContaining({ filename: 'real-spreadsheet-regression.xlsx', status: 'compiled', error: undefined }),
+      ]);
+      expect(entries.every((entry) => entry.processed && entry.derivedEntities.length > 0)).toBe(true);
+      expect(entities.length).toBeGreaterThanOrEqual(2);
+      expect(pageTypes.has('source')).toBe(true);
+      expect([...pageTypes].some((type) => ['project', 'concept', 'entity'].includes(type))).toBe(true);
+    },
+    600_000,
+  );
+
+  it(
     'compiles spreadsheet and image assets without JSON fallback or failed raw assets',
     async () => {
       await createRawAssetFromFile(buildSpreadsheetFile());
@@ -232,6 +301,19 @@ function resolveRealPdfPath() {
   const found = candidates.find((path) => existsSync(path));
   if (!found) {
     throw new Error('REAL_PDF_PATH is required for the real PDF regression test.');
+  }
+  return found;
+}
+
+function resolveRealSpreadsheetPath() {
+  const candidates = [
+    process.env.REAL_XLSX_PATH,
+    'C:\\Users\\xxjsb\\Desktop\\三期汇报\\bp\\项目测算20260420（更新版）V1.xlsx',
+    'C:\\Users\\xxjsb\\Desktop\\三期汇报\\bp\\项目测算20260420.xlsx',
+  ].filter((path): path is string => Boolean(path));
+  const found = candidates.find((path) => existsSync(path));
+  if (!found) {
+    throw new Error('REAL_XLSX_PATH is required for the real spreadsheet regression test.');
   }
   return found;
 }

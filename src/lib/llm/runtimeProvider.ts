@@ -13,6 +13,10 @@ export type RuntimeProviderResult =
   | { ok: true; text: string; providerName: string; model: string }
   | { ok: false; error: string; providerName: string; model: string };
 
+export type RuntimeProviderRequestOptions = {
+  signal?: AbortSignal;
+};
+
 export function normalizeRequestProviderConfig(input: LlmProviderConfig | null | undefined): LlmProviderConfig | null {
   if (!input) return null;
   const config = { ...input, enabled: true };
@@ -26,11 +30,30 @@ export function normalizeRequestProviderConfig(input: LlmProviderConfig | null |
 export async function requestConfiguredProviderText(
   config: LlmProviderConfig,
   input: LlmTextRequestInput,
+  options: RuntimeProviderRequestOptions = {},
+): Promise<RuntimeProviderResult> {
+  const providerName = config.providerId;
+  let lastRetryableError = '';
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    throwIfAborted(options.signal);
+    const result = await requestConfiguredProviderTextOnce(config, input, options);
+    if (result.ok || !isRetryableProviderError(result.error) || attempt === 3) return result;
+    lastRetryableError = result.error;
+    await sleep(retryDelayMs(attempt), options.signal);
+  }
+
+  return { ok: false, error: lastRetryableError || `${providerName} request failed.`, providerName, model: config.model };
+}
+
+async function requestConfiguredProviderTextOnce(
+  config: LlmProviderConfig,
+  input: LlmTextRequestInput,
+  options: RuntimeProviderRequestOptions,
 ): Promise<RuntimeProviderResult> {
   const providerName = config.providerId;
   try {
     const request = buildProviderTextRequest(config, input);
-    const response = await postJsonThroughRuntime(request);
+    const response = await postJsonThroughRuntime(request, { signal: options.signal });
     const data = parseJsonBody(response.body);
 
     if (!response.ok) {
@@ -42,16 +65,19 @@ export async function requestConfiguredProviderText(
       };
     }
 
-    const text = extractProviderText(data, request.responseApiMode);
+    const text = extractProviderText(data, request.responseApiMode, {
+      includeToolUseInput: Boolean(input.structuredOutput),
+    });
     if (!text) {
       return { ok: false, error: `${providerName} returned empty content.`, providerName, model: config.model };
     }
 
     return { ok: true, text, providerName, model: config.model };
   } catch (error) {
+    if (isAbortError(error)) throw error;
     return {
       ok: false,
-      error: error instanceof Error ? error.message : `${providerName} request failed.`,
+      error: formatUnknownError(error, `${providerName} request failed.`),
       providerName,
       model: config.model,
     };
@@ -61,11 +87,30 @@ export async function requestConfiguredProviderText(
 export async function requestConfiguredProviderVision(
   config: LlmProviderConfig,
   input: { prompt: string; imageBase64: string; mimeType: string; maxTokens: number },
+  options: RuntimeProviderRequestOptions = {},
+): Promise<RuntimeProviderResult> {
+  const providerName = config.providerId;
+  let lastRetryableError = '';
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    throwIfAborted(options.signal);
+    const result = await requestConfiguredProviderVisionOnce(config, input, options);
+    if (result.ok || !isRetryableProviderError(result.error) || attempt === 3) return result;
+    lastRetryableError = result.error;
+    await sleep(retryDelayMs(attempt), options.signal);
+  }
+
+  return { ok: false, error: lastRetryableError || `${providerName} vision request failed.`, providerName, model: config.model };
+}
+
+async function requestConfiguredProviderVisionOnce(
+  config: LlmProviderConfig,
+  input: { prompt: string; imageBase64: string; mimeType: string; maxTokens: number },
+  options: RuntimeProviderRequestOptions,
 ): Promise<RuntimeProviderResult> {
   const providerName = config.providerId;
   try {
     const request = buildProviderVisionRequest(config, input);
-    const response = await postJsonThroughRuntime(request);
+    const response = await postJsonThroughRuntime(request, { signal: options.signal });
     const data = parseJsonBody(response.body);
 
     if (!response.ok) {
@@ -84,16 +129,21 @@ export async function requestConfiguredProviderVision(
 
     return { ok: true, text, providerName, model: config.model };
   } catch (error) {
+    if (isAbortError(error)) throw error;
     return {
       ok: false,
-      error: error instanceof Error ? error.message : `${providerName} vision request failed.`,
+      error: formatUnknownError(error, `${providerName} vision request failed.`),
       providerName,
       model: config.model,
     };
   }
 }
 
-export function extractProviderText(data: unknown, apiMode: LlmProviderConfig['apiMode']) {
+export function extractProviderText(
+  data: unknown,
+  apiMode: LlmProviderConfig['apiMode'],
+  options: { includeToolUseInput?: boolean } = {},
+) {
   if (!data || typeof data !== 'object') return '';
   const payload = data as Record<string, unknown>;
 
@@ -103,6 +153,12 @@ export function extractProviderText(data: unknown, apiMode: LlmProviderConfig['a
       .map((part) =>
         part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string'
           ? (part as { text: string }).text
+          : options.includeToolUseInput &&
+              part &&
+              typeof part === 'object' &&
+              (part as { type?: unknown }).type === 'tool_use' &&
+              (part as { input?: unknown }).input !== undefined
+            ? JSON.stringify((part as { input: unknown }).input)
           : '',
       )
       .join('')
@@ -120,7 +176,18 @@ export function extractProviderText(data: unknown, apiMode: LlmProviderConfig['a
   }
 
   const choices = Array.isArray(payload.choices) ? payload.choices : [];
-  const first = choices[0] as { message?: { content?: string } } | undefined;
+  const first = choices[0] as
+    | {
+        message?: {
+          content?: string;
+          tool_calls?: Array<{ function?: { arguments?: string } }>;
+        };
+      }
+    | undefined;
+  if (options.includeToolUseInput) {
+    const toolArguments = first?.message?.tool_calls?.find((call) => call.function?.arguments)?.function?.arguments;
+    if (toolArguments?.trim()) return toolArguments.trim();
+  }
   return first?.message?.content?.trim() ?? '';
 }
 
@@ -242,4 +309,50 @@ function parseJsonBody(body: string) {
   } catch {
     return { message: body };
   }
+}
+
+function formatUnknownError(error: unknown, fallback: string) {
+  if (error instanceof Error && error.message.trim()) return error.message;
+  if (typeof error === 'string' && error.trim()) return error;
+  return fallback;
+}
+
+function isRetryableProviderError(error: string) {
+  return /(429|rate.?limit|too many requests|timeout|timed out|temporarily|overloaded|503|502|504|500|ECONNRESET|ECONNREFUSED|network|fetch failed|socket|TLS|connection)/i.test(
+    error,
+  );
+}
+
+function retryDelayMs(attempt: number) {
+  return 1200 * attempt * attempt;
+}
+
+function sleep(ms: number, signal?: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+    const timeout = setTimeout(() => {
+      signal?.removeEventListener('abort', abort);
+      resolve();
+    }, ms);
+    const abort = () => {
+      clearTimeout(timeout);
+      reject(signal?.reason ?? new DOMException('Aborted', 'AbortError'));
+    };
+    signal?.addEventListener('abort', abort, { once: true });
+  });
+}
+
+function throwIfAborted(signal?: AbortSignal) {
+  if (!signal?.aborted) return;
+  throw signal.reason ?? new DOMException('Aborted', 'AbortError');
+}
+
+function isAbortError(error: unknown) {
+  return (
+    (error instanceof DOMException && error.name === 'AbortError') ||
+    (error instanceof Error && error.name === 'AbortError')
+  );
 }

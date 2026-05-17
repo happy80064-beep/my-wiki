@@ -256,7 +256,16 @@ export type GraphInsightDismissal = {
 
 export type RawAssetKind = 'text' | 'word' | 'pdf' | 'image' | 'spreadsheet' | 'html' | 'presentation';
 
-export type RawAssetStatus = 'raw' | 'extracting' | 'compiling' | 'compiled' | 'skipped' | 'failed';
+export type RawAssetStatus =
+  | 'raw'
+  | 'extracting'
+  | 'compiling'
+  | 'compiled'
+  | 'skipped'
+  | 'failed'
+  | 'cancelled'
+  | 'wiki_compiling'
+  | 'wiki_failed';
 
 export type RawAsset = {
   id: ID;

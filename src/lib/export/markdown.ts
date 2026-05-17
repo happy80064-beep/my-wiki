@@ -253,6 +253,7 @@ function buildEntityMarkdown(
     buildFrontmatter({
       id: entity.id,
       type: inferWikiTargetSpec(entity).type,
+      mywiki_status: 'structured_only',
       entity_type: entity.type,
       tags: entity.tags,
       scenes: entity.scenes,
@@ -261,6 +262,8 @@ function buildEntityMarkdown(
       sources: entity.sourceEntries,
     }),
     `# ${entity.title}`,
+    '',
+    '> 状态：未生成完整 Wiki。以下内容是 MyWiki 根据结构化入库结果生成的档案预览，可在应用内点击“AI 生成/更新”或“批量生成/更新wiki页”生成完整页面。',
     '',
     entity.summary || '暂无摘要。',
     '',

@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { Entity } from '@/types';
 import {
+  buildWikiMarkdownBatchCompilePrompt,
   buildWikiMarkdownCompilePrompt,
   extractFrontmatterTags,
   extractMarkdownSummary,
   inferWikiTargetSpec,
   isSafeWikiFilePath,
+  normalizeWikiMarkdownBatchCompileResult,
   normalizeWikiMarkdownCompileResult,
   parseWikiFileBlocks,
   sanitizeWikiMarkdownOutput,
@@ -52,6 +54,37 @@ describe('wiki markdown compiler prompt', () => {
     expect(prompt).toContain('严禁输出 `<think>`');
     expect(prompt).toContain('## 关键指标');
     expect(prompt).toContain('预计年均营收 4.22 亿元');
+  });
+
+  it('limits generated wikilinks to existing index targets', () => {
+    const prompt = buildWikiMarkdownCompilePrompt({
+      entity,
+      sourceEntries: [],
+      relatedEntities: [
+        {
+          id: 'topic_fmt',
+          clientId: 'client',
+          type: 'topic',
+          title: 'FMT（粪菌移植）疗法',
+          summary: '肠道微生态相关疗法。',
+          tags: ['方法'],
+          scenes: ['work'],
+          properties: { isPersonal: false, autoCollectedSnippets: [] },
+          sourceEntries: [],
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ],
+      contextMap: {
+        index: '- [[projects/福瑞健康科技园三期项目|福瑞健康科技园三期项目]]',
+      },
+      today: '2026-05-09',
+    });
+
+    expect(prompt).toContain('## Allowed Existing Wiki Links');
+    expect(prompt).toContain('target: concepts/fmt(粪菌移植)疗法');
+    expect(prompt).toContain('[[concepts/fmt(粪菌移植)疗法|FMT（粪菌移植）疗法]]');
+    expect(prompt).toContain('禁止发明英文 slug、拼音 slug、翻译 slug');
   });
 });
 
@@ -251,6 +284,73 @@ describe('llm-wiki style FILE block parser', () => {
     expect(isSafeWikiFilePath('../foo.md')).toBe(false);
     expect(isSafeWikiFilePath('C:/Windows/foo.md')).toBe(false);
     expect(isSafeWikiFilePath('raw/source.md')).toBe(false);
+  });
+});
+
+describe('source-level batch wiki compiler helpers', () => {
+  it('builds a multi-page FILE block prompt for one source entry', () => {
+    const prompt = buildWikiMarkdownBatchCompilePrompt({
+      sourceEntry: {
+        id: 'entry_1',
+        clientId: 'client',
+        content: '福瑞新职场位于中海广场，包含办公空间和配套商业。',
+        source: 'file',
+        fileMetadata: { filename: 'report.pdf', mimeType: 'application/pdf', url: '' },
+        capturedAt: 1,
+        processed: true,
+        derivedEntities: [],
+        derivedTasks: [],
+        derivedRelationships: [],
+      },
+      entities: [entity, { ...entity, id: 'entity_2', title: '中海广场', type: 'project' }],
+      today: '2026-05-17',
+    });
+
+    expect(prompt).toContain('一次性生成或更新多篇');
+    expect(prompt).toContain('report.pdf');
+    expect(prompt).toContain('wiki/');
+    expect(prompt).toContain('必须为“本次必须输出的目标页面”中的每一个 targetPath 输出');
+  });
+
+  it('normalizes multiple FILE blocks back to entity results and reports missing pages', () => {
+    const second = { ...entity, id: 'entity_2', title: '中海广场', type: 'project' as const };
+    const targetPath = inferWikiTargetSpec(entity).path;
+    const result = normalizeWikiMarkdownBatchCompileResult(
+      [
+        `---FILE: ${targetPath}---`,
+        '---',
+        'type: project',
+        `title: "${entity.title}"`,
+        'tags: [AI]',
+        'sources: [entry_1]',
+        'related: []',
+        '---',
+        `# ${entity.title}`,
+        '',
+        '## 摘要',
+        '这是一篇围绕来源生成的 Wiki 页面。',
+        '---END FILE---',
+      ].join('\n'),
+      {
+        sourceEntry: {
+          id: 'entry_1',
+          clientId: 'client',
+          content: 'source',
+          source: 'file',
+          capturedAt: 1,
+          processed: true,
+          derivedEntities: [],
+          derivedTasks: [],
+          derivedRelationships: [],
+        },
+        entities: [entity, second],
+        today: '2026-05-17',
+      },
+    );
+
+    expect(result.results).toHaveLength(1);
+    expect(result.results[0]).toMatchObject({ entityId: entity.id });
+    expect(result.missingEntityIds).toEqual([second.id]);
   });
 });
 

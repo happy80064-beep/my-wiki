@@ -3,7 +3,11 @@ import { persistCaptureDraft, type CaptureDraft } from '@/lib/capture';
 import { createId, db, getClientId } from '@/lib/db';
 import type { EntrySource, IngestJob } from '@/types';
 
-export type IngestExtractor = (content: string) => Promise<{ draft: CaptureDraft }>;
+export type IngestExtractorOptions = {
+  signal?: AbortSignal;
+};
+
+export type IngestExtractor = (content: string, options?: IngestExtractorOptions) => Promise<{ draft: CaptureDraft }>;
 
 export type CreateIngestJobInput = {
   content: string;
@@ -55,17 +59,25 @@ export async function listIngestJobs(limit = 20) {
   return db.ingestJobs.orderBy('createdAt').reverse().limit(limit).toArray();
 }
 
-export async function processNextIngestJob(extractor: IngestExtractor = extractCaptureDraft) {
+export async function processNextIngestJob(
+  extractor: IngestExtractor = extractCaptureDraft,
+  options: IngestExtractorOptions = {},
+) {
   await resetStaleIngestJobs();
   const job = await db.ingestJobs
     .where('status')
     .equals('pending')
     .first();
   if (!job) return undefined;
-  return processIngestJob(job.id, extractor);
+  return processIngestJob(job.id, extractor, options);
 }
 
-export async function processIngestJob(id: string, extractor: IngestExtractor = extractCaptureDraft) {
+export async function processIngestJob(
+  id: string,
+  extractor: IngestExtractor = extractCaptureDraft,
+  options: IngestExtractorOptions = {},
+) {
+  throwIfAborted(options.signal);
   await resetStaleIngestJobs();
   const job = await db.ingestJobs.get(id);
   if (!job || !['pending', 'failed'].includes(job.status)) return job;
@@ -91,7 +103,8 @@ export async function processIngestJob(id: string, extractor: IngestExtractor = 
   });
 
   try {
-    const result = await extractor(job.content);
+    const result = await extractor(job.content, { signal: options.signal });
+    throwIfAborted(options.signal);
     const persisted = await persistCaptureDraft(job.content, result.draft, job.source, {
       entryId: job.targetEntryId,
     });
@@ -113,6 +126,14 @@ export async function processIngestJob(id: string, extractor: IngestExtractor = 
     });
   } catch (error) {
     const failedAt = Date.now();
+    if (isAbortError(error)) {
+      await db.ingestJobs.update(job.id, {
+        status: 'failed',
+        error: error instanceof Error ? error.message : 'Operation cancelled.',
+        updatedAt: failedAt,
+      });
+      return db.ingestJobs.get(job.id);
+    }
     const retryCount = job.retryCount + 1;
     await db.ingestJobs.update(job.id, {
       status: retryCount >= 3 ? 'failed' : 'pending',
@@ -185,4 +206,16 @@ function fnv1a(value: string) {
     hash = Math.imul(hash, 0x01000193);
   }
   return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+function throwIfAborted(signal?: AbortSignal) {
+  if (!signal?.aborted) return;
+  throw signal.reason ?? new DOMException('Aborted', 'AbortError');
+}
+
+function isAbortError(error: unknown) {
+  return (
+    (error instanceof DOMException && error.name === 'AbortError') ||
+    (error instanceof Error && error.name === 'AbortError')
+  );
 }

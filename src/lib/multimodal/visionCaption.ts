@@ -14,6 +14,10 @@ type CaptionImageInput = {
   ocrText?: string;
 };
 
+type CaptionImageOptions = {
+  signal?: AbortSignal;
+};
+
 type CaptionCacheEntry = {
   caption: string;
   capturedAt: string;
@@ -24,7 +28,8 @@ type CaptionCacheEntry = {
 const cacheKey = 'mywiki.v2.imageCaptionCache';
 const ocrCacheKey = 'mywiki.v2.imageOcrCache';
 
-export async function captionImageForWiki(input: CaptionImageInput) {
+export async function captionImageForWiki(input: CaptionImageInput, options: CaptionImageOptions = {}) {
+  throwIfAborted(options.signal);
   const settings = loadMultimodalSettings();
   if (!settings.enabled || !settings.captionStandaloneImages) return undefined;
   const providerResolution = resolveProviderConfigForRole(loadProviderSettings(), 'vision');
@@ -39,7 +44,7 @@ export async function captionImageForWiki(input: CaptionImageInput) {
   const hit = cache[cacheId];
   if (hit?.caption) return hit.caption;
 
-  const result = await requestCaptionWithRetry(input, providerConfig);
+  const result = await requestCaptionWithRetry(input, providerConfig, options);
   const caption = normalizeCaption(result.caption);
   assertUsableCaption(caption);
 
@@ -53,11 +58,16 @@ export async function captionImageForWiki(input: CaptionImageInput) {
   return caption;
 }
 
-async function requestCaptionWithRetry(input: CaptionImageInput, providerConfig: NonNullable<ReturnType<typeof resolveProviderConfigForRole>['config']>) {
+async function requestCaptionWithRetry(
+  input: CaptionImageInput,
+  providerConfig: NonNullable<ReturnType<typeof resolveProviderConfigForRole>['config']>,
+  options: CaptionImageOptions,
+) {
   let lastError = '';
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    throwIfAborted(options.signal);
     try {
-      const result = await requestCaptionOnce(input, providerConfig);
+      const result = await requestCaptionOnce(input, providerConfig, options);
       if (result.caption.trim()) return result;
       lastError = '图片视觉描述为空。';
     } catch (error) {
@@ -65,7 +75,7 @@ async function requestCaptionWithRetry(input: CaptionImageInput, providerConfig:
     }
 
     if (attempt === 0 && isTransientVisionProviderError(lastError)) {
-      await wait(900);
+      await wait(900, options.signal);
       continue;
     }
     break;
@@ -74,14 +84,18 @@ async function requestCaptionWithRetry(input: CaptionImageInput, providerConfig:
   throw new Error(normalizeVisionProviderError(lastError));
 }
 
-async function requestCaptionOnce(input: CaptionImageInput, providerConfig: NonNullable<ReturnType<typeof resolveProviderConfigForRole>['config']>) {
+async function requestCaptionOnce(
+  input: CaptionImageInput,
+  providerConfig: NonNullable<ReturnType<typeof resolveProviderConfigForRole>['config']>,
+  options: CaptionImageOptions,
+) {
   if (!import.meta.env.DEV && isTauriRuntime()) {
     const result = await requestConfiguredProviderVision(providerConfig, {
       prompt: buildVisionPrompt(input.filename, input.ocrText),
       imageBase64: input.imageBase64,
       mimeType: input.mimeType,
       maxTokens: 900,
-    });
+    }, { signal: options.signal });
     if (!result.ok) {
       throw new Error(result.error || '图片视觉描述失败。');
     }
@@ -98,6 +112,7 @@ async function requestCaptionOnce(input: CaptionImageInput, providerConfig: NonN
       ocrText: input.ocrText,
       providerConfig,
     }),
+    signal: options.signal,
   });
   const body = (await response.json().catch(() => ({}))) as { caption?: string; provider?: string; model?: string; error?: string };
   if (!response.ok || !body.caption) {
@@ -106,7 +121,8 @@ async function requestCaptionOnce(input: CaptionImageInput, providerConfig: NonN
   return { caption: body.caption, provider: body.provider, model: body.model };
 }
 
-export async function ocrImageForWiki(input: CaptionImageInput) {
+export async function ocrImageForWiki(input: CaptionImageInput, options: CaptionImageOptions = {}) {
+  throwIfAborted(options.signal);
   const settings = loadMultimodalSettings();
   if (!settings.enabled || !settings.includeOcrText) return '';
 
@@ -117,9 +133,15 @@ export async function ocrImageForWiki(input: CaptionImageInput) {
 
   let text = '';
   if (!import.meta.env.DEV && isTauriRuntime()) {
-    text = await runLocalImageOcr(input).catch(() => '');
+    text = await runLocalImageOcr(input, options).catch((error) => {
+      if (isAbortError(error)) throw error;
+      return '';
+    });
   } else {
-    text = await requestDevImageOcr(input).catch(() => '');
+    text = await requestDevImageOcr(input, options).catch((error) => {
+      if (isAbortError(error)) throw error;
+      return '';
+    });
   }
 
   const normalized = normalizeOcrText(text);
@@ -194,8 +216,22 @@ function normalizeVisionProviderError(message: string) {
   return message;
 }
 
-function wait(ms: number) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
+function wait(ms: number, signal?: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      signal?.removeEventListener('abort', abort);
+      resolve();
+    }, ms);
+    const abort = () => {
+      window.clearTimeout(timeout);
+      reject(signal?.reason ?? new DOMException('Aborted', 'AbortError'));
+    };
+    signal?.addEventListener('abort', abort, { once: true });
+  });
 }
 
 export function buildImageKnowledgeMarkdown(input: {
@@ -262,7 +298,7 @@ async function sha256Base64(value: string) {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
-async function requestDevImageOcr(input: CaptionImageInput) {
+async function requestDevImageOcr(input: CaptionImageInput, options: CaptionImageOptions) {
   const response = await fetch('/api/import/extract', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -271,12 +307,13 @@ async function requestDevImageOcr(input: CaptionImageInput) {
       mimeType: input.mimeType,
       dataBase64: input.imageBase64,
     }),
+    signal: options.signal,
   });
   const body = (await response.json().catch(() => ({}))) as { text?: string };
   return response.ok ? body.text ?? '' : '';
 }
 
-async function runLocalImageOcr(input: CaptionImageInput) {
+async function runLocalImageOcr(input: CaptionImageInput, options: CaptionImageOptions) {
   const { createWorker } = await import('tesseract.js');
   const worker = await createWorker(['chi_sim', 'eng'], 1, {
     workerPath: assetUrl('/tesseract/worker.min.js'),
@@ -284,14 +321,33 @@ async function runLocalImageOcr(input: CaptionImageInput) {
     langPath: assetUrl('/tessdata'),
     gzip: false,
   });
+  const abort = () => {
+    void worker.terminate();
+  };
+  options.signal?.addEventListener('abort', abort, { once: true });
   try {
+    throwIfAborted(options.signal);
     const result = await worker.recognize(`data:${input.mimeType};base64,${input.imageBase64}`);
+    throwIfAborted(options.signal);
     return result.data.text;
   } finally {
+    options.signal?.removeEventListener('abort', abort);
     await worker.terminate();
   }
 }
 
 function assetUrl(pathname: string) {
   return new URL(pathname, window.location.href).toString().replace(/\/$/, '');
+}
+
+function throwIfAborted(signal?: AbortSignal) {
+  if (!signal?.aborted) return;
+  throw signal.reason ?? new DOMException('Aborted', 'AbortError');
+}
+
+function isAbortError(error: unknown) {
+  return (
+    (error instanceof DOMException && error.name === 'AbortError') ||
+    (error instanceof Error && error.name === 'AbortError')
+  );
 }

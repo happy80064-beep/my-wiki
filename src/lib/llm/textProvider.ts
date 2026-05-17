@@ -5,6 +5,7 @@ export type LlmTextRequestInput = {
   systemPrompt: string;
   maxTokens: number;
   responseFormat?: 'json_object';
+  structuredOutput?: LlmStructuredOutputSpec;
 };
 
 export type LlmTextHttpRequest = {
@@ -12,6 +13,12 @@ export type LlmTextHttpRequest = {
   headers: Record<string, string>;
   body: Record<string, unknown>;
   responseApiMode: LlmProviderConfig['apiMode'];
+};
+
+export type LlmStructuredOutputSpec = {
+  name: string;
+  description: string;
+  schema: Record<string, unknown>;
 };
 
 const jsonContentType = 'application/json';
@@ -40,6 +47,16 @@ export function anthropicCompatibleRequiresBearerAuth(url: string) {
 
 export function buildOpenAiTextRequest(config: LlmProviderConfig, input: LlmTextRequestInput): LlmTextHttpRequest {
   const maxTokens = resolveTextMaxTokens(config, input);
+  const structuredTool = input.structuredOutput
+    ? {
+        type: 'function',
+        function: {
+          name: input.structuredOutput.name,
+          description: input.structuredOutput.description,
+          parameters: input.structuredOutput.schema,
+        },
+      }
+    : null;
   return {
     url: buildOpenAiChatCompletionsUrl(config.endpoint),
     responseApiMode: 'openai-compatible',
@@ -56,6 +73,12 @@ export function buildOpenAiTextRequest(config: LlmProviderConfig, input: LlmText
       stream: false,
       temperature: 0.2,
       max_tokens: maxTokens,
+      ...(structuredTool
+        ? {
+            tools: [structuredTool],
+            tool_choice: { type: 'function', function: { name: input.structuredOutput?.name } },
+          }
+        : {}),
       ...(input.responseFormat === 'json_object' ? { response_format: { type: 'json_object' } } : {}),
     },
   };
@@ -83,6 +106,18 @@ export function buildAnthropicTextRequest(config: LlmProviderConfig, input: LlmT
       stream: false,
       temperature: 0.2,
       max_tokens: maxTokens,
+      ...(input.structuredOutput
+        ? {
+            tools: [
+              {
+                name: input.structuredOutput.name,
+                description: input.structuredOutput.description,
+                input_schema: input.structuredOutput.schema,
+              },
+            ],
+            tool_choice: { type: 'tool', name: input.structuredOutput.name },
+          }
+        : {}),
     },
   };
 }
@@ -106,7 +141,8 @@ export function buildGeminiTextRequest(config: LlmProviderConfig, input: LlmText
       generationConfig: {
         temperature: 0.2,
         maxOutputTokens: maxTokens,
-        ...(input.responseFormat === 'json_object' ? { responseMimeType: 'application/json' } : {}),
+        ...(input.responseFormat === 'json_object' || input.structuredOutput ? { responseMimeType: 'application/json' } : {}),
+        ...(input.structuredOutput ? { responseSchema: input.structuredOutput.schema } : {}),
       },
     },
   };
@@ -120,7 +156,7 @@ export function buildProviderTextRequest(config: LlmProviderConfig, input: LlmTe
 }
 
 function resolveTextMaxTokens(config: LlmProviderConfig, input: LlmTextRequestInput) {
-  if (input.responseFormat === 'json_object' && isMiniMaxProvider(config.providerId)) {
+  if ((input.responseFormat === 'json_object' || input.structuredOutput) && isMiniMaxProvider(config.providerId)) {
     return Math.max(input.maxTokens, 8000);
   }
   return input.maxTokens;

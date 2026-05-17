@@ -1,6 +1,7 @@
 import { db } from '@/lib/db/schema';
 import { createEntry, createId, getClientId, updateEntry } from '@/lib/db';
 import { extractCaptureDraft } from '@/lib/ai/captureClient';
+import { loadProviderSettings, resolveProviderConfigForRole } from '@/lib/llm/providerSettings';
 import {
   buildImportedContent,
   extractImportBlobImages,
@@ -8,7 +9,7 @@ import {
   getImportFileKind,
   type ExtractedImportImage,
 } from '@/lib/import/fileText';
-import { createIngestJob, processIngestJob, type IngestExtractor } from '@/lib/ingest';
+import { createIngestJob, processIngestJob, type IngestExtractor, type IngestExtractorOptions } from '@/lib/ingest';
 import { loadMultimodalSettings } from '@/lib/multimodal/settings';
 import {
   buildImageKnowledgeMarkdown,
@@ -16,8 +17,17 @@ import {
   isVisionRefusalCaption,
   ocrImageForWiki,
 } from '@/lib/multimodal/visionCaption';
-import { syncIndexedDbKnowledgeToDefaultWorkspace } from '@/lib/workspace';
-import type { RawAsset, RawAssetKind } from '@/types';
+import {
+  assertSafeWorkspaceRelativePath,
+  canUseWorkspaceStorage,
+  createWorkspaceStorage,
+  getPersistedWorkspaceRoot,
+  getWorkspaceDefaultRoot,
+  initializeWorkspace,
+  joinWorkspacePath,
+  syncIndexedDbKnowledgeToDefaultWorkspace,
+} from '@/lib/workspace';
+import type { Entity, RawAsset, RawAssetKind } from '@/types';
 import {
   createRawAssetQueueRunId,
   isRawAssetQueueRunning,
@@ -25,6 +35,15 @@ import {
   publishRawAssetQueueStatus,
   type RawAssetQueueSnapshot,
 } from './queueStatus';
+import {
+  clearRawAssetWorkspaceQueueTasks,
+  getRawAssetWorkspaceQueueTask,
+  loadRawAssetWorkspaceQueue,
+  prepareRawAssetWorkspaceQueue,
+  updateRawAssetWorkspaceQueueTask,
+  updateRawAssetWorkspaceQueueTaskById,
+  type RawAssetWorkspaceQueueTaskStage,
+} from './workspaceQueue';
 
 export type RawAssetImportResult = {
   asset: RawAsset;
@@ -36,12 +55,31 @@ export type RawAssetCompileProgress = {
   label: string;
 };
 
+export type RawAssetWikiCompiler = (entityId: string, asset: RawAsset, options?: IngestExtractorOptions) => Promise<void>;
+
 export const RAW_ASSET_STALE_MS = 15 * 60 * 1000;
+const LONG_TEXT_PDF_IMAGE_ENRICHMENT_PAGE_LIMIT = 30;
+const rawAssetCancelMessage = 'User cancelled this raw asset ingest task.';
+const rawAssetWikiEntityRetryLimit = 3;
+const rawAssetWikiEntityRetryBaseDelayMs = 1500;
+const minUsefulWikiMarkdownLength = 700;
+
+let activeRawAssetQueueAbort:
+  | {
+      rawAssetId: string;
+      controller: AbortController;
+    }
+  | null = null;
 
 export type RawAssetQueueResult = {
   total: number;
   processed: number;
   failed: number;
+};
+
+export type WritableRawWorkspace = {
+  storage: ReturnType<typeof createWorkspaceStorage>;
+  rawSources: string;
 };
 
 export async function createRawAssetFromFile(file: File): Promise<RawAssetImportResult> {
@@ -50,20 +88,27 @@ export async function createRawAssetFromFile(file: File): Promise<RawAssetImport
     throw new Error(`${file.name} 的格式暂不支持。`);
   }
 
-  const sourcePath = getFileSourcePath(file);
   const buffer = await file.arrayBuffer();
   const contentHash = await hashBytes(new Uint8Array(buffer));
   const existing = await db.rawAssets.where('contentHash').equals(contentHash).first();
   if (existing) {
+    await persistRawAssetFileToWorkspace(existing).catch((error) =>
+      db.rawAssets.update(existing.id, {
+        error: `Raw source file copy failed: ${formatErrorMessage(error)}`,
+        updatedAt: Date.now(),
+      }),
+    );
     return { asset: existing, reused: true };
   }
 
+  const workspace = await getWritableRawWorkspace().catch(() => null);
+  const sourcePath = await resolveUniqueRawAssetFilename(getFileSourcePath(file), contentHash, workspace);
   const now = Date.now();
   const id = createId('raw');
   const source = kind === 'image' ? 'image' : 'file';
   const rawEntry = await createEntry({
     content: buildRawEntryContent({
-      filename: file.name,
+      filename: sourcePath,
       kind,
       size: file.size,
       contentHash,
@@ -95,7 +140,47 @@ export async function createRawAssetFromFile(file: File): Promise<RawAssetImport
   };
 
   await db.rawAssets.add(asset);
-  return { asset, reused: false };
+  try {
+    await persistRawAssetFileToWorkspace(asset, workspace);
+  } catch (error) {
+    await db.rawAssets.update(asset.id, {
+      error: `Raw source file copy failed: ${formatErrorMessage(error)}`,
+      updatedAt: Date.now(),
+    });
+  }
+  return { asset: (await db.rawAssets.get(asset.id)) ?? asset, reused: false };
+}
+
+export async function resolveUniqueRawAssetFilename(
+  originalPath: string,
+  contentHash: string,
+  workspace?: WritableRawWorkspace | null,
+): Promise<string> {
+  const safePath = sanitizeRawSourceRelativePath(originalPath);
+  const sameHash = await db.rawAssets.where('contentHash').equals(contentHash).first();
+  if (sameHash) return sameHash.filename;
+  if (!(await rawAssetFilenameExists(safePath, workspace))) return safePath;
+
+  const dated = withFilenameSuffix(safePath, `-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}`);
+  if (!(await rawAssetFilenameExists(dated, workspace))) return dated;
+
+  for (let index = 2; index <= 99; index += 1) {
+    const candidate = withFilenameSuffix(dated, `-${index}`);
+    if (!(await rawAssetFilenameExists(candidate, workspace))) return candidate;
+  }
+
+  return withFilenameSuffix(safePath, `-${Date.now()}`);
+}
+
+export async function persistRawAssetFileToWorkspace(asset: RawAsset, workspace?: WritableRawWorkspace | null) {
+  const targetWorkspace = workspace ?? (await getWritableRawWorkspace());
+  if (!targetWorkspace?.storage.writeBinaryFile) return undefined;
+
+  const relativePath = assertSafeWorkspaceRelativePath(sanitizeRawSourceRelativePath(asset.filename));
+  const targetPath = joinWorkspacePath(targetWorkspace.rawSources, relativePath);
+  const dataBase64 = asset.dataBase64 || bytesToBase64(new Uint8Array(await getUsableBlob(asset).arrayBuffer()));
+  await targetWorkspace.storage.writeBinaryFile(targetPath, dataBase64);
+  return targetPath;
 }
 
 export async function processNextRawAsset(
@@ -116,6 +201,8 @@ export async function processNextRawAsset(
 export async function processRawAssetQueue(input: {
   owner?: string;
   extractor?: IngestExtractor;
+  compileWiki?: boolean;
+  wikiCompiler?: RawAssetWikiCompiler;
   onStatus?: (snapshot: RawAssetQueueSnapshot) => void;
 } = {}): Promise<RawAssetQueueResult> {
   const owner = input.owner ?? 'queue';
@@ -138,16 +225,29 @@ export async function processRawAssetQueue(input: {
     input.onStatus?.(next);
   };
 
+  const recoveredInterrupted = await reconcileInterruptedRawAssetQueueRun().catch(() => 0);
   const recovered = await resetStaleRawAssets();
   const recoveredInvalidVision = await resetInvalidCompiledVisionAssets();
-  const candidateIds = await listRunnableRawAssetIds();
+  const candidateIds = await listRunnableRawAssetIds(Boolean(input.compileWiki));
+  let workspaceQueueWarning = '';
+  try {
+    const candidateAssets = (await db.rawAssets.bulkGet(candidateIds)).filter((asset): asset is RawAsset => Boolean(asset));
+    validateRawAssetQueueModelCapabilities(candidateAssets, {
+      requireWikiCompile: !input.extractor || (Boolean(input.compileWiki) && !input.wikiCompiler),
+    });
+    await prepareRawAssetWorkspaceQueue(candidateAssets, { owner, compileWiki: Boolean(input.compileWiki) });
+  } catch (error) {
+    const message = formatErrorMessage(error);
+    if (message.startsWith('模型能力检查失败')) throw error;
+    workspaceQueueWarning = `Workspace queue sync failed: ${message}`;
+  }
   const total = candidateIds.length;
   if (total === 0) {
     publish({
       stage: 'done',
       percent: 100,
       label: '没有待编译材料',
-      detail: buildRecoveredDetail(recovered, recoveredInvalidVision),
+      detail: joinQueueDetails(buildRecoveredDetail(recovered, recoveredInvalidVision, recoveredInterrupted), workspaceQueueWarning),
       total: 0,
       processed: 0,
       failed: 0,
@@ -160,7 +260,7 @@ export async function processRawAssetQueue(input: {
     stage: 'running',
     percent: 1,
     label: '开始编译 Raw Inbox',
-    detail: [`共 ${total} 个材料`, buildRecoveredDetail(recovered, recoveredInvalidVision)].filter(Boolean).join('，'),
+    detail: joinQueueDetails(`共 ${total} 个材料`, buildRecoveredDetail(recovered, recoveredInvalidVision, recoveredInterrupted), workspaceQueueWarning),
     total,
     processed: 0,
     failed: 0,
@@ -171,7 +271,28 @@ export async function processRawAssetQueue(input: {
   let failed = 0;
   const remainingIds = new Set(candidateIds);
   for (let index = 0; index < candidateIds.length; index += 1) {
-    const result = await processRawAsset(candidateIds[index], input.extractor, (current) => {
+    if (await isRawAssetQueueTaskCancelled(candidateIds[index])) {
+      const cancelled = await markRawAssetCancelled(candidateIds[index]);
+      processed += 1;
+      remainingIds.delete(candidateIds[index]);
+      publish({
+        stage: 'running',
+        percent: Math.min(98, Math.round((processed / total) * 100)),
+        label: `${cancelled?.filename ?? '原文件'} 已取消`,
+        detail: `本轮已完成 ${processed} / ${total} 个 · 剩余 ${Math.max(0, total - processed)} 个`,
+        currentAssetId: undefined,
+        queuedAssetIds: Array.from(remainingIds),
+        total,
+        processed,
+        failed,
+      });
+      continue;
+    }
+    await markWorkspaceQueueTaskProcessing(candidateIds[index], 'extracting').catch((error) => {
+      workspaceQueueWarning = `Workspace queue sync failed: ${formatErrorMessage(error)}`;
+    });
+    const abortController = createActiveRawAssetQueueAbortController(candidateIds[index]);
+    let result = await processRawAsset(candidateIds[index], input.extractor, (current) => {
       const percent = Math.min(96, Math.round(((processed + current.percent / 100) / total) * 100));
       publish({
         stage: 'running',
@@ -184,15 +305,45 @@ export async function processRawAssetQueue(input: {
         processed,
         failed,
       });
+    }, { signal: abortController?.signal });
+    if (!result) {
+      clearActiveRawAssetQueueAbortController(candidateIds[index], abortController);
+      break;
+    }
+    let finalResult = result;
+    if (await isRawAssetQueueTaskCancelled(candidateIds[index])) {
+      finalResult = (await markRawAssetCancelled(candidateIds[index])) ?? result;
+    } else if (input.compileWiki && ['compiled', 'skipped', 'wiki_failed'].includes(result.status)) {
+      await markWorkspaceQueueTaskProcessing(candidateIds[index], 'wiki').catch((error) => {
+        workspaceQueueWarning = `Workspace queue sync failed: ${formatErrorMessage(error)}`;
+      });
+      publish({
+        stage: 'running',
+        percent: Math.min(97, Math.round(((processed + 0.96) / total) * 100)),
+        label: `生成/更新 Wiki：${result.filename}`,
+        detail: '正在根据本文件影响到的知识条目生成/更新 Wiki 页面。',
+        currentAssetId: candidateIds[index],
+        queuedAssetIds: Array.from(remainingIds),
+        total,
+        processed,
+        failed,
+      });
+      finalResult = await compileRawAssetWikiPages(result.id, input.wikiCompiler, { signal: abortController?.signal });
+      if (await isRawAssetQueueTaskCancelled(candidateIds[index])) {
+        finalResult = (await markRawAssetCancelled(candidateIds[index])) ?? finalResult;
+      }
+    }
+    await markWorkspaceQueueTaskCompleted(finalResult).catch((error) => {
+      workspaceQueueWarning = `Workspace queue sync failed: ${formatErrorMessage(error)}`;
     });
-    if (!result) break;
     processed += 1;
-    if (result.status === 'failed') failed += 1;
+    if (finalResult.status === 'failed' || finalResult.status === 'wiki_failed') failed += 1;
+    result = finalResult.status === 'wiki_failed' ? ({ ...finalResult, status: 'failed' } as RawAsset) : finalResult;
     remainingIds.delete(candidateIds[index]);
     publish({
       stage: 'running',
       percent: Math.min(98, Math.round((processed / total) * 100)),
-      label: result.status === 'failed' ? `${result.filename} 编译失败` : `${result.filename} 已入库`,
+      label: result.status === 'failed' ? `${result.filename} 编译失败` : result.status === 'cancelled' ? `${result.filename} 已取消` : `${result.filename} 已入库`,
       detail: `本轮已完成 ${processed} / ${total} 个 · 剩余 ${Math.max(0, total - processed)} 个`,
       currentAssetId: undefined,
       queuedAssetIds: Array.from(remainingIds),
@@ -200,6 +351,7 @@ export async function processRawAssetQueue(input: {
       processed,
       failed,
     });
+    clearActiveRawAssetQueueAbortController(candidateIds[index], abortController);
   }
 
   const finalStage = failed > 0 ? 'failed' : 'done';
@@ -207,7 +359,7 @@ export async function processRawAssetQueue(input: {
     stage: finalStage,
     percent: 100,
     label: finalStage === 'failed' ? '部分材料未编译成功' : '队列编译完成',
-    detail: `本轮处理 ${processed} / ${total} 个材料${failed > 0 ? `，失败 ${failed} 个` : ''}`,
+    detail: joinQueueDetails(`本轮处理 ${processed} / ${total} 个材料${failed > 0 ? `，失败 ${failed} 个` : ''}`, workspaceQueueWarning),
     currentAssetId: undefined,
     queuedAssetIds: [],
     total,
@@ -218,11 +370,72 @@ export async function processRawAssetQueue(input: {
   return { total, processed, failed };
 }
 
+export async function cancelRawAssetQueueTask(taskId: string): Promise<boolean> {
+  const task = await getRawAssetWorkspaceQueueTask(taskId);
+  if (!task) return false;
+  if (task.status !== 'pending' && task.status !== 'processing') return false;
+
+  abortActiveRawAssetQueueTask(task.rawAssetId);
+  const now = Date.now();
+  await db.rawAssets.update(task.rawAssetId, {
+    status: 'cancelled',
+    error: '用户已取消该原文件入库任务。',
+    updatedAt: now,
+  });
+  await updateRawAssetWorkspaceQueueTaskById(taskId, (draft) => ({
+    ...draft,
+    status: 'cancelled',
+    error: '用户已取消该原文件入库任务。',
+    completedAt: now,
+  }));
+  return true;
+}
+
+export async function retryRawAssetQueueTask(taskId: string): Promise<boolean> {
+  const task = await getRawAssetWorkspaceQueueTask(taskId);
+  if (!task) return false;
+  if (task.status !== 'failed' && task.status !== 'cancelled') return false;
+  const asset = await db.rawAssets.get(task.rawAssetId);
+  if (!asset) return false;
+
+  const now = Date.now();
+  await db.rawAssets.update(asset.id, {
+    status: task.stage === 'wiki' && task.compileWiki && asset.entryId ? 'wiki_failed' : 'failed',
+    error: undefined,
+    updatedAt: now,
+  });
+  await updateRawAssetWorkspaceQueueTaskById(taskId, (draft) => ({
+    ...draft,
+    status: 'pending',
+    stage: 'queued',
+    error: undefined,
+    startedAt: undefined,
+    completedAt: undefined,
+  }));
+  return true;
+}
+
+export async function cancelActiveRawAssetQueueTasks(): Promise<number> {
+  const queue = await loadRawAssetWorkspaceQueue();
+  const cancellable = queue?.tasks.filter((task) => task.status === 'pending' || task.status === 'processing') ?? [];
+  let cancelled = 0;
+  for (const task of cancellable) {
+    if (await cancelRawAssetQueueTask(task.id)) cancelled += 1;
+  }
+  return cancelled;
+}
+
+export async function clearTerminalRawAssetQueueTasks(): Promise<number> {
+  return clearRawAssetWorkspaceQueueTasks(['done', 'cancelled']);
+}
+
 export async function processRawAsset(
   id: string,
   extractor?: IngestExtractor,
   onProgress?: (progress: RawAssetCompileProgress) => void,
+  options: IngestExtractorOptions = {},
 ) {
+  throwIfAborted(options.signal);
   const asset = await db.rawAssets.get(id);
   if (!asset || !['raw', 'failed'].includes(asset.status)) return asset;
 
@@ -235,6 +448,7 @@ export async function processRawAsset(
   onProgress?.({ percent: 12, label: `提取 ${asset.filename}` });
 
   try {
+    throwIfAborted(options.signal);
     const extractedText = await extractImportBlobText(
       {
         blob: getUsableBlob(asset),
@@ -243,10 +457,14 @@ export async function processRawAsset(
         kind: asset.kind as RawAssetKind,
       },
       (progress) => onProgress?.({ percent: Math.min(58, 12 + Math.round(progress.percent * 0.46)), label: progress.label }),
+      { signal: options.signal },
     );
+    throwIfAborted(options.signal);
     const enrichedText = await enrichExtractedTextWithMultimodalContext(asset, extractedText, getUsableBlob(asset), (progress) =>
       onProgress?.({ percent: Math.min(60, 58 + Math.round(progress * 2)), label: `理解图片 ${asset.filename}` }),
+      options,
     );
+    throwIfAborted(options.signal);
     const content = buildImportedContent({
       filename: asset.filename,
       kind: asset.kind,
@@ -276,7 +494,8 @@ export async function processRawAsset(
       filename: asset.filename,
       targetEntryId: asset.entryId,
     });
-    const processed = await processIngestJob(job.id, extractor ?? extractRawAssetCaptureDraft);
+    const processed = await processIngestJob(job.id, extractor ?? extractRawAssetCaptureDraft, { signal: options.signal });
+    throwIfAborted(options.signal);
     const completedAt = Date.now();
 
     const compiledHasKnowledge = processed?.status === 'done' ? await entryHasDerivedKnowledge(processed.entryId) : false;
@@ -304,6 +523,14 @@ export async function processRawAsset(
     }
     onProgress?.({ percent: 100, label: finalStatus === 'failed' ? `${asset.filename} 编译失败` : `${asset.filename} 已编译` });
   } catch (error) {
+    if (isAbortError(error)) {
+      await db.rawAssets.update(asset.id, {
+        status: 'cancelled',
+        error: rawAssetCancelMessage,
+        updatedAt: Date.now(),
+      });
+      return db.rawAssets.get(asset.id);
+    }
     await db.rawAssets.update(asset.id, {
       status: 'failed',
       error: error instanceof Error ? error.message : '编译失败。',
@@ -314,10 +541,142 @@ export async function processRawAsset(
   return db.rawAssets.get(asset.id);
 }
 
+export async function compileRawAssetWikiPages(
+  id: string,
+  wikiCompiler: RawAssetWikiCompiler = defaultRawAssetWikiCompiler,
+  options: IngestExtractorOptions = {},
+) {
+  throwIfAborted(options.signal);
+  const asset = await db.rawAssets.get(id);
+  if (!asset) throw new Error('Raw asset not found.');
+  if (!asset.entryId) return asset;
+
+  const entry = await db.entries.get(asset.entryId);
+  const entityIds = Array.from(new Set(entry?.derivedEntities ?? []));
+  if (entityIds.length === 0) return asset;
+
+  await db.rawAssets.update(asset.id, {
+    status: 'wiki_compiling',
+    error: undefined,
+    updatedAt: Date.now(),
+  });
+
+  try {
+    const failures: string[] = [];
+    if (wikiCompiler === defaultRawAssetWikiCompiler) {
+      const pendingEntityIds: string[] = [];
+      const entities = (await db.entities.bulkGet(entityIds)).filter((entity): entity is Entity => Boolean(entity));
+      for (const entity of entities) {
+        if (!hasUsefulCompiledWikiMarkdown(entity)) pendingEntityIds.push(entity.id);
+      }
+
+      if (pendingEntityIds.length > 0) {
+        const { compileRawAssetWikiPagesFromSource } = await import('./sourceWikiCompiler');
+        const batchResult = await compileRawAssetWikiPagesFromSource(asset, pendingEntityIds, { signal: options.signal });
+        if (batchResult.missingEntityIds.length > 0) {
+          const missing = (await db.entities.bulkGet(batchResult.missingEntityIds))
+            .map((entity) => entity?.title)
+            .filter(Boolean)
+            .slice(0, 5)
+            .join('、');
+          throw new Error(`Wiki batch generation missing pages: ${missing || batchResult.missingEntityIds.length}`);
+        }
+      }
+    } else {
+      for (const entityId of entityIds) {
+        throwIfAborted(options.signal);
+        const entity = await db.entities.get(entityId);
+        if (entity && hasUsefulCompiledWikiMarkdown(entity)) continue;
+
+        try {
+          await compileRawAssetWikiEntityWithRetry(entityId, asset, wikiCompiler, options);
+        } catch (error) {
+          if (isAbortError(error)) throw error;
+          failures.push(`${entity?.title ?? entityId}: ${formatErrorMessage(error)}`);
+          if (isLikelyTransportWikiCompileError(error)) break;
+        }
+      }
+    }
+    throwIfAborted(options.signal);
+    if (failures.length > 0) {
+      throw new Error(failures.slice(0, 3).join('；'));
+    }
+    await db.rawAssets.update(asset.id, {
+      status: 'compiled',
+      compiledAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    await syncIndexedDbKnowledgeToDefaultWorkspace().catch(() => undefined);
+  } catch (error) {
+    if (isAbortError(error)) {
+      await db.rawAssets.update(asset.id, {
+        status: 'cancelled',
+        error: rawAssetCancelMessage,
+        updatedAt: Date.now(),
+      });
+      return (await db.rawAssets.get(asset.id)) ?? asset;
+    }
+    await db.rawAssets.update(asset.id, {
+      status: 'wiki_failed',
+      error: `Wiki generation failed: ${formatErrorMessage(error)}`,
+      updatedAt: Date.now(),
+    });
+  }
+
+  return (await db.rawAssets.get(asset.id)) ?? asset;
+}
+
+async function compileRawAssetWikiEntityWithRetry(
+  entityId: string,
+  asset: RawAsset,
+  wikiCompiler: RawAssetWikiCompiler,
+  options: IngestExtractorOptions,
+) {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= rawAssetWikiEntityRetryLimit; attempt += 1) {
+    throwIfAborted(options.signal);
+    try {
+      await wikiCompiler(entityId, asset, { signal: options.signal });
+      return;
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      lastError = error;
+      if (attempt >= rawAssetWikiEntityRetryLimit || !isRetryableWikiCompileError(error)) break;
+      await sleep(rawAssetWikiEntityRetryBaseDelayMs * attempt, options.signal);
+    }
+  }
+  throw lastError;
+}
+
+function hasUsefulCompiledWikiMarkdown(entity: Entity) {
+  const markdown = entity.wikiMarkdown?.trim() ?? '';
+  if (!entity.wikiCompiledAt || markdown.length < minUsefulWikiMarkdownLength) return false;
+  if (!markdown.startsWith('---') || !/^#\s+/m.test(markdown)) return false;
+  const sectionCount = markdown.match(/^##\s+/gm)?.length ?? 0;
+  return sectionCount >= 3;
+}
+
+function isRetryableWikiCompileError(error: unknown) {
+  const message = formatErrorMessage(error).toLowerCase();
+  return /429|rate limit|too many requests|timeout|timed out|temporar|try again|fetch failed|network|error sending request|502|503|504|valid file block|did not return/.test(
+    message,
+  );
+}
+
+function isLikelyTransportWikiCompileError(error: unknown) {
+  const message = formatErrorMessage(error).toLowerCase();
+  return /fetch failed|network|error sending request|timeout|timed out|502|503|504/.test(message);
+}
+
 async function entryHasDerivedKnowledge(entryId?: string) {
   if (!entryId) return false;
   const entry = await db.entries.get(entryId);
   return Boolean(entry && (entry.derivedEntities?.length ?? 0) > 0);
+}
+
+async function defaultRawAssetWikiCompiler(entityId: string, _asset: RawAsset, options: IngestExtractorOptions = {}) {
+  const { recompileBrowserEntityWikiPage } = await import('@/lib/wiki/browserRecompile');
+  await recompileBrowserEntityWikiPage(entityId, { signal: options.signal });
 }
 
 async function enrichExtractedTextWithMultimodalContext(
@@ -325,35 +684,39 @@ async function enrichExtractedTextWithMultimodalContext(
   extractedText: string,
   blob: Blob,
   onProgress?: (progress: number) => void,
+  options: IngestExtractorOptions = {},
 ) {
+  throwIfAborted(options.signal);
   const settings = loadMultimodalSettings();
   if (!settings.enabled || !settings.captionStandaloneImages) return extractedText;
 
   if (asset.kind !== 'image') {
-    return enrichDocumentTextWithEmbeddedImages(asset, extractedText, blob, onProgress);
+    return enrichDocumentTextWithEmbeddedImages(asset, extractedText, blob, onProgress, options);
   }
 
   if (!asset.dataBase64) return extractedText;
   onProgress?.(0.2);
   let ocrText: string | undefined;
   try {
-    ocrText =
-      settings.includeOcrText
-        ? extractedText.trim() ||
-          (await ocrImageForWiki({
+    ocrText = settings.includeOcrText
+      ? extractedText.trim() ||
+        (await ocrImageForWiki(
+          {
             imageBase64: asset.dataBase64,
             mimeType: asset.mimeType || 'image/png',
             filename: asset.filename,
             contentHash: asset.contentHash,
-          }))
-        : undefined;
+          },
+          { signal: options.signal },
+        ))
+      : undefined;
     const caption = await captionImageForWiki({
       imageBase64: asset.dataBase64,
       mimeType: asset.mimeType || 'image/png',
       filename: asset.filename,
       contentHash: asset.contentHash,
       ocrText,
-    });
+    }, { signal: options.signal });
     onProgress?.(1);
     if (!caption) return extractedText;
     return buildImageKnowledgeMarkdown({
@@ -394,10 +757,19 @@ async function enrichDocumentTextWithEmbeddedImages(
   extractedText: string,
   blob: Blob,
   onProgress?: (progress: number) => void,
+  options: IngestExtractorOptions = {},
 ) {
+  throwIfAborted(options.signal);
   if (!['word', 'pdf', 'presentation'].includes(asset.kind)) return extractedText;
   const settings = loadMultimodalSettings();
   const includePdfPageScreenshots = asset.kind === 'pdf' && shouldCapturePdfPageScreenshots(extractedText);
+  if (
+    asset.kind === 'pdf' &&
+    !includePdfPageScreenshots &&
+    inferPdfPageCount(extractedText) > LONG_TEXT_PDF_IMAGE_ENRICHMENT_PAGE_LIMIT
+  ) {
+    return extractedText;
+  }
   let images: ExtractedImportImage[] = [];
   try {
     images = await extractImportBlobImages(
@@ -411,6 +783,7 @@ async function enrichDocumentTextWithEmbeddedImages(
         includePdfPageScreenshots,
         maxImages: 8,
         maxPdfPages: 4,
+        signal: options.signal,
       },
     );
   } catch {
@@ -421,9 +794,10 @@ async function enrichDocumentTextWithEmbeddedImages(
 
   const sections: string[] = [];
   for (let index = 0; index < images.length; index += 1) {
+    throwIfAborted(options.signal);
     const image = images[index];
     onProgress?.((index + 0.2) / Math.max(images.length, 1));
-    const ocrText = settings.includeOcrText ? await ocrImageForWiki(image) : '';
+    const ocrText = settings.includeOcrText ? await ocrImageForWiki(image, { signal: options.signal }) : '';
     let caption = '';
     try {
       caption =
@@ -433,10 +807,11 @@ async function enrichDocumentTextWithEmbeddedImages(
           filename: image.filename,
           contentHash: image.contentHash,
           ocrText,
-        })) ?? '';
+        }, { signal: options.signal })) ?? '';
     } catch (error) {
       caption = `图片描述生成失败：${error instanceof Error ? error.message : '未知错误'}`;
     }
+    throwIfAborted(options.signal);
     sections.push(buildEmbeddedImageMarkdown(asset, image, caption, ocrText));
   }
   onProgress?.(1);
@@ -486,6 +861,13 @@ export function shouldCapturePdfPageScreenshots(extractedText: string) {
   return semanticText.length < 80;
 }
 
+function inferPdfPageCount(extractedText: string) {
+  const counts = [...extractedText.matchAll(/--\s*\d+\s+of\s+(\d+)\s*--/gi)]
+    .map((match) => Number(match[1]))
+    .filter((value) => Number.isFinite(value));
+  return counts.length ? Math.max(...counts) : 0;
+}
+
 function sanitizeMarkdownAlt(value: string) {
   return value.replace(/[\r\n]+/g, ' ').replace(/]/g, ')').trim().slice(0, 160);
 }
@@ -494,14 +876,14 @@ export async function resetStaleRawAssets(now = Date.now(), staleMs = RAW_ASSET_
   const staleBefore = now - staleMs;
   const staleAssets = await db.rawAssets
     .where('status')
-    .anyOf(['extracting', 'compiling'])
+    .anyOf(['extracting', 'compiling', 'wiki_compiling'])
     .filter((asset) => asset.updatedAt < staleBefore)
     .toArray();
 
   await Promise.all(
     staleAssets.map((asset) =>
       db.rawAssets.update(asset.id, {
-        status: 'failed',
+        status: asset.status === 'wiki_compiling' ? 'wiki_failed' : 'failed',
         error: '上次编译未正常结束，已恢复为可重试状态。',
         updatedAt: now,
       }),
@@ -537,19 +919,189 @@ export async function resetInvalidCompiledVisionAssets(now = Date.now()) {
   return recovered;
 }
 
+export async function reconcileInterruptedRawAssetQueueRun(now = Date.now()) {
+  if (isRawAssetQueueRunning()) return 0;
+
+  const queue = await loadRawAssetWorkspaceQueue();
+  const processingTasks = queue?.tasks.filter((task) => task.status === 'processing') ?? [];
+  if (processingTasks.length === 0) return 0;
+
+  let recovered = 0;
+  for (const task of processingTasks) {
+    const asset = await db.rawAssets.get(task.rawAssetId);
+    if (!asset) {
+      await updateRawAssetWorkspaceQueueTask(task.rawAssetId, (draft) => ({
+        ...draft,
+        status: 'failed',
+        error: 'Raw asset record is missing.',
+        completedAt: now,
+      })).catch(() => undefined);
+      continue;
+    }
+
+    if (asset.status === 'compiled' || asset.status === 'skipped') {
+      await markWorkspaceQueueTaskCompleted(asset).catch(() => undefined);
+      continue;
+    }
+
+    if (asset.status === 'wiki_failed' || asset.status === 'failed' || asset.status === 'raw' || asset.status === 'cancelled') {
+      await updateRawAssetWorkspaceQueueTask(asset.id, (draft) => ({
+        ...draft,
+        status: asset.status === 'raw' ? 'pending' : asset.status === 'cancelled' ? 'cancelled' : 'failed',
+        stage: asset.status === 'wiki_failed' ? 'wiki' : draft.stage,
+        error: asset.error,
+        completedAt: asset.status === 'raw' ? undefined : now,
+      })).catch(() => undefined);
+      continue;
+    }
+
+    if (asset.status !== 'extracting' && asset.status !== 'compiling' && asset.status !== 'wiki_compiling') continue;
+
+    const wikiStage = asset.status === 'wiki_compiling';
+    await db.rawAssets.update(asset.id, {
+      status: wikiStage ? 'wiki_failed' : 'failed',
+      error: '页面刷新、浏览器关闭或运行上下文中断，已恢复为可重试状态。',
+      updatedAt: now,
+    });
+    const updated = (await db.rawAssets.get(asset.id)) ?? asset;
+    await markWorkspaceQueueTaskCompleted(updated).catch(() => undefined);
+    recovered += 1;
+  }
+
+  return recovered;
+}
+
 export async function listRecentRawAssets(limit = 12) {
   return db.rawAssets.orderBy('createdAt').reverse().limit(limit).toArray();
 }
 
-async function listRunnableRawAssetIds() {
-  const assets = await db.rawAssets.where('status').anyOf(['raw', 'failed']).toArray();
-  return assets.sort((left, right) => left.createdAt - right.createdAt).map((asset) => asset.id);
+export function validateRawAssetQueueModelCapabilities(
+  assets: RawAsset[],
+  input: { requireWikiCompile: boolean },
+) {
+  const settings = loadProviderSettings();
+  const errors: string[] = [];
+
+  if (input.requireWikiCompile) {
+    const wikiResolution = resolveProviderConfigForRole(settings, 'wiki-compile');
+    if (wikiResolution.error) errors.push(wikiResolution.error);
+    else if (!wikiResolution.config) errors.push('请先在设置里启用默认 LLM，或为“Wiki 编译模型”选择支持文本能力的模型。');
+  }
+
+  const multimodalSettings = loadMultimodalSettings();
+  const needsVision = multimodalSettings.enabled && multimodalSettings.captionStandaloneImages && assets.some(shouldPreflightVisionForAsset);
+  if (needsVision) {
+    const visionResolution = resolveProviderConfigForRole(settings, 'vision');
+    if (visionResolution.error) errors.push(visionResolution.error);
+    else if (!visionResolution.config) errors.push('图片/多模态导入需要“图片/多模态模型”，请在设置里选择支持 Vision 的模型。');
+  }
+
+  if (errors.length > 0) {
+    throw new Error(`模型能力检查失败：${Array.from(new Set(errors)).join(' ')}`);
+  }
 }
 
-function buildRecoveredDetail(staleCount: number, invalidVisionCount: number) {
+async function listRunnableRawAssetIds(includeWikiFailed = false) {
+  const statuses = includeWikiFailed ? ['raw', 'failed', 'wiki_failed', 'compiled', 'skipped'] : ['raw', 'failed'];
+  const assets = await db.rawAssets.where('status').anyOf(statuses).toArray();
+  const sorted = assets.sort((left, right) => left.createdAt - right.createdAt);
+  if (!includeWikiFailed) return sorted.map((asset) => asset.id);
+
+  const runnable: string[] = [];
+  for (const asset of sorted) {
+    if (asset.status === 'compiled' || asset.status === 'skipped') {
+      if (await rawAssetNeedsWikiCompile(asset)) runnable.push(asset.id);
+      continue;
+    }
+    runnable.push(asset.id);
+  }
+  return runnable;
+}
+
+function shouldPreflightVisionForAsset(asset: RawAsset) {
+  return asset.kind === 'image';
+}
+
+async function rawAssetNeedsWikiCompile(asset: RawAsset) {
+  if (!asset.entryId) return false;
+  const entry = await db.entries.get(asset.entryId);
+  const entityIds = Array.from(new Set(entry?.derivedEntities ?? []));
+  if (!entityIds.length) return false;
+  const entities = (await db.entities.bulkGet(entityIds)).filter((entity): entity is Entity => Boolean(entity));
+  return entities.some((entity) => !hasUsefulCompiledWikiMarkdown(entity));
+}
+
+async function markWorkspaceQueueTaskProcessing(rawAssetId: string, stage: RawAssetWorkspaceQueueTaskStage) {
+  await updateRawAssetWorkspaceQueueTask(rawAssetId, (task) => ({
+    ...task,
+    status: 'processing',
+    stage,
+    startedAt: task.startedAt ?? Date.now(),
+    completedAt: undefined,
+    error: undefined,
+  }));
+}
+
+async function markWorkspaceQueueTaskCompleted(asset: RawAsset) {
+  const failed = asset.status === 'failed' || asset.status === 'wiki_failed';
+  const cancelled = asset.status === 'cancelled';
+  await updateRawAssetWorkspaceQueueTask(asset.id, (task) => ({
+    ...task,
+    status: cancelled ? 'cancelled' : failed ? 'failed' : 'done',
+    stage: asset.status === 'wiki_failed' || asset.status === 'wiki_compiling' ? 'wiki' : task.stage,
+    retryCount: failed ? task.retryCount + 1 : task.retryCount,
+    completedAt: Date.now(),
+    error: failed || cancelled ? asset.error || 'Raw asset processing failed.' : undefined,
+  }));
+}
+
+async function isRawAssetQueueTaskCancelled(rawAssetId: string) {
+  const queue = await loadRawAssetWorkspaceQueue();
+  return Boolean(queue?.tasks.some((task) => task.rawAssetId === rawAssetId && task.status === 'cancelled'));
+}
+
+async function markRawAssetCancelled(rawAssetId: string) {
+  const asset = await db.rawAssets.get(rawAssetId);
+  if (!asset) return null;
+  const now = Date.now();
+  await db.rawAssets.update(asset.id, {
+    status: 'cancelled',
+    error: '用户已取消该原文件入库任务。',
+    updatedAt: now,
+  });
+  const updated = (await db.rawAssets.get(asset.id)) ?? ({ ...asset, status: 'cancelled', updatedAt: now } as RawAsset);
+  await markWorkspaceQueueTaskCompleted(updated);
+  return updated;
+}
+
+function createActiveRawAssetQueueAbortController(rawAssetId: string) {
+  if (typeof AbortController === 'undefined') return undefined;
+  const controller = new AbortController();
+  activeRawAssetQueueAbort = { rawAssetId, controller };
+  return controller;
+}
+
+function clearActiveRawAssetQueueAbortController(rawAssetId: string, controller?: AbortController) {
+  if (!controller) return;
+  if (activeRawAssetQueueAbort?.rawAssetId === rawAssetId && activeRawAssetQueueAbort.controller === controller) {
+    activeRawAssetQueueAbort = null;
+  }
+}
+
+function abortActiveRawAssetQueueTask(rawAssetId: string) {
+  if (activeRawAssetQueueAbort?.rawAssetId !== rawAssetId) return;
+  activeRawAssetQueueAbort.controller.abort(new DOMException(rawAssetCancelMessage, 'AbortError'));
+}
+
+function joinQueueDetails(...parts: Array<string | undefined>) {
+  return parts.filter(Boolean).join('，');
+}
+
+function buildRecoveredDetail(staleCount: number, invalidVisionCount: number, interruptedCount = 0) {
   return [
     staleCount > 0 ? `已恢复 ${staleCount} 个旧任务` : '',
     invalidVisionCount > 0 ? `已恢复 ${invalidVisionCount} 个无效图片编译结果` : '',
+    interruptedCount > 0 ? `已恢复 ${interruptedCount} 个中断任务` : '',
   ]
     .filter(Boolean)
     .join('，') || undefined;
@@ -588,8 +1140,8 @@ export function buildCaptureInputExcerpt(content: string, maxChars = 32000) {
     .slice(0, maxChars + 220);
 }
 
-async function extractRawAssetCaptureDraft(content: string) {
-  const result = await extractCaptureDraft(content);
+async function extractRawAssetCaptureDraft(content: string, options: IngestExtractorOptions = {}) {
+  const result = await extractCaptureDraft(content, { signal: options.signal });
   if (result.fallbackFrom) {
     throw new Error(`Wiki compile did not return a normal structured result: ${result.fallbackFrom}`);
   }
@@ -658,6 +1210,88 @@ function base64ToBytes(value: string) {
     bytes[index] = binary.charCodeAt(index);
   }
   return bytes;
+}
+
+async function getWritableRawWorkspace(): Promise<WritableRawWorkspace | null> {
+  if (!canUseWorkspaceStorage()) return null;
+  const storage = createWorkspaceStorage();
+  if (!storage.writeBinaryFile) return null;
+  const root = getPersistedWorkspaceRoot() ?? (await getWorkspaceDefaultRoot());
+  const initialized = await initializeWorkspace(storage, root, { outputLanguage: 'zh-CN' });
+  return {
+    storage,
+    rawSources: initialized.layout.rawSources,
+  };
+}
+
+async function rawAssetFilenameExists(relativePath: string, workspace?: WritableRawWorkspace | null) {
+  const normalized = sanitizeRawSourceRelativePath(relativePath);
+  const existing = await db.rawAssets.where('filename').equals(normalized).first();
+  if (existing) return true;
+  if (!workspace) return false;
+  return workspace.storage.exists(joinWorkspacePath(workspace.rawSources, normalized)).catch(() => false);
+}
+
+function sanitizeRawSourceRelativePath(value: string) {
+  const normalized = value.replace(/\\/g, '/').trim();
+  const parts = normalized
+    .split('/')
+    .map((part) => sanitizeRawSourceSegment(part))
+    .filter(Boolean);
+  return parts.join('/') || 'unknown';
+}
+
+function sanitizeRawSourceSegment(value: string) {
+  return value
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, '-')
+    .replace(/\s+/g, ' ')
+    .replace(/^\.+$/g, '')
+    .replace(/\.+$/g, '')
+    .trim()
+    .slice(0, 120);
+}
+
+function withFilenameSuffix(relativePath: string, suffix: string) {
+  const slash = relativePath.lastIndexOf('/');
+  const directory = slash >= 0 ? `${relativePath.slice(0, slash + 1)}` : '';
+  const filename = slash >= 0 ? relativePath.slice(slash + 1) : relativePath;
+  const dot = filename.lastIndexOf('.');
+  if (dot <= 0) return `${directory}${filename}${suffix}`;
+  return `${directory}${filename.slice(0, dot)}${suffix}${filename.slice(dot)}`;
+}
+
+function formatErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error || 'unknown error');
+}
+
+function throwIfAborted(signal?: AbortSignal) {
+  if (!signal?.aborted) return;
+  throw signal.reason ?? new DOMException('Aborted', 'AbortError');
+}
+
+function isAbortError(error: unknown) {
+  return (
+    (error instanceof DOMException && error.name === 'AbortError') ||
+    (error instanceof Error && error.name === 'AbortError')
+  );
+}
+
+function sleep(ms: number, signal?: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+    const timeout = window.setTimeout(resolve, ms);
+    signal?.addEventListener(
+      'abort',
+      () => {
+        window.clearTimeout(timeout);
+        reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+      },
+      { once: true },
+    );
+  });
 }
 
 function buildRawEntryContent(input: {

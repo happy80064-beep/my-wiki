@@ -1,5 +1,14 @@
+import { useEffect } from 'react';
 import { Brain } from 'lucide-react';
 import { NavLink, Outlet } from 'react-router';
+import { UpdateBanner } from '@/components/update/UpdateBanner';
+import { checkForUpdates, getAppUpdateConfig, UPDATE_CHECK_CACHE_MS } from '@/lib/update/updateCheck';
+import {
+  hasAvailableUpdate,
+  loadUpdateCheckState,
+  saveUpdateCheckState,
+  useUpdateStore,
+} from '@/lib/update/updateStore';
 
 const navItems = [
   { to: '/', label: '总览' },
@@ -13,6 +22,19 @@ const navItems = [
 ];
 
 export function App() {
+  const updateAvailable = useUpdateStore((state) => hasAvailableUpdate(state));
+
+  useEffect(() => {
+    const persisted = loadUpdateCheckState();
+    useUpdateStore.getState().hydrate(persisted);
+
+    const timer = window.setTimeout(() => {
+      void runStartupUpdateCheck();
+    }, 1500);
+
+    return () => window.clearTimeout(timer);
+  }, []);
+
   return (
     <main className="flex h-screen flex-col overflow-hidden bg-[#f7f7f5] text-[#222222]">
       <header className="shrink-0 border-b border-[#e5e5e4] bg-white">
@@ -39,16 +61,40 @@ export function App() {
                   ].join(' ')
                 }
               >
-                {item.label}
+                <span className="relative inline-flex items-center">
+                  {item.label}
+                  {item.to === '/settings' && updateAvailable ? (
+                    <span className="absolute -right-1.5 -top-1.5 size-2 rounded-full bg-[#ef4444]" aria-label="有新版本可用" />
+                  ) : null}
+                </span>
               </NavLink>
             ))}
           </nav>
         </div>
       </header>
 
+      <UpdateBanner />
+
       <div className="min-h-0 flex-1 overflow-auto">
         <Outlet />
       </div>
     </main>
   );
+}
+
+async function runStartupUpdateCheck() {
+  const state = useUpdateStore.getState();
+  const config = getAppUpdateConfig();
+  if (!state.enabled || state.checking || !config.repo.trim()) return;
+  if (state.lastCheckedAt && Date.now() - state.lastCheckedAt < UPDATE_CHECK_CACHE_MS) return;
+
+  useUpdateStore.getState().setChecking(true);
+  const result = await checkForUpdates(config);
+  const now = Date.now();
+  useUpdateStore.getState().setResult(result, now);
+  saveUpdateCheckState({
+    enabled: useUpdateStore.getState().enabled,
+    lastCheckedAt: now,
+    dismissedVersion: useUpdateStore.getState().dismissedVersion,
+  });
 }

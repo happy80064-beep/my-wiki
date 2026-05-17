@@ -5,10 +5,20 @@ import {
   type WikiTargetOptions,
   type WikiTargetSpec,
 } from './schemaRules';
+import { unwrapWikiReference } from './references';
 
 export type WikiMarkdownCompileInput = {
   entity: Entity;
   sourceEntries: Entry[];
+  relatedEntities?: Entity[];
+  relationships?: Relationship[];
+  contextMap?: WikiCompileContextMap;
+  today?: string;
+};
+
+export type WikiMarkdownBatchCompileInput = {
+  sourceEntry: Entry;
+  entities: Entity[];
   relatedEntities?: Entity[];
   relationships?: Relationship[];
   contextMap?: WikiCompileContextMap;
@@ -29,6 +39,13 @@ export type WikiMarkdownCompileResult = {
   tags: string[];
   path?: string;
   warnings?: string[];
+};
+
+export type WikiMarkdownBatchCompileResult = {
+  results: Array<WikiMarkdownCompileResult & { entityId: string }>;
+  missingEntityIds: string[];
+  unmatchedPaths: string[];
+  warnings: string[];
 };
 
 export type WikiMarkdownCompileNormalizeOptions = {
@@ -79,6 +96,7 @@ export function buildWikiMarkdownCompilePrompt(input: WikiMarkdownCompileInput) 
     .slice(0, 24)
     .map((entity) => `- ${entity.title}（${entity.type}）：${entity.summary}`)
     .join('\n');
+  const allowedWikiLinks = buildAllowedWikiLinkTargets(input, targetPath);
 
   const relationshipText = (input.relationships ?? [])
     .slice(0, 40)
@@ -128,6 +146,10 @@ export function buildWikiMarkdownCompilePrompt(input: WikiMarkdownCompileInput) 
     '## 已知关系',
     relationshipText || '（暂无关系）',
     '',
+    '## Allowed Existing Wiki Links（正文 wikilink 只允许使用这些目标）',
+    '',
+    allowedWikiLinks || '（当前没有可安全链接的既有 Wiki 页面；正文不要生成 [[...]]，相关概念保持纯文本。）',
+    '',
     '## 原始来源材料',
     sourceBlocks,
     '',
@@ -141,12 +163,14 @@ export function buildWikiMarkdownCompilePrompt(input: WikiMarkdownCompileInput) 
     '- frontmatter 必须包含：type、title、created、updated、tags、sources、related。',
     `- frontmatter.type 必须是：${target.type}。`,
     `- updated 使用 ${today}。`,
-    '- sources 使用来源文件名或 entryId；related 使用相关实体标题的 slug 或标题。',
+    '- sources 使用来源文件名或 entryId；related 只能使用上方 Allowed Existing Wiki Links 中列出的 target（不含 [[ ]]），不确定就写 []；禁止在 related 数组里写 [[...]] 包裹。',
+    '- 正文中的 [[wikilink]] 只能引用上方 Allowed Existing Wiki Links 中列出的 target，推荐写成 [[target|显示名称]]。',
+    '- 禁止发明英文 slug、拼音 slug、翻译 slug 或未登记页面名；如果目标不在 Allowed Existing Wiki Links 中，就写纯文本，不要写 [[...]]。',
     '- 正文必须是中文。不要把 OCR 目录编号、页码、点线、残缺字符当成事实。',
     '- 如果原文没有明确数据，写“未在当前来源中确认”，不要猜。',
     '- 重要数字必须保留完整单位和证据语境。',
     '- 使用 Markdown 表格呈现关键指标；没有指标时写“当前来源未提供明确指标”。',
-    '- 使用 [[实体名]] 形式在正文里引用相关实体。',
+    '- 只有确认目标已存在于 Allowed Existing Wiki Links 时，才在正文里引用相关实体。',
     '',
     '建议正文结构：',
     '# 标题',
@@ -184,6 +208,184 @@ export function buildWikiMarkdownCompilePrompt(input: WikiMarkdownCompileInput) 
   ].join('\n');
 }
 
+export function buildWikiMarkdownBatchCompilePrompt(input: WikiMarkdownBatchCompileInput) {
+  const today = input.today ?? new Date().toISOString().slice(0, 10);
+  const schemaRulesTable = buildWikiSchemaRulesTable(input.contextMap?.schema);
+  const targetEntities = input.entities.slice(0, 8).map((entity) => {
+    const target = inferWikiTargetSpec(entity, { schema: input.contextMap?.schema });
+    return {
+      id: entity.id,
+      title: entity.title,
+      entityType: entity.type,
+      targetType: target.type,
+      targetPath: target.path,
+      summary: entity.summary,
+      tags: entity.tags,
+      categories: entity.categories ?? [],
+      indicators: entity.indicators ?? [],
+    };
+  });
+  const targetPaths = new Set(targetEntities.map((entity) => entity.targetPath));
+  const related = (input.relatedEntities ?? [])
+    .slice(0, 40)
+    .map((entity) => {
+      const target = inferWikiTargetSpec(entity, { schema: input.contextMap?.schema });
+      return `- ${target.path}: ${entity.title}（${entity.type}）：${entity.summary}`;
+    })
+    .join('\n');
+  const relationshipText = (input.relationships ?? [])
+    .slice(0, 80)
+    .map((relationship) => `- ${relationship.from} --${relationship.type}--> ${relationship.to}`)
+    .join('\n');
+  const allowedWikiLinks = buildBatchAllowedWikiLinkTargets(input, targetPaths);
+  const sourceName = input.sourceEntry.fileMetadata?.filename ?? input.sourceEntry.id;
+
+  return [
+    '你是 MyWiki v2 的文件级 Wiki 编译 Agent。你的任务是参考 LLM Wiki 的 ingest 机制，围绕同一份原始材料，一次性生成或更新多篇高质量 Wiki Markdown 页面。',
+    '',
+    '这不是逐字段抽取，也不是简单摘要。每一篇 Wiki 页都必须是人类可读、Query Agent 可直接检索的知识页：有事实、有结构、有指标、有来源证据、有未确认事项。',
+    '',
+    '## Wiki Context Map',
+    '',
+    buildContextMapBlock(input.contextMap),
+    '',
+    '## Schema Page Types（必须遵守）',
+    '',
+    schemaRulesTable,
+    '',
+    '## 本次必须输出的目标页面',
+    '',
+    JSON.stringify(targetEntities, null, 2),
+    '',
+    '## 相关既有页面',
+    '',
+    related || '（暂无相关既有页面）',
+    '',
+    '## 已知关系',
+    '',
+    relationshipText || '（暂无关系）',
+    '',
+    '## Allowed Existing Wiki Links',
+    '',
+    allowedWikiLinks || '（没有可安全链接的既有页面；正文不要生成 [[...]]）',
+    '',
+    '## 原始材料',
+    '',
+    `sourceName: ${sourceName}`,
+    `entryId: ${input.sourceEntry.id}`,
+    '',
+    truncateForPrompt(input.sourceEntry.content, 50000),
+    '',
+    '## 输出要求',
+    '- 完整回复只能包含 FILE blocks，不能有任何 block 外文本。',
+    '- 第一字符必须是 `-`，也就是第一个 `---FILE:` 的开头。',
+    '- 必须为“本次必须输出的目标页面”中的每一个 targetPath 输出且只输出一个 FILE block。',
+    '- FILE block 路径必须严格使用目标列表中的 targetPath，不要发明英文 slug、拼音 slug 或未登记路径。',
+    '- 严禁输出 `<think>`、思考过程、分析过程、任务复述或任何 FILE block 外说明。',
+    '- 每个 FILE 内容第一行必须是 `---`，并包含合法 YAML frontmatter。',
+    '- frontmatter 必须包含：type、title、created、updated、tags、sources、related。',
+    `- updated 使用 ${today}。`,
+    '- sources 必须包含本次 sourceName 或 entryId。',
+    '- 正文必须是中文。不要把 OCR 目录编号、页码、点线、乱码残缺字体当成事实。',
+    '- 如果原文没有明确数据，写“未在当前来源中确认”，不要猜。',
+    '- 重要数字必须保留完整单位和证据语境。',
+    '- 使用 Markdown 表格呈现关键指标；没有指标时写“当前来源未提供明确指标”。',
+    '- 每篇正文建议包含：摘要、项目/主题概述、关键事实、结构与板块、关键指标、来源与证据、未确认与待补充、相关页面。',
+    '',
+    '## 输出格式示例',
+    '```',
+    '---FILE: wiki/projects/example.md---',
+    '---',
+    'type: project',
+    'title: "示例项目"',
+    `created: ${today}`,
+    `updated: ${today}`,
+    'tags: [项目]',
+    `sources: ["${escapeYamlString(sourceName)}"]`,
+    'related: []',
+    '---',
+    '',
+    '# 示例项目',
+    '',
+    '## 摘要',
+    '正文内容。',
+    '',
+    '---END FILE---',
+    '```',
+  ].join('\n');
+}
+
+function buildAllowedWikiLinkTargets(input: WikiMarkdownCompileInput, currentTargetPath: string) {
+  const currentTarget = normalizeWikiLinkTarget(currentTargetPath);
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  const add = (targetValue: string, labelValue: string) => {
+    const target = normalizeWikiLinkTarget(targetValue);
+    const label = labelValue.trim() || target;
+    if (!target || target === currentTarget || seen.has(target)) return;
+    seen.add(target);
+    lines.push(`- target: ${target}; display: ${label}; use: [[${target}|${label}]]`);
+  };
+
+  for (const link of extractWikiLinkTargets(input.contextMap?.index ?? '')) {
+    add(link.target, link.label);
+  }
+
+  for (const entity of input.relatedEntities ?? []) {
+    const target = inferWikiTargetSpecFromSchema(entity, { schema: input.contextMap?.schema }).path;
+    add(target, entity.title);
+  }
+
+  return lines.slice(0, 80).join('\n');
+}
+
+function buildBatchAllowedWikiLinkTargets(input: WikiMarkdownBatchCompileInput, targetPaths: Set<string>) {
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  const add = (targetValue: string, labelValue: string) => {
+    const target = normalizeWikiLinkTarget(targetValue);
+    const label = labelValue.trim() || target;
+    if (!target || seen.has(target)) return;
+    seen.add(target);
+    lines.push(`- target: ${target}; display: ${label}; use: [[${target}|${label}]]`);
+  };
+
+  for (const link of extractWikiLinkTargets(input.contextMap?.index ?? '')) {
+    add(link.target, link.label);
+  }
+
+  for (const entity of input.entities) {
+    const target = inferWikiTargetSpecFromSchema(entity, { schema: input.contextMap?.schema }).path;
+    if (targetPaths.has(target)) add(target, entity.title);
+  }
+
+  for (const entity of input.relatedEntities ?? []) {
+    const target = inferWikiTargetSpecFromSchema(entity, { schema: input.contextMap?.schema }).path;
+    add(target, entity.title);
+  }
+
+  return lines.slice(0, 120).join('\n');
+}
+
+function extractWikiLinkTargets(markdown: string) {
+  const links: Array<{ target: string; label: string }> = [];
+  for (const match of markdown.matchAll(/\[\[([^\]]+)\]\]/g)) {
+    const { target, label } = unwrapWikiReference(`[[${match[1]}]]`);
+    if (target) links.push({ target, label });
+  }
+  return links;
+}
+
+function normalizeWikiLinkTarget(value: string) {
+  const { target } = unwrapWikiReference(value);
+  return target
+    .replace(/\\/g, '/')
+    .replace(/^wiki\//i, '')
+    .replace(/\.md$/i, '')
+    .normalize('NFKC')
+    .trim();
+}
+
 export function normalizeWikiMarkdownCompileResult(
   rawText: string,
   fallback: Pick<Entity, 'title' | 'type' | 'tags' | 'summary'>,
@@ -205,6 +407,45 @@ export function normalizeWikiMarkdownCompileResult(
     summary: extractMarkdownSummary(markdown) || fallback.summary || `${fallback.title} 相关 Wiki 页面。`,
     tags: extractFrontmatterTags(markdown, fallback.tags),
     path: block?.path,
+    warnings: parsed.warnings,
+  };
+}
+
+export function normalizeWikiMarkdownBatchCompileResult(
+  rawText: string,
+  input: WikiMarkdownBatchCompileInput,
+): WikiMarkdownBatchCompileResult {
+  const today = input.today ?? new Date().toISOString().slice(0, 10);
+  const parsed = parseWikiFileBlocks(rawText);
+  const targetByPath = new Map(
+    input.entities.map((entity) => [inferWikiTargetSpec(entity, { schema: input.contextMap?.schema }).path, entity] as const),
+  );
+  const results: WikiMarkdownBatchCompileResult['results'] = [];
+  const seenEntityIds = new Set<string>();
+  const unmatchedPaths: string[] = [];
+
+  for (const block of parsed.blocks) {
+    const entity = targetByPath.get(block.path);
+    if (!entity) {
+      unmatchedPaths.push(block.path);
+      continue;
+    }
+    if (seenEntityIds.has(entity.id)) continue;
+
+    const normalized = normalizeWikiMarkdownCompileResult(block.content, entity, today);
+    results.push({
+      ...normalized,
+      entityId: entity.id,
+      path: block.path,
+      warnings: [...(normalized.warnings ?? []), ...parsed.warnings],
+    });
+    seenEntityIds.add(entity.id);
+  }
+
+  return {
+    results,
+    missingEntityIds: input.entities.map((entity) => entity.id).filter((entityId) => !seenEntityIds.has(entityId)),
+    unmatchedPaths,
     warnings: parsed.warnings,
   };
 }

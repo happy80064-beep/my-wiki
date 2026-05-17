@@ -97,6 +97,7 @@ export type WikiPageIndexEntry = {
   title: string;
   summary: string;
   tags: string[];
+  aliases: string[];
   related: string[];
   sources: string[];
   updated?: string;
@@ -203,6 +204,7 @@ async function scanWikiPage(
     title: stringValue(parsed.data.title) || firstHeading(parsed.body) || slug,
     summary: extractSummary(parsed.body),
     tags: stringArray(parsed.data.tags),
+    aliases: stringArray(parsed.data.aliases),
     related: stringArray(parsed.data.related),
     sources: stringArray(parsed.data.sources),
     updated: stringValue(parsed.data.updated),

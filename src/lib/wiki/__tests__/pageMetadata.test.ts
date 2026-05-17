@@ -41,6 +41,26 @@ describe('wiki page metadata view model', () => {
     expect(metadata.body).toContain('Main page content.');
   });
 
+  it('normalizes related frontmatter values written as wikilinks', () => {
+    const metadata = buildWikiPageMetadata(
+      [
+        '---',
+        'type: entity',
+        'title: "李俊杰"',
+        'updated: 2026-05-15',
+        'tags: []',
+        'sources: []',
+        'related: ["[[concepts/运营经理]]", "[[entities/company|公司]]"]',
+        '---',
+        '',
+        '# 李俊杰',
+      ].join('\n'),
+      fallback,
+    );
+
+    expect(metadata.related).toEqual(['concepts/运营经理', 'entities/company']);
+  });
+
   it('falls back to entity fields when a page has no frontmatter', () => {
     const metadata = buildWikiPageMetadata('# Temp Page\n\nBody text', fallback);
 

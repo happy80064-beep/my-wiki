@@ -1,23 +1,27 @@
 import { getProjectTemplate } from '@/lib/workspace/projectTemplates';
 import type { Entity, Entry, Relationship } from '@/types';
 import type { WikiCompileContextMap } from './markdownCompiler';
-import { inferWikiTargetSpecFromSchema } from './schemaRules';
+import { inferWikiTargetSpecFromSchema, parseWikiSchemaPageTypes } from './schemaRules';
+import type { WikiPageType } from './scanner';
 
 export function buildBrowserWikiCompileContext({
   entities,
   entries,
   relationships,
+  workspaceContext,
 }: {
   entities: Entity[];
   entries: Entry[];
   relationships: Relationship[];
+  workspaceContext?: Pick<WikiCompileContextMap, 'purpose' | 'schema'>;
 }): WikiCompileContextMap {
   const template = getProjectTemplate('general');
-  const schema = template.schema;
+  const schema = workspaceContext?.schema?.trim() || template.schema;
+  const purpose = workspaceContext?.purpose?.trim() || template.purpose;
 
   return {
     purpose: [
-      template.purpose,
+      purpose,
       '',
       '## Runtime note',
       'This browser-indexed knowledge base should follow schema.md as the source of truth for page type, directory, frontmatter, source traceability, and cross-reference rules.',
@@ -30,15 +34,16 @@ export function buildBrowserWikiCompileContext({
 }
 
 function buildBrowserRuntimeIndex(entities: Entity[], schema: string) {
-  const grouped = new Map<string, string[]>();
+  const grouped = new Map<WikiPageType, string[]>();
   for (const entity of entities) {
     const target = inferWikiTargetSpecFromSchema(entity, { schema });
     const summary = entity.summary.trim() ? ` — ${oneLine(entity.summary, 110)}` : '';
     grouped.set(target.type, [...(grouped.get(target.type) ?? []), `- [[${target.path.replace(/^wiki\//, '').replace(/\.md$/i, '')}|${entity.title}]]${summary}`]);
   }
 
-  const preferredOrder = ['project', 'entity', 'concept', 'source', 'query', 'comparison', 'synthesis', 'decision', 'meeting', 'stakeholder'];
-  const sections = preferredOrder
+  const preferredOrder = parseWikiSchemaPageTypes(schema).map((rule) => rule.type);
+  const orderedTypes = [...preferredOrder, ...[...grouped.keys()].filter((type) => !preferredOrder.includes(type))];
+  const sections = orderedTypes
     .filter((type) => grouped.has(type))
     .flatMap((type) => [`## ${type}`, '', ...(grouped.get(type) ?? []), '']);
 

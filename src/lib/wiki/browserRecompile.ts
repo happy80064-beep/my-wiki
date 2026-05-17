@@ -2,6 +2,7 @@ import { db } from '@/lib/db';
 import { getProviderConfigForRole, loadProviderSettings } from '@/lib/llm/providerSettings';
 import { requestConfiguredProviderText } from '@/lib/llm/runtimeProvider';
 import { isTauriRuntime } from '@/lib/runtime/tauri';
+import { resolveActiveWorkspaceSchemaContext } from '@/lib/workspace/schemaContext';
 import type { Entity, Entry } from '@/types';
 import { buildBrowserWikiCompileContext } from './browserCompileContext';
 import {
@@ -38,6 +39,7 @@ export async function recompileBrowserEntityWikiPage(
   const relatedEntities = relatedIds.length ? (await db.entities.bulkGet(relatedIds)).filter((item): item is Entity => Boolean(item)) : [];
   const providerConfig = getProviderConfigForRole(loadProviderSettings(), 'wiki-compile');
   const usableSourceEntries: Entry[] = sourceEntries.flatMap((entry) => (entry ? [entry] : []));
+  const workspaceContext = await resolveActiveWorkspaceSchemaContext();
   const requestPayload = {
     entity,
     sourceEntries: usableSourceEntries,
@@ -47,6 +49,7 @@ export async function recompileBrowserEntityWikiPage(
       entities: allEntities,
       entries: allEntries,
       relationships: allRelationships,
+      workspaceContext,
     }),
     providerConfig,
   };
@@ -61,7 +64,7 @@ export async function recompileBrowserEntityWikiPage(
       systemPrompt:
         '你是 MyWiki v2 的中文 Wiki 编译 Agent。完整回复必须且只能是一个 ---FILE: wiki/...--- 到 ---END FILE--- 的 FILE block。第一字符必须是 -。严禁输出 <think>、思考过程、分析过程、任务复述或任何 FILE block 外说明。',
       maxTokens: 4200,
-    });
+    }, { signal: options.signal });
     if (!providerResult.ok) {
       throw new Error(`${providerResult.providerName} failed: ${providerResult.error}`);
     }

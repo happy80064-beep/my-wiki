@@ -1,6 +1,7 @@
 import { detectLouvainCommunities, type CommunityGraphEdge } from '../graph/community';
 import { parseMarkdownFrontmatter } from './frontmatter';
 import { sanitizeWikiMarkdownOutput } from './markdownCompiler';
+import { normalizeWikiReferenceValue } from './references';
 
 export type WikiLintSeverity = 'info' | 'warning';
 
@@ -21,6 +22,7 @@ export type WikiLintPage = {
   path: string;
   markdown: string;
   slug?: string;
+  aliases?: string[];
   absolutePath?: string;
   related?: string[];
   wikilinks?: string[];
@@ -59,7 +61,7 @@ const defaultFrontmatterRequiredKeys = ['type', 'title', 'updated'];
 
 export function runStructuralWikiLint(pages: WikiLintPage[], contextMap?: WikiLintContextMap): WikiLintResult[] {
   const normalizedPages = pages.map(normalizeLintPage).filter((page) => page.markdown.trim());
-  const targetMap = buildPageTargetMap(normalizedPages);
+  const targetMap = buildPageTargetMap(normalizedPages, contextMap);
   const inboundCounts = new Map<string, number>();
   const results: WikiLintResult[] = [];
   const requiredFrontmatterKeys = inferRequiredFrontmatterKeys(contextMap?.schema);
@@ -240,16 +242,27 @@ export function normalizeSemanticWikiLintResponse(rawText: string): WikiLintResu
 export function extractWikilinks(markdown: string): string[] {
   const links = new Set<string>();
   for (const match of markdown.matchAll(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g)) {
-    const link = match[1].trim();
+    const link = normalizeWikiReferenceValue(match[1]);
     if (link) links.add(link);
   }
   return Array.from(links);
+}
+
+function extractWikilinksWithLabels(markdown: string) {
+  const links: Array<{ target: string; label: string }> = [];
+  for (const match of markdown.matchAll(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g)) {
+    const target = normalizeWikiReferenceValue(match[1]);
+    if (!target) continue;
+    links.push({ target, label: match[2]?.trim() || target });
+  }
+  return links;
 }
 
 type NormalizedLintPage = WikiLintPage & {
   markdown: string;
   slug: string;
   canonicalKey: string;
+  aliases: string[];
   wikilinks: string[];
   related: string[];
 };
@@ -270,13 +283,21 @@ function normalizeLintPage(page: WikiLintPage): NormalizedLintPage {
     markdown,
     slug,
     canonicalKey: normalizeReferenceKey(page.path.replace(/^wiki\//i, '').replace(/\.md$/i, '')),
-    wikilinks: page.wikilinks ?? extractWikilinks(frontmatter.body),
-    related: page.related ?? stringArray(frontmatter.data.related),
+    aliases: Array.from(new Set([...(page.aliases ?? []), ...stringArray(frontmatter.data.aliases)].map(normalizeWikiReferenceValue).filter(Boolean))),
+    wikilinks: (page.wikilinks ?? extractWikilinks(frontmatter.body)).map(normalizeWikiReferenceValue).filter(Boolean),
+    related: (page.related ?? stringArray(frontmatter.data.related)).map(normalizeWikiReferenceValue).filter(Boolean),
   };
 }
 
-function buildPageTargetMap(pages: NormalizedLintPage[]) {
+function buildPageTargetMap(pages: NormalizedLintPage[], contextMap?: WikiLintContextMap) {
   const map = new Map<string, TargetMapEntry>();
+  const addEntry = (key: string, entry: TargetMapEntry, options: { overwrite?: boolean } = {}) => {
+    for (const normalized of buildReferenceLookupKeys(key)) {
+      if (!normalized) continue;
+      if (options.overwrite || !map.has(normalized)) map.set(normalized, entry);
+    }
+  };
+
   for (const page of pages) {
     const keys = [
       page.path,
@@ -284,20 +305,26 @@ function buildPageTargetMap(pages: NormalizedLintPage[]) {
       page.path.replace(/^wiki\//i, '').replace(/\.md$/i, ''),
       page.slug,
       page.title,
+      ...page.aliases,
       slugFromPath(page.path),
     ];
     const canonicalKey = page.canonicalKey;
     for (const key of keys) {
-      for (const normalized of buildReferenceLookupKeys(key)) {
-        if (normalized) map.set(normalized, { page, canonicalKey });
-      }
+      addEntry(key, { page, canonicalKey }, { overwrite: true });
     }
   }
+
+  for (const link of extractWikilinksWithLabels(contextMap?.index ?? '')) {
+    const target = resolveReference(link.target, map);
+    if (!target || !link.label || link.label === link.target) continue;
+    addEntry(link.label, target);
+  }
+
   return map;
 }
 
 function collectOutgoingReferences(page: NormalizedLintPage) {
-  return Array.from(new Set([...page.wikilinks, ...page.related].map((item) => item.trim()).filter(Boolean)));
+  return Array.from(new Set([...page.wikilinks, ...page.related].map(normalizeWikiReferenceValue).filter(Boolean)));
 }
 
 function resolveReference(reference: string, targetMap: Map<string, TargetMapEntry>) {
@@ -496,7 +523,7 @@ function slugFromTitle(title: string) {
 }
 
 function normalizeReferenceKey(value: string) {
-  return value
+  return normalizeWikiReferenceValue(value)
     .replace(/\\/g, '/')
     .replace(/^wiki\//i, '')
     .replace(/\.md$/i, '')

@@ -37,6 +37,11 @@ export type ExtractImportImagesOptions = {
   includePdfPageScreenshots?: boolean;
   maxImages?: number;
   maxPdfPages?: number;
+  signal?: AbortSignal;
+};
+
+export type ExtractImportBlobTextOptions = {
+  signal?: AbortSignal;
 };
 
 const textExtensions = new Set(['txt', 'md', 'markdown', 'json', 'jsonl', 'xml']);
@@ -127,7 +132,9 @@ export async function extractImportFileText(
 export async function extractImportBlobText(
   input: ExtractImportBlobInput,
   onProgress?: (progress: FileExtractProgress) => void,
+  options: ExtractImportBlobTextOptions = {},
 ) {
+  throwIfAborted(options.signal);
   const kind = input.kind ?? getImportFileKind(input.filename, input.mimeType);
   if (!kind) {
     throw new Error(`${input.filename} 的格式暂不支持。`);
@@ -136,7 +143,8 @@ export async function extractImportBlobText(
   onProgress?.({ percent: 8, label: `读取 ${input.filename}` });
 
   if (kind === 'text' || kind === 'html') {
-    const text = await readBlobAsText(input.blob);
+    const text = await readBlobAsText(input.blob, options.signal);
+    throwIfAborted(options.signal);
     onProgress?.({ percent: 100, label: `${input.filename} 已读取` });
     return (kind === 'html' ? extractHtmlReadableText(text) : text).trim();
   }
@@ -146,9 +154,10 @@ export async function extractImportBlobText(
       percent: Math.min(42, 8 + Math.round(percent * 0.34)),
       label: `读取 ${input.filename}`,
     });
-  });
+  }, options.signal);
 
   onProgress?.({ percent: 48, label: `解析 ${input.filename}` });
+  throwIfAborted(options.signal);
   let browserExtractionError: unknown;
   try {
     const browserText = await extractBrowserReadableText({
@@ -157,7 +166,9 @@ export async function extractImportBlobText(
       mimeType: input.mimeType ?? input.blob.type,
       kind,
       onProgress,
+      signal: options.signal,
     });
+    throwIfAborted(options.signal);
     if (browserText.trim() || kind === 'image') {
       onProgress?.({ percent: 100, label: `${input.filename} 已解析` });
       return browserText.trim();
@@ -172,6 +183,7 @@ export async function extractImportBlobText(
       mimeType: input.mimeType ?? input.blob.type,
       dataBase64: arrayBufferToBase64(arrayBuffer),
     });
+    throwIfAborted(options.signal);
     if (runtimeText.trim()) {
       onProgress?.({ percent: 100, label: `${input.filename} 已解析` });
       return runtimeText.trim();
@@ -197,6 +209,7 @@ export async function extractImportBlobText(
         mimeType: input.mimeType ?? input.blob.type,
         dataBase64: arrayBufferToBase64(arrayBuffer),
       }),
+      signal: options.signal,
     });
 
     payload = (await response.json()) as { text?: string; error?: string };
@@ -236,12 +249,14 @@ export async function extractImportBlobImages(
   input: ExtractImportBlobInput,
   options: ExtractImportImagesOptions = {},
 ): Promise<ExtractedImportImage[]> {
+  throwIfAborted(options.signal);
   const kind = input.kind ?? getImportFileKind(input.filename, input.mimeType);
   if (!kind) return [];
   const maxImages = options.maxImages ?? 8;
   if (maxImages <= 0) return [];
 
-  const arrayBuffer = await readBlobAsArrayBuffer(input.blob);
+  const arrayBuffer = await readBlobAsArrayBuffer(input.blob, undefined, options.signal);
+  throwIfAborted(options.signal);
   if (kind === 'image') {
     const extension = getExtension(input.filename);
     const mimeType = input.mimeType || imageMimeTypes[extension] || 'image/png';
@@ -264,15 +279,25 @@ export async function extractImportBlobImages(
       includePdfPageScreenshots: options.includePdfPageScreenshots,
       maxImages,
       maxPdfPages: options.maxPdfPages ?? 4,
+      signal: options.signal,
     });
   }
 
   return [];
 }
 
-function readBlobAsBase64(blob: Blob, onProgress?: (percent: number) => void) {
+function readBlobAsBase64(blob: Blob, onProgress?: (percent: number) => void, signal?: AbortSignal) {
   return new Promise<string>((resolve, reject) => {
+    throwIfAborted(signal);
     const reader = new FileReader();
+    signal?.addEventListener(
+      'abort',
+      () => {
+        reader.abort();
+        reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+      },
+      { once: true },
+    );
     reader.onprogress = (event) => {
       if (event.lengthComputable) {
         onProgress?.(Math.round((event.loaded / event.total) * 100));
@@ -287,9 +312,18 @@ function readBlobAsBase64(blob: Blob, onProgress?: (percent: number) => void) {
   });
 }
 
-function readBlobAsArrayBuffer(blob: Blob, onProgress?: (percent: number) => void) {
+function readBlobAsArrayBuffer(blob: Blob, onProgress?: (percent: number) => void, signal?: AbortSignal) {
   return new Promise<ArrayBuffer>((resolve, reject) => {
+    throwIfAborted(signal);
     const reader = new FileReader();
+    signal?.addEventListener(
+      'abort',
+      () => {
+        reader.abort();
+        reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+      },
+      { once: true },
+    );
     reader.onprogress = (event) => {
       if (event.lengthComputable) {
         onProgress?.(Math.round((event.loaded / event.total) * 100));
@@ -301,17 +335,31 @@ function readBlobAsArrayBuffer(blob: Blob, onProgress?: (percent: number) => voi
   });
 }
 
-async function readBlobAsText(blob: Blob) {
+async function readBlobAsText(blob: Blob, signal?: AbortSignal) {
+  throwIfAborted(signal);
   if (typeof blob.text === 'function') {
-    return blob.text();
+    const text = await blob.text();
+    throwIfAborted(signal);
+    return text;
   }
 
   if (typeof blob.arrayBuffer === 'function') {
-    return new TextDecoder().decode(await blob.arrayBuffer());
+    const buffer = await blob.arrayBuffer();
+    throwIfAborted(signal);
+    return new TextDecoder().decode(buffer);
   }
 
   return new Promise<string>((resolve, reject) => {
+    throwIfAborted(signal);
     const reader = new FileReader();
+    signal?.addEventListener(
+      'abort',
+      () => {
+        reader.abort();
+        reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+      },
+      { once: true },
+    );
     reader.onerror = () => reject(reader.error ?? new Error('文件读取失败。'));
     reader.onload = () => resolve(String(reader.result ?? ''));
     reader.readAsText(blob);
@@ -329,7 +377,9 @@ async function extractBrowserReadableText(input: {
   mimeType: string;
   kind: ImportFileKind;
   onProgress?: (progress: FileExtractProgress) => void;
+  signal?: AbortSignal;
 }) {
+  throwIfAborted(input.signal);
   if (input.kind === 'spreadsheet') {
     input.onProgress?.({ percent: 58, label: `读取表格 ${input.filename}` });
     return extractSpreadsheetText(input.arrayBuffer, input.filename, input.mimeType);
@@ -450,8 +500,9 @@ async function extractPdfText(arrayBuffer: ArrayBuffer) {
 
 async function extractPdfImages(
   arrayBuffer: ArrayBuffer,
-  options: { includePdfPageScreenshots?: boolean; maxImages: number; maxPdfPages: number },
+  options: { includePdfPageScreenshots?: boolean; maxImages: number; maxPdfPages: number; signal?: AbortSignal },
 ) {
+  throwIfAborted(options.signal);
   const { PDFParse } = await import('pdf-parse');
   if (!pdfWorkerConfigured) {
     PDFParse.setWorker(pdfWorkerUrl);
@@ -460,6 +511,7 @@ async function extractPdfImages(
   const parser = new PDFParse({ data: new Uint8Array(arrayBuffer) });
   try {
     const images: ExtractedImportImage[] = [];
+    throwIfAborted(options.signal);
     const embedded = await parser.getImage({
       first: options.maxPdfPages,
       imageDataUrl: true,
@@ -467,6 +519,7 @@ async function extractPdfImages(
       imageThreshold: 96,
     });
     for (const page of embedded.pages) {
+      throwIfAborted(options.signal);
       for (const image of page.images) {
         const fromDataUrl = image.dataUrl ? dataUrlToImage(image.dataUrl) : undefined;
         const bytes = image.data?.length ? image.data : fromDataUrl?.bytes;
@@ -485,6 +538,7 @@ async function extractPdfImages(
     }
 
     if (images.length < options.maxImages && options.includePdfPageScreenshots) {
+      throwIfAborted(options.signal);
       const screenshots = await parser.getScreenshot({
         first: options.maxPdfPages,
         desiredWidth: 1280,
@@ -492,6 +546,7 @@ async function extractPdfImages(
         imageBuffer: true,
       });
       for (const page of screenshots.pages) {
+        throwIfAborted(options.signal);
         const fromDataUrl = page.dataUrl ? dataUrlToImage(page.dataUrl) : undefined;
         const bytes = page.data?.length ? page.data : fromDataUrl?.bytes;
         if (!bytes) continue;
@@ -659,4 +714,9 @@ function normalizeWhitespace(text: string) {
     .replace(/[ \t]+/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+}
+
+function throwIfAborted(signal?: AbortSignal) {
+  if (!signal?.aborted) return;
+  throw signal.reason ?? new DOMException('Aborted', 'AbortError');
 }

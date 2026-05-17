@@ -13,12 +13,14 @@ describe('tauri workspace storage adapter', () => {
 
     await storage.ensureDir('D:/Workspace/wiki');
     await storage.writeTextFile('D:/Workspace/wiki/index.md', '# Wiki');
+    await storage.writeBinaryFile?.('D:/Workspace/raw/sources/report.pdf', 'cGRm');
     await expect(storage.exists('D:/Workspace/wiki/index.md')).resolves.toBe(true);
     await storage.deletePath?.('D:/Workspace', 'D:/Workspace/wiki/index.md');
 
     expect(calls).toEqual([
       { command: 'workspace_ensure_dir', args: { path: 'D:/Workspace/wiki' } },
       { command: 'workspace_write_text_file', args: { path: 'D:/Workspace/wiki/index.md', content: '# Wiki' } },
+      { command: 'workspace_write_binary_file', args: { path: 'D:/Workspace/raw/sources/report.pdf', dataBase64: 'cGRm' } },
       { command: 'workspace_exists', args: { path: 'D:/Workspace/wiki/index.md' } },
       { command: 'workspace_delete_path', args: { root: 'D:/Workspace', path: 'D:/Workspace/wiki/index.md' } },
     ]);

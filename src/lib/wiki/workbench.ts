@@ -89,10 +89,12 @@ export function findWikiPageByReference(reference: string, pages: WikiPageIndexE
   const normalizedStem = normalizeLookup(stripExtension(reference));
   return (
     pages.find((page) => normalizeLookup(page.title) === normalized) ??
+    pages.find((page) => page.aliases.some((alias) => normalizeLookup(alias) === normalized)) ??
     pages.find((page) => normalizeLookup(page.slug) === normalized) ??
     pages.find((page) => normalizeLookup(page.path) === normalized) ??
     pages.find((page) => normalizeLookup(page.absolutePath) === normalized) ??
     pages.find((page) => normalizeLookup(page.title) === normalizedStem) ??
+    pages.find((page) => page.aliases.some((alias) => normalizeLookup(alias) === normalizedStem)) ??
     pages.find((page) => normalizeLookup(page.slug) === normalizedStem) ??
     null
   );

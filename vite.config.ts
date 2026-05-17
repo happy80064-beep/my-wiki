@@ -4,11 +4,11 @@ import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import { fileURLToPath, URL } from 'node:url';
 import { spawn } from 'node:child_process';
-import { createReadStream } from 'node:fs';
+import { createReadStream, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readdir, readFile as readNodeFile, rm, stat, writeFile as writeNodeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { buildMiniMaxCapturePrompt, normalizeMiniMaxCaptureResponse } from './src/lib/ai/minimaxCapture';
+import type { CaptureDraft } from './src/lib/capture';
 import { buildQueryComposePrompt, type QueryComposePayload } from './src/lib/ai/queryComposer';
 import {
   buildQueryPlanPrompt,
@@ -16,8 +16,11 @@ import {
   type QueryPlanRequest,
 } from './src/lib/ai/queryPlanner';
 import {
+  buildWikiMarkdownBatchCompilePrompt,
   buildWikiMarkdownCompilePrompt,
+  normalizeWikiMarkdownBatchCompileResult,
   normalizeWikiMarkdownCompileResult,
+  type WikiMarkdownBatchCompileInput,
   type WikiMarkdownCompileInput,
 } from './src/lib/wiki/markdownCompiler';
 import {
@@ -39,9 +42,13 @@ import {
   buildProviderTextRequest,
 } from './src/lib/llm/textProvider';
 import {
+  buildCaptureAnalysisFromMarkdownPrompt,
   buildCaptureAnalysisPrompt,
   buildCaptureAnalysisJsonRepairPrompt,
+  buildCaptureAnalysisStructuredOutput,
   buildCaptureDigestPrompt,
+  buildCaptureMarkdownAnalysisPrompt,
+  buildCaptureSourceIdentityBlock,
   buildCaptureSourceForStructuredProcessing,
   buildStructuredCaptureExcerpt,
   buildWikiPatchPrompt,
@@ -50,8 +57,10 @@ import {
   normalizeCaptureAnalysis,
   normalizeWikiPatchesToCaptureDraft,
   normalizeWikiPatchResponse,
+  resolveCaptureDigestThreshold,
   shouldUseCaptureDigest,
   splitCaptureContentIntoChunks,
+  type CaptureWorkspaceContext,
 } from './src/lib/ai/wikiPatch';
 
 const STRUCTURED_JSON_MAX_TOKENS = 8000;
@@ -64,9 +73,25 @@ export default defineConfig(({ mode }) => {
   const deepseekApiKeys = [env.DEEPSEEK_API_KEY, env.DEEPSEEK_API_KEY_FALLBACK].filter(Boolean);
   const deepseekModel = env.DEEPSEEK_MODEL || 'deepseek-v4-pro';
   const deepseekBaseUrl = (env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com').replace(/\/$/, '');
+  const packageMetadata = readPackageMetadata();
+  const appVersion = env.MYWIKI_APP_VERSION || env.VITE_MYWIKI_APP_VERSION || packageMetadata.version || '0.0.0';
+  const updateRepo =
+    env.MYWIKI_UPDATE_REPO ||
+    env.VITE_MYWIKI_UPDATE_REPO ||
+    normalizeGithubRepo(packageMetadata.repository) ||
+    'happy80064-beep/my-wiki';
+  const releaseUrl =
+    env.MYWIKI_RELEASE_URL ||
+    env.VITE_MYWIKI_RELEASE_URL ||
+    (updateRepo ? `https://github.com/${updateRepo}/releases/latest` : '');
 
   return {
     publicDir: false,
+    define: {
+      __APP_VERSION__: JSON.stringify(appVersion),
+      __MYWIKI_UPDATE_REPO__: JSON.stringify(updateRepo),
+      __MYWIKI_RELEASE_URL__: JSON.stringify(releaseUrl),
+    },
     plugins: [
       react(),
       tailwindcss(),
@@ -149,6 +174,25 @@ export default defineConfig(({ mode }) => {
             }
           });
 
+          server.middlewares.use('/api/workspace/write-binary-file', async (req, res) => {
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { error: 'Method not allowed' });
+              return;
+            }
+
+            try {
+              const body = (await readJsonBody(req)) as { path?: string; dataBase64?: string };
+              const target = requireDevFsPath(body.path, 'path');
+              const raw = typeof body.dataBase64 === 'string' ? body.dataBase64 : '';
+              const data = raw.includes(',') ? raw.split(',').at(-1) ?? '' : raw;
+              await mkdir(path.dirname(target), { recursive: true });
+              await writeNodeFile(target, Buffer.from(data, 'base64'));
+              sendJson(res, 200, undefined);
+            } catch (error) {
+              sendJson(res, 500, { error: error instanceof Error ? error.message : 'Failed to write binary file.' });
+            }
+          });
+
           server.middlewares.use('/api/workspace/read-text-file', async (req, res) => {
             if (req.method !== 'POST') {
               sendJson(res, 405, { error: 'Method not allowed' });
@@ -222,12 +266,17 @@ export default defineConfig(({ mode }) => {
             }
 
             try {
-              const body = (await readJsonBody(req)) as { content?: string; entityIndex?: unknown[] };
+              const body = (await readJsonBody(req)) as {
+                content?: string;
+                entityIndex?: unknown[];
+                workspaceContext?: CaptureWorkspaceContext;
+              };
               const content = body.content?.trim();
               if (!content) {
                 sendJson(res, 400, { error: 'content is required.' });
                 return;
               }
+              const workspaceContext = normalizeCaptureWorkspaceContext(body.workspaceContext);
 
               const minimaxResult = minimaxApiKey
                 ? await requestOpenAiCompatibleTwoStepCapture({
@@ -237,6 +286,7 @@ export default defineConfig(({ mode }) => {
                     providerName: 'MiniMax',
                     content,
                     entityIndex: body.entityIndex ?? [],
+                    workspaceContext,
                     extraBody: { response_format: { type: 'json_object' } },
                   })
                 : { ok: false as const, error: 'MINIMAX_API_KEY is not configured.' };
@@ -266,6 +316,7 @@ export default defineConfig(({ mode }) => {
                   providerName: 'DeepSeek',
                   content,
                   entityIndex: body.entityIndex ?? [],
+                  workspaceContext,
                   extraBody: {
                     thinking: { type: 'disabled' },
                     response_format: { type: 'json_object' },
@@ -294,6 +345,7 @@ export default defineConfig(({ mode }) => {
                   model: deepseekModel,
                   providerName: 'DeepSeek',
                   content,
+                  workspaceContext,
                   extraBody: {
                     thinking: { type: 'disabled' },
                     response_format: { type: 'json_object' },
@@ -303,7 +355,14 @@ export default defineConfig(({ mode }) => {
                 if (deepseekSingleStepResult.ok) {
                   try {
                     sendJson(res, 200, {
-                      draft: assertUsableDraft(normalizeMiniMaxCaptureResponse(deepseekSingleStepResult.text), 'DeepSeek'),
+                      draft: assertUsableDraft(
+                        normalizeCaptureAnalysisToCaptureDraft(
+                          normalizeCaptureAnalysis(deepseekSingleStepResult.text),
+                          content,
+                          workspaceContext,
+                        ),
+                        'DeepSeek',
+                      ),
                       provider: 'deepseek',
                       model: deepseekModel,
                       fallbackFrom: minimaxFailure,
@@ -900,6 +959,82 @@ export default defineConfig(({ mode }) => {
             }
           });
 
+          server.middlewares.use('/api/wiki/recompile-source-batch', async (req, res) => {
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { error: 'Method not allowed' });
+              return;
+            }
+
+            try {
+              const payload = (await readJsonBody(req)) as WikiMarkdownBatchCompileInput & {
+                providerConfig?: LlmProviderConfig | null;
+              };
+              if (!payload.sourceEntry?.id || !Array.isArray(payload.entities) || payload.entities.length === 0) {
+                sendJson(res, 400, { error: 'sourceEntry and entities are required.' });
+                return;
+              }
+
+              const requestProviderConfig = normalizeRequestProviderConfig(payload.providerConfig);
+              if (!requestProviderConfig && !minimaxApiKey) {
+                sendJson(res, 500, { error: 'MINIMAX_API_KEY is not configured.' });
+                return;
+              }
+
+              const today = new Date().toISOString().slice(0, 10);
+              const prompt = buildWikiMarkdownBatchCompilePrompt({ ...payload, today });
+              const systemPrompt =
+                '你是 MyWiki v2 的文件级 Wiki 编译 Agent。完整回复必须且只能是多个 ---FILE: wiki/...--- 到 ---END FILE--- 的 FILE blocks。第一字符必须是 -。严禁输出 <think>、思考过程、分析过程、任务复述或任何 FILE block 外说明。';
+
+              if (requestProviderConfig) {
+                const providerResult = await requestConfiguredProviderText({
+                  config: requestProviderConfig,
+                  prompt,
+                  systemPrompt,
+                  maxTokens: 9000,
+                });
+
+                if (!providerResult.ok) {
+                  sendJson(res, 502, { error: `${providerResult.providerName} failed: ${providerResult.error}` });
+                  return;
+                }
+
+                const normalized = normalizeWikiMarkdownBatchCompileResult(providerResult.text, { ...payload, today });
+                sendJson(res, 200, {
+                  ...normalized,
+                  provider: providerResult.providerName,
+                  model: providerResult.model,
+                });
+                return;
+              }
+
+              const minimaxResult = await requestOpenAiCompatibleText({
+                apiKey: minimaxApiKey,
+                baseUrl: minimaxBaseUrl,
+                model: minimaxModel,
+                providerName: 'MiniMax',
+                prompt,
+                systemPrompt,
+                maxTokens: 9000,
+              });
+
+              if (!minimaxResult.ok) {
+                sendJson(res, 502, { error: `MiniMax failed: ${minimaxResult.error}` });
+                return;
+              }
+
+              const normalized = normalizeWikiMarkdownBatchCompileResult(minimaxResult.text, { ...payload, today });
+              sendJson(res, 200, {
+                ...normalized,
+                provider: 'minimax',
+                model: minimaxModel,
+              });
+            } catch (error) {
+              sendJson(res, 500, {
+                error: error instanceof Error ? error.message : 'Wiki batch recompilation failed.',
+              });
+            }
+          });
+
           server.middlewares.use('/api/query/plan', async (req, res) => {
             if (req.method !== 'POST') {
               sendJson(res, 405, { error: 'Method not allowed' });
@@ -988,6 +1123,7 @@ export default defineConfig(({ mode }) => {
     test: {
       environment: 'happy-dom',
       setupFiles: ['./vitest.setup.ts'],
+      fileParallelism: false,
       globals: true,
     },
   };
@@ -999,6 +1135,7 @@ async function requestOpenAiCompatibleCapture({
   model,
   providerName,
   content,
+  workspaceContext,
   extraBody,
 }: {
   apiKey: string;
@@ -1006,6 +1143,7 @@ async function requestOpenAiCompatibleCapture({
   model: string;
   providerName: string;
   content: string;
+  workspaceContext?: CaptureWorkspaceContext;
   extraBody?: Record<string, unknown>;
 }): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
   try {
@@ -1024,7 +1162,7 @@ async function requestOpenAiCompatibleCapture({
           },
           {
             role: 'user',
-            content: buildMiniMaxCapturePrompt(content),
+            content: buildCaptureAnalysisPrompt(content, '[]', workspaceContext),
           },
         ],
         stream: false,
@@ -1067,6 +1205,7 @@ async function requestOpenAiCompatibleTwoStepCapture({
   providerName,
   content,
   entityIndex,
+  workspaceContext,
   extraBody,
 }: {
   apiKey: string;
@@ -1075,6 +1214,7 @@ async function requestOpenAiCompatibleTwoStepCapture({
   providerName: string;
   content: string;
   entityIndex: unknown[];
+  workspaceContext?: CaptureWorkspaceContext;
   extraBody?: Record<string, unknown>;
 }): Promise<
   | { ok: true; draft: ReturnType<typeof normalizeWikiPatchesToCaptureDraft>; fallbackFrom?: string }
@@ -1087,6 +1227,7 @@ async function requestOpenAiCompatibleTwoStepCapture({
       model,
       providerName,
       content,
+      workspaceContext,
       extraBody,
     });
 
@@ -1094,76 +1235,51 @@ async function requestOpenAiCompatibleTwoStepCapture({
     const structuredContent = structuredContentResult.content;
 
     const entityIndexJson = JSON.stringify(entityIndex.slice(0, 120), null, 2);
-    const analysisResult = await requestOpenAiCompatibleText({
+    const markdownAnalysisResult = await requestOpenAiCompatibleText({
       apiKey,
       baseUrl,
       model,
       providerName,
-      prompt: buildCaptureAnalysisPrompt(structuredContent, entityIndexJson),
-      systemPrompt: '你是 MyWiki 摄入分析 Agent。只输出符合 schema 的 JSON 对象。',
-      maxTokens: STRUCTURED_JSON_MAX_TOKENS,
-      extraBody,
+      prompt: buildCaptureMarkdownAnalysisPrompt(structuredContent, entityIndexJson, workspaceContext),
+      systemPrompt: '你是 MyWiki 原文件阅读 Agent。只输出 Markdown 分析文本，不要输出 JSON。',
+      maxTokens: 3200,
+      extraBody: withoutJsonResponseFormat(extraBody),
     });
 
-    if (!analysisResult.ok) return analysisResult;
+    if (!markdownAnalysisResult.ok) return markdownAnalysisResult;
+
+    const analysisSourceExcerpt = buildStructuredCaptureExcerpt(structuredContent, 14000);
+    const structuredAnalysisResult = await requestOpenAiCompatibleText({
+      apiKey,
+      baseUrl,
+      model,
+      providerName,
+      prompt: buildCaptureAnalysisFromMarkdownPrompt({
+        sourceExcerpt: analysisSourceExcerpt,
+        markdownAnalysis: markdownAnalysisResult.text,
+        entityIndexJson,
+        workspaceContext,
+      }),
+      systemPrompt: '你是 MyWiki 结构化入库 Agent。只输出符合 schema 的 JSON 对象。',
+      maxTokens: STRUCTURED_JSON_MAX_TOKENS,
+      extraBody: withoutJsonResponseFormat(extraBody),
+      structuredOutput: buildCaptureAnalysisStructuredOutput(),
+    });
+
+    if (!structuredAnalysisResult.ok) return structuredAnalysisResult;
 
     const analysis = await normalizeCaptureAnalysisWithOpenAiRepair({
       apiKey,
       baseUrl,
       model,
       providerName,
-      structuredContent,
+      structuredContent: analysisSourceExcerpt,
       entityIndexJson,
-      rawText: analysisResult.text,
+      rawText: structuredAnalysisResult.text,
       extraBody,
+      workspaceContext,
     });
-    const patchResult = await requestOpenAiCompatibleText({
-      apiKey,
-      baseUrl,
-      model,
-      providerName,
-      prompt: buildWikiPatchPrompt(structuredContent, analysis),
-      systemPrompt: '你是 MyWiki WikiPatch 生成 Agent。只输出 JSON 对象。',
-      maxTokens: STRUCTURED_JSON_MAX_TOKENS,
-      extraBody,
-    });
-
-    if (!patchResult.ok) {
-      return {
-        ok: true,
-        draft: normalizeCaptureAnalysisToCaptureDraft(analysis, structuredContent),
-        fallbackFrom: `${providerName} generation failed: ${patchResult.error}`,
-      };
-    }
-
-    let patches: ReturnType<typeof normalizeWikiPatchResponse>;
-    try {
-      patches = await normalizeWikiPatchResponseWithOpenAiRepair({
-        apiKey,
-        baseUrl,
-        model,
-        providerName,
-        structuredContent,
-        analysis,
-        rawText: patchResult.text,
-        extraBody,
-      });
-    } catch (error) {
-      return {
-        ok: true,
-        draft: normalizeCaptureAnalysisToCaptureDraft(analysis, structuredContent),
-        fallbackFrom: error instanceof Error ? error.message : `${providerName} returned invalid WikiPatch JSON.`,
-      };
-    }
-    if (patches.length === 0) {
-      return {
-        ok: true,
-        draft: normalizeCaptureAnalysisToCaptureDraft(analysis, structuredContent),
-        fallbackFrom: `${providerName} 没有返回可用的 WikiPatch 条目。`,
-      };
-    }
-
-    return { ok: true, draft: normalizeWikiPatchesToCaptureDraft(patches, structuredContent) };
+    return { ok: true, draft: normalizeCaptureAnalysisToCaptureDraft(analysis, structuredContent, workspaceContext) };
   } catch (error) {
     return {
       ok: false,
@@ -1181,6 +1297,7 @@ async function normalizeCaptureAnalysisWithOpenAiRepair({
   entityIndexJson,
   rawText,
   extraBody,
+  workspaceContext,
 }: {
   apiKey: string;
   baseUrl: string;
@@ -1190,6 +1307,7 @@ async function normalizeCaptureAnalysisWithOpenAiRepair({
   entityIndexJson: string;
   rawText: string;
   extraBody?: Record<string, unknown>;
+  workspaceContext?: CaptureWorkspaceContext;
 }) {
   try {
     return normalizeCaptureAnalysis(rawText);
@@ -1199,10 +1317,11 @@ async function normalizeCaptureAnalysisWithOpenAiRepair({
       baseUrl,
       model,
       providerName,
-      prompt: buildCaptureAnalysisJsonRepairPrompt(rawText, structuredContent, entityIndexJson),
+      prompt: buildCaptureAnalysisJsonRepairPrompt(rawText, structuredContent, entityIndexJson, workspaceContext),
       systemPrompt: '你是 MyWiki JSON 修复 Agent。只输出一个合法 JSON 对象，不要 Markdown。',
       maxTokens: STRUCTURED_JSON_MAX_TOKENS,
-      extraBody,
+      extraBody: withoutJsonResponseFormat(extraBody),
+      structuredOutput: buildCaptureAnalysisStructuredOutput('repair_capture_analysis'),
     });
     if (!repairResult.ok) {
       throw new Error(`模型返回的摄入分析 JSON 不合法，自动修复请求失败：${repairResult.error}`);
@@ -1274,6 +1393,7 @@ async function prepareContentForStructuredCapture({
   model,
   providerName,
   content,
+  workspaceContext,
   extraBody,
 }: {
   apiKey: string;
@@ -1281,14 +1401,16 @@ async function prepareContentForStructuredCapture({
   model: string;
   providerName: string;
   content: string;
+  workspaceContext?: CaptureWorkspaceContext;
   extraBody?: Record<string, unknown>;
 }): Promise<{ ok: true; content: string } | { ok: false; error: string }> {
   const structuredSource = buildCaptureSourceForStructuredProcessing(content);
-  if (!shouldUseCaptureDigest(structuredSource)) {
+  if (!shouldUseCaptureDigest(structuredSource, resolveCaptureDigestThreshold(200000))) {
     return { ok: true, content: structuredSource };
   }
 
   const chunks = splitCaptureContentIntoChunks(structuredSource);
+  const sourceIdentity = buildCaptureSourceIdentityBlock(structuredSource);
   const digests: string[] = [];
 
   for (let index = 0; index < chunks.length; index += 1) {
@@ -1297,19 +1419,22 @@ async function prepareContentForStructuredCapture({
       baseUrl,
       model,
       providerName,
-      prompt: buildCaptureDigestPrompt(chunks[index], index + 1, chunks.length),
+      prompt: buildCaptureDigestPrompt(chunks[index], index + 1, chunks.length, workspaceContext),
       systemPrompt: '你是 MyWiki 长文档阅读 Agent。只输出 Markdown 阅读摘要，不要输出 JSON。',
       maxTokens: 1600,
       extraBody: withoutJsonResponseFormat(extraBody),
     });
 
-    if (!digestResult.ok) return { ok: true, content: buildStructuredCaptureExcerpt(structuredSource) };
+    if (!digestResult.ok) {
+      return { ok: false, error: `${providerName} long document digest failed: ${digestResult.error}` };
+    }
     digests.push(`## 分块 ${index + 1}/${chunks.length}\n\n${digestResult.text}`);
   }
 
   return {
     ok: true,
     content: [
+      ...(sourceIdentity ? [sourceIdentity, ''] : []),
       '# 长文档 Markdown 阅读摘要',
       '',
       '以下内容由 MyWiki 长文档阅读 Agent 从原始材料分块整理而来。结构化 WikiPatch 只能基于这些摘要生成；完整原文已保存在原始 Entry 中。',
@@ -1323,6 +1448,17 @@ function withoutJsonResponseFormat(extraBody?: Record<string, unknown>) {
   if (!extraBody) return undefined;
   const { response_format: _responseFormat, ...rest } = extraBody;
   return rest;
+}
+
+function normalizeCaptureWorkspaceContext(input: unknown): CaptureWorkspaceContext | undefined {
+  if (!input || typeof input !== 'object') return undefined;
+  const raw = input as CaptureWorkspaceContext;
+  const context: CaptureWorkspaceContext = {
+    purpose: typeof raw.purpose === 'string' ? raw.purpose : undefined,
+    schema: typeof raw.schema === 'string' ? raw.schema : undefined,
+    templateId: typeof raw.templateId === 'string' ? raw.templateId : undefined,
+  };
+  return context.purpose?.trim() || context.schema?.trim() || context.templateId?.trim() ? context : undefined;
 }
 
 function normalizeRequestProviderConfig(input: LlmProviderConfig | null | undefined): LlmProviderConfig | null {
@@ -1645,6 +1781,7 @@ async function requestOpenAiCompatibleText({
   systemPrompt,
   maxTokens,
   extraBody,
+  structuredOutput,
 }: {
   apiKey: string;
   baseUrl: string;
@@ -1654,8 +1791,60 @@ async function requestOpenAiCompatibleText({
   systemPrompt: string;
   maxTokens: number;
   extraBody?: Record<string, unknown>;
+  structuredOutput?: ReturnType<typeof buildCaptureAnalysisStructuredOutput>;
+}): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
+  let lastRetryableError = '';
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const result = await requestOpenAiCompatibleTextOnce({
+      apiKey,
+      baseUrl,
+      model,
+      providerName,
+      prompt,
+      systemPrompt,
+      maxTokens,
+      extraBody,
+      structuredOutput,
+    });
+    if (result.ok || !isRetryableProviderError(result.error) || attempt === 3) return result;
+    lastRetryableError = result.error;
+    await sleep(retryDelayMs(attempt));
+  }
+  return { ok: false, error: lastRetryableError || `${providerName} request failed.` };
+}
+
+async function requestOpenAiCompatibleTextOnce({
+  apiKey,
+  baseUrl,
+  model,
+  providerName,
+  prompt,
+  systemPrompt,
+  maxTokens,
+  extraBody,
+  structuredOutput,
+}: {
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  providerName: string;
+  prompt: string;
+  systemPrompt: string;
+  maxTokens: number;
+  extraBody?: Record<string, unknown>;
+  structuredOutput?: ReturnType<typeof buildCaptureAnalysisStructuredOutput>;
 }): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
   try {
+    const structuredTool = structuredOutput
+      ? {
+          type: 'function',
+          function: {
+            name: structuredOutput.name,
+            description: structuredOutput.description,
+            parameters: structuredOutput.schema,
+          },
+        }
+      : null;
     const response = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -1677,12 +1866,18 @@ async function requestOpenAiCompatibleText({
         stream: false,
         temperature: 0.2,
         max_tokens: maxTokens,
+        ...(structuredTool
+          ? {
+              tools: [structuredTool],
+              tool_choice: { type: 'function', function: { name: structuredOutput?.name } },
+            }
+          : {}),
         ...extraBody,
       }),
     });
 
     const data = (await response.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
+      choices?: Array<{ message?: { content?: string; tool_calls?: Array<{ function?: { arguments?: string } }> } }>;
       error?: { message?: string; type?: string };
     };
 
@@ -1693,7 +1888,9 @@ async function requestOpenAiCompatibleText({
       };
     }
 
-    const text = data.choices?.[0]?.message?.content?.trim();
+    const text =
+      data.choices?.[0]?.message?.tool_calls?.find((call) => call.function?.arguments)?.function?.arguments?.trim() ||
+      data.choices?.[0]?.message?.content?.trim();
     if (!text) {
       return { ok: false, error: `${providerName} returned empty content.` };
     }
@@ -1741,6 +1938,22 @@ function extractProviderError(data: unknown) {
   if (payload.error?.message) return payload.error.message;
   if (typeof payload.message === 'string') return payload.message;
   return '';
+}
+
+function isRetryableProviderError(error: string) {
+  return /(429|rate.?limit|too many requests|timeout|timed out|temporarily|overloaded|503|502|504|500|ECONNRESET|ECONNREFUSED|network|fetch failed|socket|TLS|connection)/i.test(
+    error,
+  );
+}
+
+function retryDelayMs(attempt: number) {
+  return 1200 * attempt * attempt;
+}
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function readJsonBody(req: import('node:http').IncomingMessage) {
@@ -2040,7 +2253,25 @@ function normalizeMiniMaxModel(model?: string) {
   return configuredModel;
 }
 
-function assertUsableDraft(draft: ReturnType<typeof normalizeMiniMaxCaptureResponse>, providerName: string) {
+function readPackageMetadata() {
+  try {
+    return JSON.parse(readFileSync(fileURLToPath(new URL('./package.json', import.meta.url)), 'utf8')) as {
+      version?: string;
+      repository?: string | { url?: string };
+    };
+  } catch {
+    return {};
+  }
+}
+
+function normalizeGithubRepo(repository?: string | { url?: string }) {
+  const raw = typeof repository === 'string' ? repository : repository?.url;
+  if (!raw) return '';
+  const match = raw.match(/github\.com[:/](.+?\/.+?)(?:\.git)?$/i);
+  return match?.[1] ?? '';
+}
+
+function assertUsableDraft(draft: CaptureDraft, providerName: string) {
   const text = `${draft.primaryEntity.title} ${draft.primaryEntity.summary}`;
   const lowQuality = /(无法识别|乱码|无效字符|无意义字符|未命名实体|^未知\s)/.test(text);
   if (lowQuality) {

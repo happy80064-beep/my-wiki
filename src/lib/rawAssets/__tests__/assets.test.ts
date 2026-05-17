@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import JSZip from 'jszip';
 import { createLocalCaptureDraft } from '@/lib/capture';
-import { db, resetDatabase } from '@/lib/db';
+import { createEntity, db, resetDatabase } from '@/lib/db';
 import {
   RAW_ASSET_STALE_MS,
   buildCaptureInputExcerpt,
+  compileRawAssetWikiPages,
   createRawAssetFromFile,
   processNextRawAsset,
   processRawAsset,
@@ -77,6 +78,22 @@ describe('raw assets', () => {
 
     expect(duplicated.reused).toBe(true);
     expect(await db.rawAssets.count()).toBe(1);
+  });
+
+  it('versions raw files when the same filename is imported with different content', async () => {
+    const first = new File(['first content'], 'work-history.docx', {
+      type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    });
+    const second = new File(['second content'], 'work-history.docx', {
+      type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    });
+
+    const firstResult = await createRawAssetFromFile(first);
+    const secondResult = await createRawAssetFromFile(second);
+
+    expect(firstResult.asset.filename).toBe('work-history.docx');
+    expect(secondResult.asset.filename).toMatch(/^work-history-\d{8}\.docx$/);
+    expect(await db.rawAssets.count()).toBe(2);
   });
 
   it('compiles a raw text file asynchronously', async () => {
@@ -403,6 +420,133 @@ describe('raw assets', () => {
     expect(secondAsset?.status).toBe('compiled');
   });
 
+  it('can continue from raw compilation into related wiki page generation', async () => {
+    const file = new File(['OpenMaic is an open source project.'], 'openmaic.md', { type: 'text/markdown' });
+    await createRawAssetFromFile(file);
+
+    const result = await processRawAssetQueue({
+      compileWiki: true,
+      extractor: async (content) => ({ draft: createLocalCaptureDraft(content) }),
+      wikiCompiler: async (entityId) => {
+        const entity = await db.entities.get(entityId);
+        await db.entities.update(entityId, {
+          wikiMarkdown: `# ${entity?.title ?? entityId}\n\nCompiled from raw asset.`,
+          wikiCompiledAt: Date.now(),
+          wikiCompileModel: 'test:mock',
+        });
+      },
+    });
+    const asset = await db.rawAssets.orderBy('createdAt').first();
+    const entity = await db.entities.orderBy('createdAt').first();
+
+    expect(result).toMatchObject({ total: 1, processed: 1, failed: 0 });
+    expect(asset?.status).toBe('compiled');
+    expect(entity?.wikiMarkdown).toContain('Compiled from raw asset.');
+  });
+
+  it('marks only the wiki stage as failed when related wiki generation fails', async () => {
+    const file = new File(['OpenMaic is an open source project.'], 'openmaic.md', { type: 'text/markdown' });
+    await createRawAssetFromFile(file);
+
+    const result = await processRawAssetQueue({
+      compileWiki: true,
+      extractor: async (content) => ({ draft: createLocalCaptureDraft(content) }),
+      wikiCompiler: async () => {
+        throw new Error('wiki model unavailable');
+      },
+    });
+    const asset = await db.rawAssets.orderBy('createdAt').first();
+
+    expect(result).toMatchObject({ total: 1, processed: 1, failed: 1 });
+    expect(asset?.status).toBe('wiki_failed');
+    expect(asset?.error).toContain('wiki model unavailable');
+    expect(await db.entities.count()).toBeGreaterThan(0);
+  });
+
+  it('resumes raw wiki generation by skipping pages already compiled in a previous attempt', async () => {
+    const file = new File(['Source text for a multi-entity report.'], 'report.md', { type: 'text/markdown' });
+    const { asset } = await createRawAssetFromFile(file);
+    const entryId = asset.entryId!;
+    const first = await createEntity({
+      type: 'topic',
+      title: 'First topic',
+      sourceEntries: [entryId],
+    });
+    const second = await createEntity({
+      type: 'topic',
+      title: 'Second topic',
+      sourceEntries: [entryId],
+    });
+    await db.entries.update(entryId, {
+      processed: true,
+      derivedEntities: [first.id, second.id],
+      content: 'Source text for a multi-entity report.',
+    });
+    await db.rawAssets.update(asset.id, { status: 'compiled' });
+
+    const firstAttemptCalls: string[] = [];
+    await compileRawAssetWikiPages(asset.id, async (entityId) => {
+      firstAttemptCalls.push(entityId);
+      if (entityId === second.id) throw new Error('wiki model unavailable');
+      await db.entities.update(entityId, {
+        wikiMarkdown: buildUsefulWikiMarkdown('First topic'),
+        wikiCompiledAt: Date.now(),
+        wikiCompileModel: 'test:mock',
+      });
+    });
+    expect(firstAttemptCalls).toEqual([first.id, second.id]);
+    expect((await db.rawAssets.get(asset.id))?.status).toBe('wiki_failed');
+
+    const retryCalls: string[] = [];
+    await compileRawAssetWikiPages(asset.id, async (entityId) => {
+      retryCalls.push(entityId);
+      await db.entities.update(entityId, {
+        wikiMarkdown: buildUsefulWikiMarkdown('Second topic'),
+        wikiCompiledAt: Date.now(),
+        wikiCompileModel: 'test:mock',
+      });
+    });
+
+    expect(retryCalls).toEqual([second.id]);
+    expect((await db.rawAssets.get(asset.id))?.status).toBe('compiled');
+  });
+
+  it('includes already structured raw assets when wiki pages are still missing', async () => {
+    const file = new File(['Source text for a structured-only report.'], 'structured.md', { type: 'text/markdown' });
+    const { asset } = await createRawAssetFromFile(file);
+    const entryId = asset.entryId!;
+    const entity = await createEntity({
+      type: 'topic',
+      title: 'Structured-only topic',
+      sourceEntries: [entryId],
+    });
+    await db.entries.update(entryId, {
+      processed: true,
+      derivedEntities: [entity.id],
+      content: 'Source text for a structured-only report.',
+    });
+    await db.rawAssets.update(asset.id, { status: 'compiled' });
+
+    const calls: string[] = [];
+    const result = await processRawAssetQueue({
+      compileWiki: true,
+      extractor: async () => {
+        throw new Error('extractor should not be called for an already structured asset');
+      },
+      wikiCompiler: async (entityId) => {
+        calls.push(entityId);
+        await db.entities.update(entityId, {
+          wikiMarkdown: buildUsefulWikiMarkdown('Structured-only topic'),
+          wikiCompiledAt: Date.now(),
+          wikiCompileModel: 'test:mock',
+        });
+      },
+    });
+
+    expect(result).toMatchObject({ total: 1, processed: 1, failed: 0 });
+    expect(calls).toEqual([entity.id]);
+  });
+
   it('publishes the retry queue ids so Frog can mark failed rows as compiling during retry', async () => {
     const first = new File(['第一个材料。'], 'first.md', { type: 'text/markdown' });
     const second = new File(['第二个材料。'], 'second.md', { type: 'text/markdown' });
@@ -445,3 +589,34 @@ describe('raw assets', () => {
     expect(excerpt).toContain('--- 结尾 ---');
   });
 });
+
+function buildUsefulWikiMarkdown(title: string) {
+  return [
+    '---',
+    'type: topic',
+    `title: "${title}"`,
+    'created: 2026-05-17',
+    'updated: 2026-05-17',
+    'tags: [test]',
+    'sources: [entry_test]',
+    'related: []',
+    '---',
+    '',
+    `# ${title}`,
+    '',
+    '## 摘要',
+    'This compiled wiki page is intentionally long enough to be treated as a useful completed page during a retry.',
+    '',
+    '## 关键事实',
+    '- Fact one with source-backed detail.',
+    '- Fact two with source-backed detail.',
+    '',
+    '## 来源与证据',
+    'The source entry was used to compile this page.',
+    '',
+    '## 未确认与待补充',
+    'No open questions in this test fixture.',
+    '',
+    'Additional detail. '.repeat(60),
+  ].join('\n');
+}

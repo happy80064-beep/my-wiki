@@ -60,6 +60,9 @@ const rawAssetStatusLabel: Record<RawAssetStatus, string> = {
   compiled: '已入库',
   skipped: '已跳过',
   failed: '失败',
+  cancelled: '已取消',
+  wiki_compiling: '生成 Wiki 中',
+  wiki_failed: 'Wiki 失败',
 };
 
 const assetKindLabel: Record<RawAssetKind, string> = {

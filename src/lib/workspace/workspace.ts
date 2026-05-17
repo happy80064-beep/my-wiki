@@ -10,6 +10,7 @@ export type WorkspaceStorageAdapter = {
   ensureDir: (path: string) => Promise<void>;
   exists: (path: string) => Promise<boolean>;
   writeTextFile: (path: string, content: string) => Promise<void>;
+  writeBinaryFile?: (path: string, dataBase64: string) => Promise<void>;
 };
 
 export type WorkspaceFileStorageAdapter = WorkspaceStorageAdapter & {

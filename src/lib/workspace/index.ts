@@ -6,6 +6,7 @@ export * from './projectTemplates';
 export * from './projectCreator';
 export * from './registry';
 export * from './service';
+export * from './schemaContext';
 export * from './storage';
 export * from './store';
 export * from './tauriStorage';

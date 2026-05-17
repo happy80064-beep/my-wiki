@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "MyWiki",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "com.mywiki.desktop",
   "build": {
     "frontendDist": "../dist",
@@ -26,10 +26,10 @@
         "label": "frog",
         "title": "MyWiki Froggy Capture",
         "url": "/frog",
-        "width": 340,
-        "height": 360,
-        "minWidth": 300,
-        "minHeight": 300,
+        "width": 170,
+        "height": 180,
+        "minWidth": 170,
+        "minHeight": 180,
         "resizable": false,
         "fullscreen": false,
         "decorations": false,
