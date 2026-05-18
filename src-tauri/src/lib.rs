@@ -44,6 +44,7 @@ pub fn run() {
             http_post_json,
             open_external_url,
             import_extract::import_extract_text,
+            import_extract::import_extract_url,
             workspace_default_root,
             workspace_ensure_dir,
             workspace_exists,

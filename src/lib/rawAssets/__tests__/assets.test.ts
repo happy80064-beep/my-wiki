@@ -7,6 +7,7 @@ import {
   buildCaptureInputExcerpt,
   compileRawAssetWikiPages,
   createRawAssetFromFile,
+  createRawAssetFromUrl,
   processNextRawAsset,
   processRawAsset,
   processRawAssetQueue,
@@ -78,6 +79,50 @@ describe('raw assets', () => {
 
     expect(duplicated.reused).toBe(true);
     expect(await db.rawAssets.count()).toBe(1);
+  });
+
+  it('imports webpage URLs by extracting page markdown before creating the raw asset', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        expect(String(input)).toBe('/api/import/url');
+        expect(JSON.parse(String(init?.body ?? '{}')).url).toBe('https://example.com/report');
+        return new Response(
+          JSON.stringify({
+            url: 'https://example.com/report',
+            text:
+              '# Example Report\n\nThis is the extracted webpage body, not just the pasted URL. It contains enough useful article text for structured import.',
+          }),
+          { status: 200 },
+        );
+      }),
+    );
+
+    const { asset } = await createRawAssetFromUrl('https://example.com/report');
+    const rawText = new TextDecoder().decode(Uint8Array.from(atob(asset.dataBase64 ?? ''), (char) => char.charCodeAt(0)));
+
+    expect(asset.filename).toMatch(/^web-example\.com-Example-Report/);
+    expect(asset.kind).toBe('text');
+    expect(rawText).toContain('https://example.com/report');
+    expect(rawText).toContain('This is the extracted webpage body');
+  });
+
+  it('rejects webpage URL imports when extraction only returns a verification page', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            url: 'https://example.com/protected',
+            text: '# 环境异常\n\n当前环境异常，完成验证后即可继续访问。去验证。',
+          }),
+          { status: 200 },
+        ),
+      ),
+    );
+
+    await expect(createRawAssetFromUrl('https://example.com/protected')).rejects.toThrow('网页正文没有被正常提取');
+    expect(await db.rawAssets.count()).toBe(0);
   });
 
   it('versions raw files when the same filename is imported with different content', async () => {

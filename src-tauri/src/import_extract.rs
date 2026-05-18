@@ -24,6 +24,18 @@ pub struct ImportExtractResponse {
     text: String,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportExtractUrlRequest {
+    url: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct ImportExtractUrlResponse {
+    url: String,
+    text: String,
+}
+
 #[tauri::command]
 pub async fn import_extract_text(
     app: tauri::AppHandle,
@@ -48,6 +60,44 @@ pub async fn import_extract_text(
     })
     .await
     .map_err(|error| format!("文件解析线程失败：{error}"))?
+}
+
+#[tauri::command]
+pub async fn import_extract_url(
+    app: tauri::AppHandle,
+    request: ImportExtractUrlRequest,
+) -> Result<ImportExtractUrlResponse, String> {
+    let url = normalize_import_url(&request.url)?;
+    let sidecar_app = app.clone();
+    let sidecar_url = url.clone();
+    let sidecar_result =
+        tauri::async_runtime::spawn_blocking(move || extract_url_with_markitdown(&sidecar_app, &sidecar_url))
+            .await
+            .map_err(|error| format!("URL extraction thread failed: {error}"))?;
+
+    if let Ok(text) = sidecar_result.as_ref() {
+        if is_useful_imported_web_text(text) {
+            return Ok(ImportExtractUrlResponse {
+                url,
+                text: text.trim().to_string(),
+            });
+        }
+    }
+
+    let fallback_text = fetch_url_readable_text(&url)
+        .await
+        .map_err(|error| match sidecar_result {
+            Ok(_) => error,
+            Err(sidecar_error) => format!("{error}; MarkItDown URL conversion failed: {sidecar_error}"),
+        })?;
+    if !is_useful_imported_web_text(&fallback_text) {
+        return Err("URL extraction did not return useful page content. The site may require verification, login, or block automated access.".to_string());
+    }
+
+    Ok(ImportExtractUrlResponse {
+        url,
+        text: fallback_text.trim().to_string(),
+    })
 }
 
 fn extract_bytes_to_markdown(
@@ -93,6 +143,10 @@ fn extract_bytes_to_markdown(
 
     if extension == "pptx" || normalized_mime.contains("presentationml") {
         return extract_pptx_text(bytes);
+    }
+
+    if extension == "zip" || normalized_mime.contains("zip") {
+        return extract_zip_text(filename, bytes);
     }
 
     if is_image_extension(&extension) || normalized_mime.starts_with("image/") {
@@ -160,6 +214,100 @@ fn run_markitdown_converter(converter_path: &Path, input_path: &Path) -> Result<
     } else {
         format!("MarkItDown 转换失败：{stderr}")
     })
+}
+
+fn extract_url_with_markitdown(app: &tauri::AppHandle, url: &str) -> Result<String, String> {
+    let converter_path = find_markitdown_converter(app)
+        .ok_or_else(|| "Bundled MarkItDown converter was not found.".to_string())?;
+    run_markitdown_url_converter(&converter_path, url)
+}
+
+fn run_markitdown_url_converter(converter_path: &Path, url: &str) -> Result<String, String> {
+    let output = Command::new(converter_path)
+        .arg("--url")
+        .arg(url)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("MarkItDown URL converter failed to start: {error}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if output.status.success() && !stdout.is_empty() {
+        return Ok(normalize_text(&stdout));
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(if stderr.is_empty() {
+        format!("MarkItDown URL converter exited with {}", output.status)
+    } else {
+        format!("MarkItDown URL conversion failed: {stderr}")
+    })
+}
+
+async fn fetch_url_readable_text(url: &str) -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .timeout(std::time::Duration::from_secs(45))
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) MyWiki/0.1 Safari/537.36")
+        .build()
+        .map_err(|error| error.to_string())?;
+    let response = client
+        .get(url)
+        .header(
+            reqwest::header::ACCEPT,
+            "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5",
+        )
+        .send()
+        .await
+        .map_err(|error| format!("URL fetch failed: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("URL fetch failed with HTTP {status}."));
+    }
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("URL response could not be read: {error}"))?;
+
+    let trimmed = body.trim_start().to_ascii_lowercase();
+    if content_type.contains("html") || trimmed.starts_with("<!doctype") || trimmed.starts_with("<html") {
+        Ok(strip_html_text(&body))
+    } else {
+        Ok(normalize_text(&body))
+    }
+}
+
+fn normalize_import_url(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) {
+        return Err("Only HTTP(S) URLs are supported.".to_string());
+    }
+    if trimmed.chars().any(|ch| ch.is_control()) {
+        return Err("URL contains an invalid control character.".to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+fn is_useful_imported_web_text(value: &str) -> bool {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lower = normalized.to_ascii_lowercase();
+    normalized.chars().count() >= 80
+        && !lower.contains("captcha")
+        && !lower.contains("verify you are human")
+        && !lower.contains("server error")
+        && !lower.contains("521")
+        && !normalized.contains("环境异常")
+        && !normalized.contains("完成验证")
+        && !normalized.contains("去验证")
+        && !normalized.contains("访问验证")
+        && !normalized.contains("安全验证")
+        && !normalized.contains("验证码")
+        && !normalized.contains("滑块验证")
 }
 
 fn extract_pdf_text(bytes: &[u8]) -> Result<String, String> {
@@ -240,6 +388,53 @@ fn extract_spreadsheet_text_from_path(path: &Path) -> Result<String, String> {
         }
     }
 
+    Ok(sections.join("\n\n"))
+}
+
+fn extract_zip_text(filename: &str, bytes: &[u8]) -> Result<String, String> {
+    let mut archive = ZipArchive::new(Cursor::new(bytes)).map_err(|error| format!("ZIP 读取失败：{error}"))?;
+    let mut sections = vec![format!("# 压缩包：{filename}")];
+    let mut extracted = 0usize;
+    let mut skipped = 0usize;
+
+    for index in 0..archive.len() {
+        if extracted >= 40 {
+            skipped += 1;
+            continue;
+        }
+        let mut file = archive
+            .by_index(index)
+            .map_err(|error| format!("ZIP 文件列表读取失败：{error}"))?;
+        if file.is_dir() {
+            continue;
+        }
+        let name = file.name().to_string();
+        let extension = file_extension(&name);
+        if !is_readable_zip_member(&extension) {
+            skipped += 1;
+            continue;
+        }
+        let mut text = String::new();
+        file.read_to_string(&mut text)
+            .map_err(|error| format!("ZIP 内文件 {name} 不是可读 UTF-8 文本：{error}"))?;
+        let normalized = if is_html_extension(&extension) {
+            strip_html_text(&text)
+        } else {
+            normalize_text(&text)
+        };
+        if normalized.trim().is_empty() {
+            continue;
+        }
+        extracted += 1;
+        sections.push(format!("## {name}\n\n{}", truncate_chars(&normalized, 12000)));
+    }
+
+    if skipped > 0 {
+        sections.push(format!("...压缩包中还有 {skipped} 个未展开文件或超出上限文件。"));
+    }
+    if extracted == 0 {
+        return Err(format!("{filename} 没有提取到可读文本文件。"));
+    }
     Ok(sections.join("\n\n"))
 }
 
@@ -421,10 +616,17 @@ fn is_image_extension(extension: &str) -> bool {
     matches!(extension, "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif" | "tif" | "tiff")
 }
 
+fn is_readable_zip_member(extension: &str) -> bool {
+    matches!(
+        extension,
+        "txt" | "md" | "markdown" | "json" | "jsonl" | "xml" | "html" | "htm" | "csv" | "tsv"
+    )
+}
+
 fn should_try_markitdown(extension: &str, mime_type: &str) -> bool {
     matches!(
         extension,
-        "pdf" | "doc" | "docx" | "ppt" | "pptx" | "xls" | "xlsx" | "xlsm" | "xlsb" | "ods" | "html" | "htm"
+        "pdf" | "doc" | "docx" | "ppt" | "pptx" | "xls" | "xlsx" | "xlsm" | "xlsb" | "ods" | "html" | "htm" | "zip"
     ) || mime_type.contains("pdf")
         || mime_type.contains("word")
         || mime_type.contains("presentation")
@@ -432,6 +634,7 @@ fn should_try_markitdown(extension: &str, mime_type: &str) -> bool {
         || mime_type.contains("spreadsheet")
         || mime_type.contains("excel")
         || mime_type.contains("html")
+        || mime_type.contains("zip")
 }
 
 fn is_pptx_slide_file(name: &str) -> bool {
@@ -536,6 +739,18 @@ fn normalize_text(value: &str) -> String {
         normalized.push('\n');
     }
     normalized.trim().to_string()
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut output = String::new();
+    for (index, ch) in value.chars().enumerate() {
+        if index >= max_chars {
+            output.push_str("\n\n...内容已截断。");
+            break;
+        }
+        output.push(ch);
+    }
+    output
 }
 
 #[cfg(test)]

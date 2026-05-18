@@ -14,7 +14,8 @@ import {
 import { extractCaptureDraft } from '@/lib/ai/captureClient';
 import { createIngestJob, processNextIngestJob } from '@/lib/ingest';
 import { isSupportedImportFile } from '@/lib/import/fileText';
-import { createRawAssetFromFile, processNextRawAsset, resetStaleRawAssets } from '@/lib/rawAssets';
+import { createRawAssetFromFile, createRawAssetFromUrl, processNextRawAsset, resetStaleRawAssets } from '@/lib/rawAssets';
+import { extractHttpUrlsFromText } from '@/lib/import/webUrl';
 import { db } from '@/lib/db';
 import type { EntityType, RawAssetKind, RawAssetStatus, RelationshipType, Scene, TaskStatus } from '@/types';
 
@@ -73,6 +74,7 @@ const assetKindLabel: Record<RawAssetKind, string> = {
   spreadsheet: '表格',
   html: '网页',
   presentation: '演示文稿',
+  archive: '压缩包',
 };
 
 type SaveResult = {
@@ -261,6 +263,57 @@ export function CapturePage() {
     window.setTimeout(() => setImportProgress(null), 1800);
   }
 
+  async function handleImportUrls(urls: string[]) {
+    if (urls.length === 0) return;
+
+    let count = 0;
+    let reused = 0;
+    const errors: string[] = [];
+    setImportProgress({
+      active: true,
+      percent: 0,
+      label: '抓取网页到 Raw Inbox',
+      detail: `共 ${urls.length} 个链接`,
+    });
+
+    for (let index = 0; index < urls.length; index += 1) {
+      const url = urls[index];
+      const percent = Math.round(((index + 1) / urls.length) * 100);
+      try {
+        const result = await createRawAssetFromUrl(url);
+        if (result.reused) reused += 1;
+        else count += 1;
+        setImportProgress({
+          active: true,
+          percent,
+          label: result.reused ? '网页已存在' : '网页已保存',
+          detail: `${index + 1}/${urls.length}`,
+        });
+      } catch (error) {
+        errors.push(`${url}：${error instanceof Error ? error.message : '网页抓取失败'}`);
+        setImportProgress({
+          active: true,
+          percent,
+          label: '网页抓取失败',
+          detail: `${index + 1}/${urls.length}`,
+        });
+      }
+    }
+
+    setImportProgress({
+      active: false,
+      percent: 100,
+      label: 'Raw Inbox 已接收网页',
+      detail: `新增 ${count} 个，已存在 ${reused} 个，失败 ${errors.length} 个`,
+    });
+    setQueueMessage(
+      count + reused > 0
+        ? `网页已放入 Raw Inbox：新增 ${count} 个，已存在 ${reused} 个。${errors.length > 0 ? `未接收：${errors.slice(0, 3).join('；')}` : ''}`
+        : `没有抓取到网页正文。${errors.slice(0, 3).join('；')}`,
+    );
+    window.setTimeout(() => setImportProgress(null), 1800);
+  }
+
   function handleFileDragOver(event: DragEvent<HTMLElement>) {
     if (!hasDraggedFiles(event.dataTransfer)) return;
     event.preventDefault();
@@ -281,9 +334,15 @@ export function CapturePage() {
 
   function handleFilePaste(event: ClipboardEvent<HTMLElement>) {
     const pastedFiles = extractClipboardFiles(event.clipboardData);
-    if (pastedFiles.length === 0) return;
+    if (pastedFiles.length > 0) {
+      event.preventDefault();
+      void handleImportFiles(pastedFiles);
+      return;
+    }
+    const urls = extractHttpUrlsFromText(event.clipboardData.getData('text/plain') ?? '');
+    if (urls.length === 0) return;
     event.preventDefault();
-    void handleImportFiles(pastedFiles);
+    void handleImportUrls(urls);
   }
 
   async function handleProcessQueue() {
@@ -489,7 +548,7 @@ export function CapturePage() {
               <input
                 type="file"
                 multiple
-                accept=".txt,.md,.markdown,.json,.jsonl,.xml,.html,.htm,.csv,.tsv,.xls,.xlsx,.xlsm,.xlsb,.ods,.doc,.docx,.pdf,.ppt,.pptx,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff,text/plain,text/markdown,text/html,text/csv,text/tab-separated-values,application/json,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,image/*"
+                accept=".txt,.md,.markdown,.json,.jsonl,.xml,.html,.htm,.csv,.tsv,.xls,.xlsx,.xlsm,.xlsb,.ods,.doc,.docx,.pdf,.ppt,.pptx,.zip,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff,text/plain,text/markdown,text/html,text/csv,text/tab-separated-values,application/json,application/xml,application/pdf,application/zip,application/x-zip-compressed,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,image/*"
                 className="hidden"
                 onChange={(event) => {
                   void handleImportFiles(event.target.files);

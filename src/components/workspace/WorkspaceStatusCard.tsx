@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { CheckCircle2, Database, FolderOpen, Loader2, Plus, RefreshCw, Repeat2 } from 'lucide-react';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { CreateProjectDialog } from './CreateProjectDialog';
 import {
   canUseWorkspaceStorage,
@@ -16,6 +17,7 @@ import {
   type WorkspaceRegistryItem,
   type WorkspaceSnapshot,
 } from '@/lib/workspace';
+import { isTauriRuntime } from '@/lib/runtime/tauri';
 
 type Status = 'idle' | 'loading' | 'ready' | 'browser' | 'error';
 
@@ -32,6 +34,7 @@ export function WorkspaceStatusCard() {
   const [isCreating, setCreating] = useState(false);
   const [createError, setCreateError] = useState('');
   const [switchError, setSwitchError] = useState('');
+  const canChooseSwitchDirectory = isTauriRuntime();
   const activeRoot = useWorkspaceRuntimeStore((state) => state.activeRoot);
   const knownWorkspaces = useWorkspaceRuntimeStore((state) => state.knownWorkspaces);
   const setActiveWorkspace = useWorkspaceRuntimeStore((state) => state.setActiveWorkspace);
@@ -149,6 +152,30 @@ export function WorkspaceStatusCard() {
     }
   }
 
+  async function chooseSwitchWorkspaceDirectory() {
+    if (!canChooseSwitchDirectory) {
+      setSwitchError('当前环境不能直接打开本地目录选择器，请手动输入知识库文件夹路径。');
+      return;
+    }
+
+    setSwitchError('');
+    try {
+      const selected = await openDialog({
+        title: '选择知识库文件夹',
+        directory: true,
+        multiple: false,
+        defaultPath: switchRoot || snapshot?.layout.root || activeRoot || defaultParentDirectory || undefined,
+      });
+      if (typeof selected === 'string') {
+        setSwitchRoot(selected.replace(/\\/g, '/'));
+      }
+    } catch (error) {
+      setSwitchError(error instanceof Error ? error.message : '打开目录选择器失败。');
+    }
+  }
+
+  const isManualSwitching = Boolean(switchingRoot) && sameWorkspaceRoot(switchingRoot, switchRoot.trim());
+
   return (
     <section className="mt-8 rounded-[12px] border border-[#d7ded8] bg-white p-5">
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -254,11 +281,21 @@ export function WorkspaceStatusCard() {
             />
             <button
               type="button"
+              className="inline-flex h-10 shrink-0 items-center gap-2 rounded-[8px] border border-[#d9d9d6] bg-white px-3 text-sm font-medium text-[#1f2937] hover:border-[#155eef] hover:text-[#155eef] disabled:cursor-not-allowed disabled:opacity-60"
+              onClick={() => void chooseSwitchWorkspaceDirectory()}
+              disabled={Boolean(switchingRoot) || !canChooseSwitchDirectory}
+              title={canChooseSwitchDirectory ? '从资源管理器选择知识库文件夹' : '当前环境请手动输入知识库路径'}
+            >
+              <FolderOpen size={15} />
+              浏览
+            </button>
+            <button
+              type="button"
               className="inline-flex h-10 shrink-0 items-center gap-2 rounded-[8px] bg-[#111827] px-3 text-sm font-medium text-white disabled:opacity-60"
               onClick={() => void handleSwitchWorkspace(switchRoot)}
               disabled={Boolean(switchingRoot)}
             >
-              {switchingRoot === switchRoot.trim() ? <Loader2 size={15} className="animate-spin" /> : <FolderOpen size={15} />}
+              {isManualSwitching ? <Loader2 size={15} className="animate-spin" /> : <FolderOpen size={15} />}
               打开
             </button>
           </div>

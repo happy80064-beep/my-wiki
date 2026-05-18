@@ -254,7 +254,7 @@ export type GraphInsightDismissal = {
   dismissedAt: number;
 };
 
-export type RawAssetKind = 'text' | 'word' | 'pdf' | 'image' | 'spreadsheet' | 'html' | 'presentation';
+export type RawAssetKind = 'text' | 'word' | 'pdf' | 'image' | 'spreadsheet' | 'html' | 'presentation' | 'archive';
 
 export type RawAssetStatus =
   | 'raw'

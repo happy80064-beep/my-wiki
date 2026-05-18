@@ -5,12 +5,14 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useLiveQuery } from 'dexie-react-hooks';
 import {
   createRawAssetFromFile,
+  createRawAssetFromUrl,
   processRawAssetQueue,
   resetStaleRawAssets,
   subscribeRawAssetQueueStatus,
   type RawAssetQueueSnapshot,
 } from '@/lib/rawAssets';
 import { isSupportedImportFile } from '@/lib/import/fileText';
+import { extractHttpUrlsFromText } from '@/lib/import/webUrl';
 import { db } from '@/lib/db';
 import type { RawAssetStatus } from '@/types';
 
@@ -211,8 +213,16 @@ export function FrogWidgetPage() {
     const text = event.clipboardData.getData('text/plain')?.trim();
     if (files.length === 0 && !text) return;
     event.preventDefault();
-    const pastedItems = files.length > 0 ? files : [new File([text], `paste-${Date.now()}.md`, { type: 'text/markdown' })];
-    void ingestFiles(pastedItems);
+    if (files.length > 0) {
+      void ingestFiles(files);
+      return;
+    }
+    const urls = extractHttpUrlsFromText(text ?? '');
+    if (urls.length > 0) {
+      void ingestUrls(urls);
+      return;
+    }
+    void ingestFiles([new File([text], `paste-${Date.now()}.md`, { type: 'text/markdown' })]);
   }
 
   async function ingestFiles(files: File[]) {
@@ -268,6 +278,56 @@ export function FrogWidgetPage() {
     });
     setMessage('已采集。需要时点开队列手动编译。');
     finishLater('done');
+  }
+
+  async function ingestUrls(urls: string[]) {
+    if (urls.length === 0) return;
+
+    setIsBusy(true);
+    setMood('gulp');
+    setProgress({ percent: 8, label: '抓取网页', detail: `共 ${urls.length} 个链接` });
+    setMessage(urls.length === 1 ? '正在抓取网页正文' : `正在抓取 ${urls.length} 个网页`);
+
+    await wait(320);
+
+    let accepted = 0;
+    let reused = 0;
+    const errors: string[] = [];
+
+    for (let index = 0; index < urls.length; index += 1) {
+      const url = urls[index];
+      const percent = Math.max(12, Math.round(((index + 1) / urls.length) * 72));
+      try {
+        const result = await createRawAssetFromUrl(url);
+        if (result.reused) reused += 1;
+        else accepted += 1;
+        setProgress({
+          percent,
+          label: result.reused ? '网页已存在' : '网页已抓取',
+          detail: `${index + 1}/${urls.length}`,
+        });
+      } catch (error) {
+        errors.push(`${url}：${error instanceof Error ? error.message : '网页抓取失败'}`);
+        setProgress({ percent, label: '网页抓取失败', detail: `${index + 1}/${urls.length}` });
+      }
+    }
+
+    if (accepted + reused === 0) {
+      setMood('error');
+      setProgress({ percent: 100, label: '没有抓取到网页正文', detail: errors.slice(0, 2).join('；') });
+      setMessage(errors[0] ?? '网页抓取失败。');
+      finishLater('error');
+      return;
+    }
+
+    setMood('done');
+    setProgress({
+      percent: 100,
+      label: '网页已采集到 Raw Inbox',
+      detail: `新增 ${accepted} 个，已存在 ${reused} 个${errors.length > 0 ? `，失败 ${errors.length} 个` : ''}`,
+    });
+    setMessage('网页正文已采集。需要时点开队列手动编译。');
+    finishLater(errors.length > 0 ? 'error' : 'done');
   }
 
   async function digestQueue(queuedCount: number, errorCount: number) {

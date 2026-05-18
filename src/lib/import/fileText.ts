@@ -3,7 +3,7 @@ import { isTauriRuntime } from '@/lib/runtime/tauri';
 import { invoke as tauriInvoke } from '@tauri-apps/api/core';
 import pdfWorkerUrl from '../../../node_modules/pdf-parse/dist/pdf-parse/web/pdf.worker.mjs?url';
 
-export type ImportFileKind = 'text' | 'word' | 'pdf' | 'image' | 'spreadsheet' | 'html' | 'presentation';
+export type ImportFileKind = 'text' | 'word' | 'pdf' | 'image' | 'spreadsheet' | 'html' | 'presentation' | 'archive';
 
 export type ImportFileExtraction = {
   filename: string;
@@ -33,6 +33,11 @@ export type ExtractImportBlobInput = {
   kind?: ImportFileKind;
 };
 
+export type ImportUrlExtraction = {
+  url: string;
+  text: string;
+};
+
 export type ExtractImportImagesOptions = {
   includePdfPageScreenshots?: boolean;
   maxImages?: number;
@@ -50,6 +55,7 @@ const spreadsheetExtensions = new Set(['xls', 'xlsx', 'xlsm', 'xlsb', 'csv', 'ts
 const presentationExtensions = new Set(['ppt', 'pptx']);
 const htmlExtensions = new Set(['html', 'htm']);
 const imageExtensions = new Set(['png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif', 'tif', 'tiff']);
+const archiveExtensions = new Set(['zip']);
 const imageMimeTypes: Record<string, string> = {
   png: 'image/png',
   jpg: 'image/jpeg',
@@ -84,6 +90,7 @@ export function getImportFileKind(filename: string, mimeType = ''): ImportFileKi
     return 'presentation';
   }
   if (htmlExtensions.has(extension) || normalizedMimeType.includes('html')) return 'html';
+  if (archiveExtensions.has(extension) || normalizedMimeType.includes('zip')) return 'archive';
   if (textExtensions.has(extension) || normalizedMimeType.startsWith('text/')) return 'text';
   if (
     wordExtensions.has(extension) ||
@@ -233,6 +240,38 @@ async function extractTextWithTauriRuntime(input: { filename: string; mimeType: 
     },
   });
   return result.text ?? '';
+}
+
+export async function extractImportUrlText(url: string): Promise<ImportUrlExtraction> {
+  const normalizedUrl = normalizeImportUrl(url);
+
+  if (!import.meta.env.DEV && isTauriRuntime()) {
+    const result = await tauriInvoke<{ url?: string; text?: string }>('import_extract_url', {
+      request: { url: normalizedUrl },
+    });
+    const text = result.text?.trim() ?? '';
+    if (!text) throw new Error('URL extraction returned empty content.');
+    return { url: result.url ?? normalizedUrl, text };
+  }
+
+  const response = await fetch('/api/import/url', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url: normalizedUrl }),
+  });
+  const payload = (await response.json()) as { url?: string; text?: string; error?: string };
+  if (!response.ok || !payload.text?.trim()) {
+    throw new Error(payload.error || 'URL extraction failed.');
+  }
+  return { url: payload.url ?? normalizedUrl, text: payload.text.trim() };
+}
+
+function normalizeImportUrl(value: string) {
+  const parsed = new URL(value.trim());
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error('Only HTTP(S) URLs are supported.');
+  }
+  return parsed.toString();
 }
 
 export function buildImportedContent(extraction: ImportFileExtraction) {
@@ -400,6 +439,11 @@ async function extractBrowserReadableText(input: {
     return extractPresentationText(input.arrayBuffer, input.filename);
   }
 
+  if (input.kind === 'archive') {
+    input.onProgress?.({ percent: 58, label: `读取压缩包 ${input.filename}` });
+    return extractArchiveText(input.arrayBuffer, input.filename);
+  }
+
   if (input.kind === 'image') {
     input.onProgress?.({ percent: 100, label: `${input.filename} 已保存，等待视觉描述` });
     return '';
@@ -456,6 +500,49 @@ async function extractWordText(arrayBuffer: ArrayBuffer, filename: string) {
   const mammoth = await import('mammoth');
   const result = await mammoth.extractRawText({ arrayBuffer });
   return result.value;
+}
+
+async function extractArchiveText(arrayBuffer: ArrayBuffer, filename: string) {
+  const { default: JSZip } = await import('jszip');
+  const zip = await JSZip.loadAsync(arrayBuffer);
+  const files = Object.values(zip.files)
+    .filter((file) => !file.dir)
+    .sort((left, right) => left.name.localeCompare(right.name, undefined, { numeric: true }));
+  const sections: string[] = [`# 压缩包：${filename}`];
+  let extracted = 0;
+  let skipped = 0;
+
+  for (const file of files) {
+    if (extracted >= 40) {
+      skipped += 1;
+      continue;
+    }
+    const extension = getExtension(file.name);
+    if (!isReadableArchiveMember(extension)) {
+      skipped += 1;
+      continue;
+    }
+
+    const rawText = await file.async('string');
+    const text = extension === 'html' || extension === 'htm' ? extractHtmlReadableText(rawText) : normalizeWhitespace(rawText);
+    if (!text) continue;
+    extracted += 1;
+    sections.push(`## ${file.name}`, '', text.slice(0, 12000));
+  }
+
+  if (skipped > 0) {
+    sections.push('', `...压缩包中还有 ${skipped} 个未展开文件或超出上限文件。`);
+  }
+
+  const output = sections.join('\n\n').trim();
+  if (extracted === 0) {
+    throw new Error(`${filename} 没有提取到可读文本文件。`);
+  }
+  return output;
+}
+
+function isReadableArchiveMember(extension: string) {
+  return ['txt', 'md', 'markdown', 'json', 'jsonl', 'xml', 'html', 'htm', 'csv', 'tsv'].includes(extension);
 }
 
 async function extractOfficeEmbeddedImages(arrayBuffer: ArrayBuffer, kind: ImportFileKind, maxImages: number) {
@@ -689,6 +776,7 @@ const kindLabels: Record<ImportFileKind, string> = {
   spreadsheet: '表格',
   html: '网页 HTML',
   presentation: '演示文稿',
+  archive: '压缩包',
 };
 
 function extractHtmlReadableText(html: string) {

@@ -429,6 +429,28 @@ export default defineConfig(({ mode }) => {
             }
           });
 
+          server.middlewares.use('/api/import/url', async (req, res) => {
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { error: 'Method not allowed' });
+              return;
+            }
+
+            try {
+              const body = (await readJsonBody(req)) as { url?: string };
+              const url = normalizeImportHttpUrl(body.url);
+              const text = await extractImportUrlText(url);
+              if (!text.trim()) {
+                sendJson(res, 422, { error: 'URL extraction returned empty content.' });
+                return;
+              }
+              sendJson(res, 200, { url, text });
+            } catch (error) {
+              sendJson(res, 500, {
+                error: error instanceof Error ? error.message : 'URL extraction failed.',
+              });
+            }
+          });
+
           server.middlewares.use('/api/vision/caption', async (req, res) => {
             if (req.method !== 'POST') {
               sendJson(res, 405, { error: 'Method not allowed' });
@@ -2063,6 +2085,10 @@ async function extractImportFileText({
     throw new Error('演示文稿解析需要启用可选 MarkItDown 后端：设置环境变量 MARKITDOWN_ENABLED=1，并安装 python -m pip install markitdown。');
   }
 
+  if (extension === 'zip' || normalizedMimeType.includes('zip')) {
+    return extractZipText(buffer, filename);
+  }
+
   if (['html', 'htm'].includes(extension) || normalizedMimeType.includes('html')) {
     return extractHtmlText(buffer.toString('utf8'));
   }
@@ -2093,10 +2119,22 @@ async function extractImportFileText({
   throw new Error(`暂不支持 ${filename} 的文件格式。`);
 }
 
+async function extractImportUrlText(url: string) {
+  const markitdownText = await tryMarkItDownUrlExtract(url);
+  if (markitdownText?.trim() && isUsefulImportedWebText(markitdownText)) {
+    return markitdownText.trim();
+  }
+  const fetchedText = await fetchUrlReadableText(url);
+  if (!isUsefulImportedWebText(fetchedText)) {
+    throw new Error('URL extraction did not return useful page content. The site may require verification, login, or block automated access.');
+  }
+  return fetchedText;
+}
+
 async function tryMarkItDownExtract({ filename, buffer }: { filename: string; buffer: Buffer }) {
   if (process.env.MARKITDOWN_ENABLED !== '1') return null;
   const extension = filename.toLowerCase().split('.').at(-1) ?? 'bin';
-  if (!['pdf', 'doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx', 'html', 'htm'].includes(extension)) return null;
+  if (!['pdf', 'doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx', 'html', 'htm', 'zip'].includes(extension)) return null;
 
   const tempDir = await mkdtemp(path.join(tmpdir(), 'mywiki-markitdown-'));
   const inputPath = path.join(tempDir, sanitizeTempFilename(filename));
@@ -2118,6 +2156,67 @@ async function tryMarkItDownExtract({ filename, buffer }: { filename: string; bu
   } finally {
     await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
   }
+}
+
+async function tryMarkItDownUrlExtract(url: string) {
+  if (process.env.MARKITDOWN_ENABLED !== '1') return null;
+  const commands = [
+    ['python', ['-m', 'markitdown', url]],
+    ['py', ['-m', 'markitdown', url]],
+    ['markitdown', [url]],
+  ] as const;
+
+  for (const [command, args] of commands) {
+    const result = await runCommand(command, args).catch(() => null);
+    if (result?.ok && result.stdout.trim()) {
+      return result.stdout.trim();
+    }
+  }
+  return null;
+}
+
+async function fetchUrlReadableText(url: string) {
+  const response = await fetch(url, {
+    redirect: 'follow',
+    headers: {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) MyWiki/0.1 Safari/537.36',
+      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5',
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`URL fetch failed with HTTP ${response.status}.`);
+  }
+  const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
+  const body = await response.text();
+  const trimmed = body.trimStart().toLowerCase();
+  if (contentType.includes('html') || trimmed.startsWith('<!doctype') || trimmed.startsWith('<html')) {
+    return extractHtmlText(body);
+  }
+  return body
+    .replace(/\r/g, '\n')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function normalizeImportHttpUrl(value: unknown) {
+  if (typeof value !== 'string' || !value.trim()) throw new Error('url is required.');
+  const parsed = new URL(value.trim());
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error('Only HTTP(S) URLs are supported.');
+  }
+  return parsed.toString();
+}
+
+function isUsefulImportedWebText(value: string) {
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  return (
+    normalized.length >= 80 &&
+    !/(环境异常|完成验证|去验证|访问验证|安全验证|验证码|滑块验证|captcha|verify you are human|server error|521)/i.test(
+      normalized,
+    )
+  );
 }
 
 function runCommand(command: string, args: readonly string[]) {
@@ -2227,6 +2326,42 @@ async function extractSpreadsheetText(buffer: Buffer, filename: string, mimeType
   return sections.join('\n\n').trim();
 }
 
+async function extractZipText(buffer: Buffer, filename: string) {
+  const { default: JSZip } = await import('jszip');
+  const zip = await JSZip.loadAsync(buffer);
+  const files = Object.values(zip.files)
+    .filter((file) => !file.dir)
+    .sort((left, right) => left.name.localeCompare(right.name, undefined, { numeric: true }));
+  const sections: string[] = [`# 压缩包：${filename}`];
+  let extracted = 0;
+  let skipped = 0;
+
+  for (const file of files) {
+    if (extracted >= 40) {
+      skipped += 1;
+      continue;
+    }
+    const extension = file.name.toLowerCase().split('.').at(-1) ?? '';
+    if (!['txt', 'md', 'markdown', 'json', 'jsonl', 'xml', 'html', 'htm', 'csv', 'tsv'].includes(extension)) {
+      skipped += 1;
+      continue;
+    }
+    const rawText = await file.async('string');
+    const text = extension === 'html' || extension === 'htm' ? extractHtmlText(rawText) : normalizeTextBlock(rawText);
+    if (!text) continue;
+    extracted += 1;
+    sections.push(`## ${file.name}`, '', text.slice(0, 12000));
+  }
+
+  if (skipped > 0) {
+    sections.push('', `...压缩包中还有 ${skipped} 个未展开文件或超出上限文件。`);
+  }
+  if (extracted === 0) {
+    throw new Error(`${filename} 没有提取到可读文本文件。`);
+  }
+  return sections.join('\n\n').trim();
+}
+
 function extractHtmlText(html: string) {
   return html
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
@@ -2239,6 +2374,14 @@ function extractHtmlText(html: string) {
     .replace(/&amp;/gi, '&')
     .replace(/&lt;/gi, '<')
     .replace(/&gt;/gi, '>')
+    .replace(/\r/g, '\n')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function normalizeTextBlock(value: string) {
+  return value
     .replace(/\r/g, '\n')
     .replace(/[ \t]+/g, ' ')
     .replace(/\n{3,}/g, '\n\n')

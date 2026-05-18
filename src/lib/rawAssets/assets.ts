@@ -6,9 +6,11 @@ import {
   buildImportedContent,
   extractImportBlobImages,
   extractImportBlobText,
+  extractImportUrlText,
   getImportFileKind,
   type ExtractedImportImage,
 } from '@/lib/import/fileText';
+import { buildWebImportFilename } from '@/lib/import/webUrl';
 import { createIngestJob, processIngestJob, type IngestExtractor, type IngestExtractorOptions } from '@/lib/ingest';
 import { loadMultimodalSettings } from '@/lib/multimodal/settings';
 import {
@@ -149,6 +151,22 @@ export async function createRawAssetFromFile(file: File): Promise<RawAssetImport
     });
   }
   return { asset: (await db.rawAssets.get(asset.id)) ?? asset, reused: false };
+}
+
+export async function createRawAssetFromUrl(url: string): Promise<RawAssetImportResult> {
+  const extraction = await extractImportUrlText(url);
+  assertUsefulImportedWebText(extraction.text);
+  const title = inferWebTitle(extraction.text) ?? new URL(extraction.url).hostname;
+  const content = buildImportedWebContent({
+    url: extraction.url,
+    title,
+    text: extraction.text,
+  });
+  const file = new File([content], buildWebImportFilename(extraction.url, title), {
+    type: 'text/markdown',
+    lastModified: Date.now(),
+  });
+  return createRawAssetFromFile(file);
 }
 
 export async function resolveUniqueRawAssetFilename(
@@ -1317,6 +1335,37 @@ function buildRawEntryContent(input: {
   ].join('\n');
 }
 
+function buildImportedWebContent(input: { url: string; title: string; text: string }) {
+  return [
+    `# 导入网页：${input.title}`,
+    '',
+    `来源 URL：${input.url}`,
+    '来源格式：网页 URL',
+    '',
+    input.text.trim(),
+  ].join('\n');
+}
+
+function inferWebTitle(markdown: string) {
+  const heading = markdown.match(/^\s*#\s+(.+?)\s*$/m)?.[1]?.trim();
+  if (heading) return heading.replace(/\s+/g, ' ').slice(0, 80);
+  const firstLine = markdown
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0 && !/^来源\s*URL/i.test(line));
+  return firstLine ? firstLine.replace(/^#+\s*/, '').replace(/\s+/g, ' ').slice(0, 80) : undefined;
+}
+
+function assertUsefulImportedWebText(markdown: string) {
+  const normalized = markdown.replace(/\s+/g, ' ').trim();
+  if (
+    normalized.length < 80 ||
+    /(环境异常|完成验证|去验证|访问验证|安全验证|验证码|滑块验证|captcha|verify you are human|server error|521)/i.test(normalized)
+  ) {
+    throw new Error('网页正文没有被正常提取，可能被站点验证、登录或反爬机制拦截。');
+  }
+}
+
 function getFileSourcePath(file: File) {
   const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath?.trim();
   return relativePath || file.name;
@@ -1330,4 +1379,5 @@ const rawKindLabels: Record<RawAssetKind, string> = {
   spreadsheet: '表格',
   html: '网页 HTML',
   presentation: '演示文稿',
+  archive: '压缩包',
 };
