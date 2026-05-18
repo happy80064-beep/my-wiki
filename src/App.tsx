@@ -19,6 +19,7 @@ const navItems = [
   { to: '/lint', label: '巡检' },
   { to: '/query', label: '查询' },
   { to: '/settings', label: '设置' },
+  { to: '/about', label: '关于' },
 ];
 
 export function App() {
@@ -54,6 +55,7 @@ export function App() {
                 key={item.to}
                 to={item.to}
                 end={item.to === '/'}
+                title={item.to === '/about' && updateAvailable ? '发现新版本，点击查看更新' : item.label}
                 className={({ isActive }) =>
                   [
                     'rounded-full px-3 py-1.5 text-xs transition',
@@ -63,7 +65,7 @@ export function App() {
               >
                 <span className="relative inline-flex items-center">
                   {item.label}
-                  {item.to === '/settings' && updateAvailable ? (
+                  {item.to === '/about' && updateAvailable ? (
                     <span className="absolute -right-1.5 -top-1.5 size-2 rounded-full bg-[#ef4444]" aria-label="有新版本可用" />
                   ) : null}
                 </span>

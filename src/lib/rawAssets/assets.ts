@@ -1004,7 +1004,7 @@ export function validateRawAssetQueueModelCapabilities(
 async function listRunnableRawAssetIds(includeWikiFailed = false) {
   const statuses = includeWikiFailed ? ['raw', 'failed', 'wiki_failed', 'compiled', 'skipped'] : ['raw', 'failed'];
   const assets = await db.rawAssets.where('status').anyOf(statuses).toArray();
-  const sorted = assets.sort((left, right) => left.createdAt - right.createdAt);
+  const sorted = assets.sort(compareRawAssetsForQueue);
   if (!includeWikiFailed) return sorted.map((asset) => asset.id);
 
   const runnable: string[] = [];
@@ -1016,6 +1016,10 @@ async function listRunnableRawAssetIds(includeWikiFailed = false) {
     runnable.push(asset.id);
   }
   return runnable;
+}
+
+function compareRawAssetsForQueue(left: RawAsset, right: RawAsset) {
+  return left.createdAt - right.createdAt || left.filename.localeCompare(right.filename, 'zh-Hans-CN') || left.id.localeCompare(right.id);
 }
 
 function shouldPreflightVisionForAsset(asset: RawAsset) {

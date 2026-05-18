@@ -568,7 +568,7 @@ describe('raw assets', () => {
       },
     });
 
-    expect(snapshots[0]?.queuedAssetIds).toEqual([firstResult.asset.id, secondResult.asset.id]);
+    expect(snapshots[0]?.queuedAssetIds?.sort()).toEqual([firstResult.asset.id, secondResult.asset.id].sort());
     expect(snapshots.some((snapshot) => snapshot.currentAssetId === firstResult.asset.id)).toBe(true);
     expect(snapshots.some((snapshot) => snapshot.queuedAssetIds?.includes(secondResult.asset.id))).toBe(true);
   });

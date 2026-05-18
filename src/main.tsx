@@ -1,6 +1,7 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { RouterProvider, createBrowserRouter } from 'react-router';
+import { AboutPage } from './pages/AboutPage';
 import { App } from './App';
 import { CapturePage } from './pages/CapturePage';
 import { DashboardPage } from './pages/DashboardPage';
@@ -34,6 +35,7 @@ const router = createBrowserRouter([
       { path: 'lint', element: <LintPage /> },
       { path: 'query', element: <QueryPage /> },
       { path: 'settings', element: <SettingsPage /> },
+      { path: 'about', element: <AboutPage /> },
     ],
   },
 ]);
