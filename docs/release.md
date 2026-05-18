@@ -31,5 +31,5 @@ Windows 可以直接分发 `.exe` 或 `.msi`。如果目标是苹果电脑客户
 1. 确认版本号已同步。
 2. 合并到 `main`。
 3. 创建并推送 tag，例如 `git tag v0.1.1 && git push origin v0.1.1`。
-4. GitHub Actions 会运行 `Release Packages`，生成 Windows 和 macOS 资产并创建 draft release。
-5. 检查 draft release 的说明和附件，确认无误后手动 Publish。
+4. GitHub Actions 会运行 `Release Packages`，生成 Windows 和 macOS 资产并创建 GitHub Release。
+5. 发布完成后，用客户端“关于 / 版本更新”里的“立即检查”确认 latest release 能被本地客户端识别。

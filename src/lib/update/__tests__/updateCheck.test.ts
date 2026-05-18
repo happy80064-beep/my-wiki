@@ -70,6 +70,28 @@ describe('updateCheck', () => {
     });
   });
 
+  it('explains when the repository has no published release yet', async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: false,
+      status: 404,
+      json: async () => ({}),
+    }));
+
+    await expect(
+      checkForUpdates(
+        {
+          currentVersion: '0.1.1',
+          repo: 'happy80064-beep/my-wiki',
+          releaseUrl: 'https://github.com/happy80064-beep/my-wiki/releases/latest',
+        },
+        fetchImpl,
+      ),
+    ).resolves.toMatchObject({
+      kind: 'error',
+      message: '当前 GitHub 仓库还没有已发布的 Release；发布完成后再检查。',
+    });
+  });
+
   it('uses a configured download page before the tag-specific release URL', () => {
     const release: GithubRelease = {
       tagName: 'v0.1.1',

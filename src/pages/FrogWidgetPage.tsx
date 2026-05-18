@@ -42,9 +42,9 @@ const statusLabel: Record<RawAssetStatus, string> = {
 const FROG_POSITION_KEY = 'mywiki.froggy.position';
 const BROWSER_WIDGET_WIDTH = 340;
 const BROWSER_WIDGET_HEIGHT = 360;
-const DESKTOP_WIDGET_WIDTH = 170;
-const DESKTOP_WIDGET_HEIGHT = 180;
-const DESKTOP_WIDGET_DETAILS_HEIGHT = 360;
+const DESKTOP_WIDGET_WIDTH = 150;
+const DESKTOP_WIDGET_HEIGHT = 172;
+const DESKTOP_WIDGET_DETAILS_HEIGHT = 350;
 
 export function FrogWidgetPage() {
   const pageRef = useRef<HTMLElement | null>(null);
@@ -364,16 +364,19 @@ export function FrogWidgetPage() {
   const bubbleVisible = mood !== 'idle' || showIdleHint;
   const bubbleMessage = mood === 'idle' ? '我饿了，有文件可以喂给我' : message;
   const queueRunning = queueStatus?.stage === 'running';
-  const widgetSizeClass = desktopShell ? 'frog-widget-compact w-[160px] rounded-[14px]' : 'w-[320px] rounded-[18px]';
+  const widgetSizeClass = desktopShell ? 'frog-widget-compact w-[132px] rounded-[13px]' : 'w-[320px] rounded-[18px]';
   const widgetChromeClass = desktopShell
-    ? 'border border-transparent bg-transparent p-1.5 shadow-none'
+    ? 'border border-transparent bg-transparent p-1 shadow-none'
     : 'border border-[#d9e4d7] bg-[#fbfffb]/95 p-4 shadow-[0_20px_50px_rgb(31_41_55_/_0.16)] backdrop-blur';
   const dropZoneClass = desktopShell
-    ? 'h-[112px] rounded-[14px] px-1.5 pb-2 pt-5 shadow-[0_10px_24px_rgb(31_41_55_/_0.10)]'
+    ? 'h-[120px] rounded-[13px] border-transparent px-1 pb-2 pt-5 shadow-[0_5px_14px_rgb(31_41_55_/_0.08)]'
     : 'h-[220px] rounded-[18px] px-3 pb-4 pt-7 shadow-[0_16px_40px_rgb(31_41_55_/_0.10)]';
-  const topControlClass = desktopShell ? 'absolute right-1.5 top-1.5 z-10 flex gap-1' : 'absolute right-3 top-3 z-10 flex gap-1';
+  const dropZoneBaseClass = desktopShell
+    ? 'frog-drop-zone pointer-events-none relative border border-transparent bg-white/55'
+    : 'frog-drop-zone pointer-events-none relative border border-dashed border-[#cfe1cf] bg-white/80 backdrop-blur';
+  const topControlClass = desktopShell ? 'absolute right-1 top-1 z-10 flex gap-1' : 'absolute right-3 top-3 z-10 flex gap-1';
   const iconButtonClass = desktopShell
-    ? 'inline-flex h-6 w-6 items-center justify-center rounded-full border border-[#d9e4d7] bg-white/90 text-[#4b5563] shadow-sm'
+    ? 'inline-flex h-5 w-5 items-center justify-center rounded-full border border-white/40 bg-white/65 text-[#4b5563] shadow-[0_2px_8px_rgb(31_41_55_/_0.10)]'
     : 'inline-flex h-8 w-8 items-center justify-center rounded-full border border-[#d9e4d7] bg-white/90 text-[#4b5563] shadow-sm';
   const frogTopClass = desktopShell ? 'absolute inset-x-0 top-4' : 'absolute inset-x-0 top-8';
   const statusButtonLabel = desktopShell
@@ -421,20 +424,22 @@ export function FrogWidgetPage() {
               data-no-widget-drag
               onClick={handleMinimize}
             >
-              <Minus size={desktopShell ? 12 : 15} />
+              <Minus size={desktopShell ? 11 : 15} />
             </button>
           ) : null}
-          <a
-            href="/capture"
-            className={iconButtonClass.replace('text-[#4b5563]', 'text-[#155eef]')}
-            title="打开捕获页"
-            aria-label="打开捕获页"
-          >
-            <FileDown size={desktopShell ? 13 : 17} />
-          </a>
+          {!desktopShell ? (
+            <a
+              href="/capture"
+              className={iconButtonClass.replace('text-[#4b5563]', 'text-[#155eef]')}
+              title="打开捕获页"
+              aria-label="打开捕获页"
+            >
+              <FileDown size={17} />
+            </a>
+          ) : null}
         </div>
 
-        <div className={`frog-drop-zone pointer-events-none relative border border-dashed border-[#cfe1cf] bg-white/80 backdrop-blur ${dropZoneClass}`}>
+        <div className={`${dropZoneBaseClass} ${dropZoneClass}`}>
           <div className={frogTopClass}>
             <FrogFace mood={mood} />
           </div>
@@ -443,14 +448,14 @@ export function FrogWidgetPage() {
               {bubbleMessage}
             </div>
           ) : null}
-          <p className={`absolute inset-x-0 text-center text-[#65736a] ${desktopShell ? 'bottom-2 text-[10px]' : 'bottom-4 text-xs'}`}>
+          <p className={`absolute inset-x-0 text-center text-[#65736a] ${desktopShell ? 'bottom-2 text-[10px] leading-none' : 'bottom-4 text-xs'}`}>
             {desktopShell ? '拖入 / 粘贴' : '拖入文件 / 粘贴图片或文本'}
           </p>
         </div>
 
         <button
           type="button"
-          className={`flex w-full items-center justify-between rounded-full border border-[#d9e4d7] bg-white/90 text-[#2f3f35] shadow-sm ${desktopShell ? 'mt-1 px-2 py-1 text-[10px]' : 'mt-2 px-3 py-2 text-xs'}`}
+          className={`flex w-full items-center justify-between rounded-full text-[#2f3f35] ${desktopShell ? 'mt-1 border border-white/40 bg-white/65 px-2 py-1 text-[10px] leading-none shadow-[0_3px_10px_rgb(31_41_55_/_0.09)]' : 'mt-2 border border-[#d9e4d7] bg-white/90 px-3 py-2 text-xs shadow-sm'}`}
           data-no-widget-drag
           onPointerDown={(event) => event.stopPropagation()}
           onClick={() => setDetailsOpen((open) => !open)}
@@ -464,14 +469,14 @@ export function FrogWidgetPage() {
         </button>
 
         <div
-          className={detailsOpen ? (desktopShell ? 'block max-h-[225px] overflow-y-auto pr-0.5' : 'block') : 'hidden'}
+          className={detailsOpen ? (desktopShell ? 'frog-details-compact block max-h-[214px] overflow-y-auto pr-0.5' : 'block') : 'hidden'}
           data-no-widget-drag
           onPointerDown={(event) => event.stopPropagation()}
         >
-          <div className="mt-2 flex items-center justify-end rounded-[12px] border border-[#e2ebe1] bg-white/95 px-3 py-2">
+          <div className={desktopShell ? 'mt-1 flex items-center justify-end rounded-[9px] border border-white/35 bg-white/60 px-1.5 py-1' : 'mt-2 flex items-center justify-end rounded-[12px] border border-[#e2ebe1] bg-white/95 px-3 py-2'}>
           <button
             type="button"
-            className="inline-flex items-center gap-1 rounded-full border border-[#d9e4d7] px-2 py-1 text-xs text-[#155eef] disabled:text-[#8a968e]"
+            className={desktopShell ? 'inline-flex items-center gap-1 rounded-full border border-white/40 bg-white/45 px-1.5 py-0.5 text-[10px] leading-none text-[#155eef] disabled:text-[#8a968e]' : 'inline-flex items-center gap-1 rounded-full border border-[#d9e4d7] px-2 py-1 text-xs text-[#155eef] disabled:text-[#8a968e]'}
             disabled={isBusy || queueRunning}
             onClick={() => {
               setMood('digest');
@@ -479,49 +484,49 @@ export function FrogWidgetPage() {
               void digestQueue(0, 0);
             }}
           >
-            {isBusy || queueRunning ? <Loader2 size={13} className="animate-spin" /> : <RotateCcw size={13} />}
+            {isBusy || queueRunning ? <Loader2 size={desktopShell ? 10 : 13} className="animate-spin" /> : <RotateCcw size={desktopShell ? 10 : 13} />}
             {queueRunning ? `编译中 ${queueStatus?.percent ?? 0}%` : '编译队列'}
           </button>
         </div>
 
-        {progress ? <FrogProgress progress={progress} /> : null}
+        {progress ? <FrogProgress progress={progress} compact={desktopShell} /> : null}
 
-        <div className="mt-3 rounded-[12px] border border-[#e2ebe1] bg-white px-3 py-2">
-          <div className="flex items-center justify-between gap-2 text-xs">
+        <div className={desktopShell ? 'mt-1.5 rounded-[9px] border border-white/35 bg-white/60 px-1.5 py-1.5' : 'mt-3 rounded-[12px] border border-[#e2ebe1] bg-white px-3 py-2'}>
+          <div className={desktopShell ? 'grid gap-0.5 text-[10px] leading-tight' : 'flex items-center justify-between gap-2 text-xs'}>
             <span className="shrink-0 font-medium text-[#1f2937]">最近状态</span>
-            <span className="shrink-0 text-[11px] text-[#65736a]">
+            <span className={desktopShell ? 'text-[9px] text-[#65736a]' : 'shrink-0 text-[11px] text-[#65736a]'}>
               最近 {rawAssets?.length ?? 0} / 共 {rawAssetStats?.total ?? 0} 条
             </span>
           </div>
-          <div className="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-[11px] text-[#65736a]">
-            <span>待编译/处理中 {rawAssetStats?.pending ?? 0}</span>
+          <div className={desktopShell ? 'mt-1 grid gap-0.5 text-[9px] leading-tight text-[#65736a]' : 'mt-1 flex flex-wrap gap-x-2 gap-y-1 text-[11px] text-[#65736a]'}>
+            <span>{desktopShell ? '待处理' : '待编译/处理中'} {rawAssetStats?.pending ?? 0}</span>
             <span>已入库 {rawAssetStats?.compiled ?? 0}</span>
             {(rawAssetStats?.skipped ?? 0) > 0 ? <span>已跳过 {rawAssetStats?.skipped ?? 0}</span> : null}
             {(rawAssetStats?.failed ?? 0) > 0 ? <span className="text-[#b42318]">失败 {rawAssetStats?.failed ?? 0}</span> : null}
           </div>
           {rawAssets && rawAssets.length > 0 ? (
-            <div className="mt-2 space-y-1.5">
+            <div className={desktopShell ? 'mt-1.5 space-y-1' : 'mt-2 space-y-1.5'}>
               {rawAssets.map((asset) => (
-                <FrogRecentAsset key={asset.id} asset={asset} queueStatus={queueStatus} />
+                <FrogRecentAsset key={asset.id} asset={asset} queueStatus={queueStatus} compact={desktopShell} />
               ))}
               {(rawAssetStats?.total ?? 0) > rawAssets.length ? (
-                <p className="px-1 text-[11px] text-[#7a827c]">
-                  这里只显示最近 5 条，完整列表在捕获页 Raw Inbox。
+                <p className={desktopShell ? 'px-0.5 text-[9px] leading-tight text-[#7a827c]' : 'px-1 text-[11px] text-[#7a827c]'}>
+                  {desktopShell ? '仅显示最近 5 条。' : '这里只显示最近 5 条，完整列表在捕获页 Raw Inbox。'}
                 </p>
               ) : null}
             </div>
           ) : (
-            <p className="mt-2 text-xs text-[#65736a]">等待投喂。</p>
+            <p className={desktopShell ? 'mt-1 text-[10px] text-[#65736a]' : 'mt-2 text-xs text-[#65736a]'}>等待投喂。</p>
           )}
         </div>
 
-        <div className="mt-3 grid gap-1.5 text-[11px] text-[#65736a]">
+        <div className={desktopShell ? 'mt-1.5 grid gap-1 text-[9px] leading-tight text-[#65736a]' : 'mt-3 grid gap-1.5 text-[11px] text-[#65736a]'}>
           <span className="inline-flex min-w-0 items-start gap-1 leading-5">
-            <Clipboard size={12} />
-            <span>支持文本、网页、表格、Word、PDF、图片</span>
+            <Clipboard size={desktopShell ? 9 : 12} />
+            <span>{desktopShell ? '文本/网页/Office/PDF/图片' : '支持文本、网页、表格、Word、PDF、图片'}</span>
           </span>
           <span className="inline-flex min-w-0 items-center gap-1 leading-5">
-            <Settings2 size={12} />
+            <Settings2 size={desktopShell ? 9 : 12} />
             <span>位置已记忆</span>
           </span>
         </div>
@@ -561,27 +566,35 @@ function FrogFace({ mood }: { mood: FrogMood }) {
   );
 }
 
-function FrogRecentAsset({ asset, queueStatus }: { asset: { id: string; filename: string; status: RawAssetStatus; error?: string }; queueStatus: RawAssetQueueSnapshot | null }) {
+function FrogRecentAsset({
+  asset,
+  queueStatus,
+  compact = false,
+}: {
+  asset: { id: string; filename: string; status: RawAssetStatus; error?: string };
+  queueStatus: RawAssetQueueSnapshot | null;
+  compact?: boolean;
+}) {
   const displayStatus = getDisplayRawAssetStatus(asset, queueStatus);
   const showError = displayStatus === 'failed' && asset.error;
 
   return (
     <div
-      className="rounded-[8px] bg-[#f7fbf7] px-2 py-1.5 text-xs text-[#65736a]"
+      className={compact ? 'rounded-[7px] bg-white/45 px-1.5 py-1 text-[9px] leading-tight text-[#65736a]' : 'rounded-[8px] bg-[#f7fbf7] px-2 py-1.5 text-xs text-[#65736a]'}
       title={showError ? `${asset.filename}\n${asset.error}` : asset.filename}
     >
-      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+      <div className={compact ? 'grid gap-0.5' : 'grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2'}>
         <span className="min-w-0 truncate">{asset.filename}</span>
         <span
           className={[
-            'shrink-0 rounded-full border px-2 py-0.5',
+            compact ? 'w-fit shrink-0 rounded-full border px-1 py-0.5 text-[8px] leading-none' : 'shrink-0 rounded-full border px-2 py-0.5',
             displayStatus === 'failed' ? 'border-[#fecaca] bg-[#fff5f5] text-[#b42318]' : 'border-[#d9e4d7]',
           ].join(' ')}
         >
           {statusLabel[displayStatus]}
         </span>
       </div>
-      {showError ? <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-[#b42318]">{asset.error}</p> : null}
+      {showError ? <p className={compact ? 'mt-1 line-clamp-2 text-[8px] leading-tight text-[#b42318]' : 'mt-1 line-clamp-2 text-[11px] leading-4 text-[#b42318]'}>{asset.error}</p> : null}
     </div>
   );
 }
@@ -597,21 +610,21 @@ function getDisplayRawAssetStatus(
   return isQueuedRetry ? 'compiling' : asset.status;
 }
 
-function FrogProgress({ progress }: { progress: ProgressState }) {
+function FrogProgress({ progress, compact = false }: { progress: ProgressState; compact?: boolean }) {
   const percent = Math.max(0, Math.min(100, Math.round(progress.percent)));
   return (
-    <div className="mt-3 rounded-[12px] border border-[#e2ebe1] bg-white px-3 py-2">
-      <div className="flex items-center justify-between gap-3 text-xs">
+    <div className={compact ? 'mt-1.5 rounded-[9px] border border-white/35 bg-white/60 px-1.5 py-1.5' : 'mt-3 rounded-[12px] border border-[#e2ebe1] bg-white px-3 py-2'}>
+      <div className={compact ? 'grid gap-0.5 text-[9px] leading-tight' : 'flex items-center justify-between gap-3 text-xs'}>
         <span className="inline-flex items-center gap-1 font-medium text-[#1f2937]">
-          {percent >= 100 ? <Check size={13} /> : <Loader2 size={13} className="animate-spin" />}
+          {percent >= 100 ? <Check size={compact ? 10 : 13} /> : <Loader2 size={compact ? 10 : 13} className="animate-spin" />}
           {progress.label}
         </span>
         <span className="tabular-nums text-[#155eef]">{percent}%</span>
       </div>
-      <div className="mt-2 h-2 overflow-hidden rounded-full bg-[#edf4ee]">
+      <div className={compact ? 'mt-1 h-1.5 overflow-hidden rounded-full bg-[#edf4ee]' : 'mt-2 h-2 overflow-hidden rounded-full bg-[#edf4ee]'}>
         <div className="h-full rounded-full bg-[#27a65b] transition-all duration-300" style={{ width: `${percent}%` }} />
       </div>
-      {progress.detail ? <p className="mt-1 text-xs leading-4 text-[#65736a]">{progress.detail}</p> : null}
+      {progress.detail ? <p className={compact ? 'mt-1 text-[9px] leading-tight text-[#65736a]' : 'mt-1 text-xs leading-4 text-[#65736a]'}>{progress.detail}</p> : null}
     </div>
   );
 }

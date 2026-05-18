@@ -60,6 +60,9 @@ export async function fetchLatestRelease(repo: string, fetchImpl: FetchLike = fe
       'X-GitHub-Api-Version': '2022-11-28',
     },
   });
+  if (response.status === 404) {
+    throw new Error('当前 GitHub 仓库还没有已发布的 Release；发布完成后再检查。');
+  }
   if (!response.ok) return null;
 
   const data = (await response.json()) as unknown;

@@ -37,7 +37,7 @@ import {
 import { db, getClientId } from '@/lib/db';
 import { ResearchPanel } from '@/components/research/ResearchPanel';
 import { useResearchStore } from '@/lib/research/store';
-import type { Entity, EntityType, Relationship, Scene } from '@/types';
+import type { Entity, EntityType, Relationship } from '@/types';
 
 type SceneNode = {
   entity: Entity;
@@ -130,15 +130,8 @@ type GraphOffset = {
   y: number;
 };
 
-type TimeScope = 'all' | '30d' | '90d' | '365d';
 type GraphViewMode = 'map' | 'space';
 type GraphColorMode = 'community' | 'type';
-
-type GraphFilters = {
-  activeTypes: Set<EntityType>;
-  activeScenes: Set<Scene>;
-  changedAfter?: number;
-};
 
 type DragState =
   | {
@@ -169,27 +162,12 @@ type GraphLegendItem = {
 };
 
 const entityTypes: EntityType[] = ['project', 'topic', 'person', 'event'];
-const sceneTypes: Scene[] = ['work', 'life', 'social', 'personal'];
 
 const entityTypeLabels: Record<EntityType, string> = {
   person: '人物',
   project: '事项',
   event: '互动',
   topic: '主题',
-};
-
-const sceneLabels: Record<Scene, string> = {
-  work: '工作',
-  life: '生活',
-  social: '社交',
-  personal: '个人',
-};
-
-const timeScopeLabels: Record<TimeScope, string> = {
-  all: '全部时间',
-  '30d': '30 天',
-  '90d': '90 天',
-  '365d': '一年',
 };
 
 const nodeColors: Record<EntityType, string> = {
@@ -252,21 +230,10 @@ export function GraphPage() {
     queries: string;
   } | null>(null);
   const queueResearch = useResearchStore((state) => state.queueResearch);
-  const [activeTypes, setActiveTypes] = useState<Set<EntityType>>(() => new Set(entityTypes));
-  const [activeScenes, setActiveScenes] = useState<Set<Scene>>(() => new Set(sceneTypes));
-  const [timeScope, setTimeScope] = useState<TimeScope>('all');
   const entities = useLiveQuery(() => db.entities.toArray(), [], []);
   const relationships = useLiveQuery(() => db.relationships.toArray(), [], []);
   const dismissals = useLiveQuery(() => db.graphInsightDismissals.toArray(), [], []);
-  const filters = useMemo<GraphFilters>(
-    () => ({
-      activeTypes,
-      activeScenes,
-      changedAfter: changedAfterForScope(timeScope),
-    }),
-    [activeTypes, activeScenes, timeScope],
-  );
-  const filteredEntities = useMemo(() => filterGraphEntities(entities, filters), [entities, filters]);
+  const filteredEntities = useMemo(() => entities, [entities]);
   const filteredEntityIds = useMemo(
     () => new Set(filteredEntities.map((entity) => entity.id)),
     [filteredEntities],
@@ -396,30 +363,6 @@ export function GraphPage() {
     event.preventDefault();
     const factor = Math.exp(-event.deltaY * 0.0012);
     setZoom((value) => clamp(value * factor, 0.62, 1.95));
-  }
-
-  function toggleType(type: EntityType) {
-    setActiveTypes((current) => {
-      const next = new Set(current);
-      if (next.has(type) && next.size > 1) {
-        next.delete(type);
-      } else {
-        next.add(type);
-      }
-      return next;
-    });
-  }
-
-  function toggleScene(scene: Scene) {
-    setActiveScenes((current) => {
-      const next = new Set(current);
-      if (next.has(scene) && next.size > 1) {
-        next.delete(scene);
-      } else {
-        next.add(scene);
-      }
-      return next;
-    });
   }
 
   function handleCanvasPointerDown(event: ReactPointerEvent<SVGSVGElement>) {
@@ -682,15 +625,6 @@ export function GraphPage() {
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-2 text-xs">
-              {entityTypes.map((type) => (
-                <FilterPill
-                  key={type}
-                  active={activeTypes.has(type)}
-                  color={nodeColors[type]}
-                  label={entityTypeLabels[type]}
-                  onClick={() => toggleType(type)}
-                />
-              ))}
               {isGraphFullscreen ? (
                 <button
                   type="button"
@@ -705,47 +639,10 @@ export function GraphPage() {
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#eeeeed] px-5 py-3">
-            <div className="flex flex-wrap gap-2 text-xs">
-              {sceneTypes.map((scene) => (
-                <button
-                  key={scene}
-                  type="button"
-                  onClick={() => toggleScene(scene)}
-                  className={[
-                    'rounded-full border px-2.5 py-1 transition',
-                    activeScenes.has(scene)
-                      ? 'border-[#155eef] bg-[#f4f8ff] text-[#155eef]'
-                      : 'border-[#d9d9d6] bg-white text-[#626965]',
-                  ].join(' ')}
-                >
-                  {sceneLabels[scene]}
-                </button>
-              ))}
-            </div>
-            <div className="flex flex-wrap gap-2 text-xs">
-              {(Object.keys(timeScopeLabels) as TimeScope[]).map((scope) => (
-                <button
-                  key={scope}
-                  type="button"
-                  onClick={() => setTimeScope(scope)}
-                  className={[
-                    'rounded-full border px-2.5 py-1 transition',
-                    timeScope === scope
-                      ? 'border-[#155eef] bg-[#f4f8ff] text-[#155eef]'
-                      : 'border-[#d9d9d6] bg-white text-[#626965]',
-                  ].join(' ')}
-                >
-                  {timeScopeLabels[scope]}
-                </button>
-              ))}
-            </div>
-          </div>
-
           <div className="relative min-h-0 flex-1 bg-[#fbfbfa]">
             {scene.nodes.length === 0 ? (
               <div className="flex h-full min-h-[360px] items-center justify-center px-6 text-center text-sm text-[#626965]">
-                当前筛选范围内没有可展示实体。可以放宽类型、场景或时间条件。
+                当前没有可展示的图谱节点。请先完成原文件入库，或批量生成/更新 Wiki 页。
               </div>
             ) : viewMode === 'space' ? (
               <GraphSpaceView
@@ -1610,32 +1507,6 @@ function roundRect(context: CanvasRenderingContext2D, x: number, y: number, widt
   context.closePath();
 }
 
-function FilterPill({
-  active,
-  color,
-  label,
-  onClick,
-}: {
-  active: boolean;
-  color: string;
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={[
-        'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 transition',
-        active ? 'border-[#155eef] bg-[#f4f8ff] text-[#155eef]' : 'border-[#d9d9d6] bg-[#fbfbfa] text-[#4b5563]',
-      ].join(' ')}
-    >
-      <span className="size-2 rounded-full" style={{ backgroundColor: active ? color : '#c8c8c5' }} />
-      {label}
-    </button>
-  );
-}
-
 function GraphLegendCard({ title, items }: { title: string; items: GraphLegendItem[] }) {
   return (
     <div className="pointer-events-auto absolute bottom-4 left-4 z-10 w-[172px] max-w-[calc(100%-2rem)] rounded-[10px] border border-[#d9d9d6] bg-white/95 p-3 shadow-[0_12px_32px_rgba(15,23,42,0.12)] backdrop-blur">
@@ -1682,22 +1553,6 @@ function InsightIcon({ type }: { type: keyof typeof insightTypeLabels }) {
   if (type === 'bridge-node') return <GitBranch size={16} className={className} />;
   if (type === 'dense-hub') return <Network size={16} className={className} />;
   return <Radar size={16} className={className} />;
-}
-
-function filterGraphEntities(entities: Entity[], filters: GraphFilters) {
-  return entities.filter((entity) => {
-    if (!filters.activeTypes.has(entity.type)) return false;
-    if (filters.changedAfter && entity.updatedAt < filters.changedAfter) return false;
-    if (filters.activeScenes.size === sceneTypes.length) return true;
-    if (entity.scenes.length === 0) return filters.activeScenes.has('work');
-    return entity.scenes.some((scene) => filters.activeScenes.has(scene));
-  });
-}
-
-function changedAfterForScope(scope: TimeScope) {
-  if (scope === 'all') return undefined;
-  const days = scope === '30d' ? 30 : scope === '90d' ? 90 : 365;
-  return Date.now() - days * 24 * 60 * 60 * 1000;
 }
 
 function buildHighlightedNodeIds(scene: GraphScene, hoveredNodeId: string | null, selectedInsight: GraphInsight | null) {
