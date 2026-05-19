@@ -18,6 +18,7 @@ import {
 
 vi.mock('@/lib/llm/providerSettings', () => ({
   loadProviderSettings: () => ({}),
+  getProviderConfigForRole: () => null,
   resolveProviderConfigForRole: (_settings: unknown, role: string) => {
     const config =
       role === 'vision'
@@ -475,7 +476,7 @@ describe('raw assets', () => {
       wikiCompiler: async (entityId) => {
         const entity = await db.entities.get(entityId);
         await db.entities.update(entityId, {
-          wikiMarkdown: `# ${entity?.title ?? entityId}\n\nCompiled from raw asset.`,
+          wikiMarkdown: buildUsefulWikiMarkdown(entity?.title ?? entityId),
           wikiCompiledAt: Date.now(),
           wikiCompileModel: 'test:mock',
         });
@@ -486,7 +487,30 @@ describe('raw assets', () => {
 
     expect(result).toMatchObject({ total: 1, processed: 1, failed: 0 });
     expect(asset?.status).toBe('compiled');
-    expect(entity?.wikiMarkdown).toContain('Compiled from raw asset.');
+    expect(entity?.wikiMarkdown).toContain('source-backed detail');
+  });
+
+  it('does not count short wiki markdown as a completed raw-to-wiki generation', async () => {
+    const file = new File(['OpenMaic is an open source project.'], 'openmaic-short.md', { type: 'text/markdown' });
+    await createRawAssetFromFile(file);
+
+    const result = await processRawAssetQueue({
+      compileWiki: true,
+      extractor: async (content) => ({ draft: createLocalCaptureDraft(content) }),
+      wikiCompiler: async (entityId) => {
+        const entity = await db.entities.get(entityId);
+        await db.entities.update(entityId, {
+          wikiMarkdown: `# ${entity?.title ?? entityId}\n\nToo short.`,
+          wikiCompiledAt: Date.now(),
+          wikiCompileModel: 'test:mock',
+        });
+      },
+    });
+    const asset = await db.rawAssets.orderBy('createdAt').first();
+
+    expect(result).toMatchObject({ total: 1, processed: 1, failed: 1 });
+    expect(asset?.status).toBe('wiki_failed');
+    expect(asset?.error).toContain('incomplete content');
   });
 
   it('marks only the wiki stage as failed when related wiki generation fails', async () => {

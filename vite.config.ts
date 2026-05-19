@@ -4,6 +4,7 @@ import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import { fileURLToPath, URL } from 'node:url';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createReadStream, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readdir, readFile as readNodeFile, rm, stat, writeFile as writeNodeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -40,6 +41,7 @@ import {
   buildGeminiGenerateContentUrl,
   buildOpenAiChatCompletionsUrl,
   buildProviderTextRequest,
+  type LlmTextRequestInput,
 } from './src/lib/llm/textProvider';
 import {
   buildCaptureAnalysisFromMarkdownPrompt,
@@ -64,6 +66,12 @@ import {
 } from './src/lib/ai/wikiPatch';
 
 const STRUCTURED_JSON_MAX_TOKENS = 8000;
+const DEV_CAPTURE_DIGEST_PROMPT_VERSION = '2026-05-18-long-pdf-v1';
+const DEV_CAPTURE_DIGEST_CACHE_MAX_ENTRIES = 400;
+const devCaptureDigestCache = new Map<
+  string,
+  { text: string; providerName: string; model: string; createdAt: number; usedAt: number }
+>();
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
@@ -270,6 +278,7 @@ export default defineConfig(({ mode }) => {
                 content?: string;
                 entityIndex?: unknown[];
                 workspaceContext?: CaptureWorkspaceContext;
+                providerConfig?: LlmProviderConfig | null;
               };
               const content = body.content?.trim();
               if (!content) {
@@ -277,6 +286,27 @@ export default defineConfig(({ mode }) => {
                 return;
               }
               const workspaceContext = normalizeCaptureWorkspaceContext(body.workspaceContext);
+              const requestProviderConfig = normalizeRequestProviderConfig(body.providerConfig);
+
+              if (requestProviderConfig) {
+                const providerResult = await requestConfiguredProviderTwoStepCapture({
+                  config: requestProviderConfig,
+                  content,
+                  entityIndex: body.entityIndex ?? [],
+                  workspaceContext,
+                });
+                if (!providerResult.ok) {
+                  sendJson(res, 502, { error: `${requestProviderConfig.providerId} failed: ${providerResult.error}` });
+                  return;
+                }
+                sendJson(res, 200, {
+                  draft: assertUsableDraft(providerResult.draft, requestProviderConfig.providerId),
+                  provider: requestProviderConfig.providerId,
+                  model: requestProviderConfig.model,
+                  mode: 'two-step',
+                });
+                return;
+              }
 
               const minimaxResult = minimaxApiKey
                 ? await requestOpenAiCompatibleTwoStepCapture({
@@ -1409,6 +1439,168 @@ function formatJsonRepairError(error: unknown, previous?: unknown) {
   return earlier && earlier !== current ? `${current}；首次错误：${earlier}` : current;
 }
 
+async function requestConfiguredProviderTwoStepCapture({
+  config,
+  content,
+  entityIndex,
+  workspaceContext,
+}: {
+  config: LlmProviderConfig;
+  content: string;
+  entityIndex: unknown[];
+  workspaceContext?: CaptureWorkspaceContext;
+}): Promise<{ ok: true; draft: ReturnType<typeof normalizeCaptureAnalysisToCaptureDraft> } | { ok: false; error: string }> {
+  try {
+    const structuredContentResult = await prepareConfiguredProviderContentForStructuredCapture({
+      config,
+      content,
+      workspaceContext,
+    });
+    if (!structuredContentResult.ok) return structuredContentResult;
+
+    const structuredContent = structuredContentResult.content;
+    const entityIndexJson = JSON.stringify(entityIndex.slice(0, 120), null, 2);
+    const markdownAnalysisResult = await requestConfiguredProviderText({
+      config,
+      prompt: buildCaptureMarkdownAnalysisPrompt(structuredContent, entityIndexJson, workspaceContext),
+      systemPrompt: 'You are the MyWiki source reading agent. Output Markdown analysis only, not JSON.',
+      maxTokens: 3200,
+    });
+    if (!markdownAnalysisResult.ok) return markdownAnalysisResult;
+
+    const analysisSourceExcerpt = buildStructuredCaptureExcerpt(structuredContent, 14000);
+    const structuredAnalysisResult = await requestConfiguredProviderText({
+      config,
+      prompt: buildCaptureAnalysisFromMarkdownPrompt({
+        sourceExcerpt: analysisSourceExcerpt,
+        markdownAnalysis: markdownAnalysisResult.text,
+        entityIndexJson,
+        workspaceContext,
+      }),
+      systemPrompt: 'You are the MyWiki structured ingest agent. Output only the schema-compliant JSON object.',
+      maxTokens: STRUCTURED_JSON_MAX_TOKENS,
+      structuredOutput: buildCaptureAnalysisStructuredOutput(),
+    });
+    if (!structuredAnalysisResult.ok) return structuredAnalysisResult;
+
+    const analysis = await normalizeCaptureAnalysisWithConfiguredProviderRepair({
+      config,
+      structuredContent: analysisSourceExcerpt,
+      entityIndexJson,
+      rawText: structuredAnalysisResult.text,
+      workspaceContext,
+    });
+    return { ok: true, draft: normalizeCaptureAnalysisToCaptureDraft(analysis, structuredContent, workspaceContext) };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : `${config.providerId} two-step capture failed.`,
+    };
+  }
+}
+
+async function normalizeCaptureAnalysisWithConfiguredProviderRepair({
+  config,
+  structuredContent,
+  entityIndexJson,
+  rawText,
+  workspaceContext,
+}: {
+  config: LlmProviderConfig;
+  structuredContent: string;
+  entityIndexJson: string;
+  rawText: string;
+  workspaceContext?: CaptureWorkspaceContext;
+}) {
+  try {
+    return normalizeCaptureAnalysis(rawText);
+  } catch (firstError) {
+    const repairResult = await requestConfiguredProviderText({
+      config,
+      prompt: buildCaptureAnalysisJsonRepairPrompt(rawText, structuredContent, entityIndexJson, workspaceContext),
+      systemPrompt: 'You are the MyWiki JSON repair agent. Output only a valid JSON object, not Markdown.',
+      maxTokens: STRUCTURED_JSON_MAX_TOKENS,
+      structuredOutput: buildCaptureAnalysisStructuredOutput('repair_capture_analysis'),
+    });
+    if (!repairResult.ok) {
+      throw new Error(`Capture analysis JSON repair failed: ${repairResult.error}`);
+    }
+
+    try {
+      return normalizeCaptureAnalysis(repairResult.text);
+    } catch (secondError) {
+      throw new Error(`Capture analysis JSON is still invalid after repair: ${formatJsonRepairError(secondError, firstError)}`);
+    }
+  }
+}
+
+async function prepareConfiguredProviderContentForStructuredCapture({
+  config,
+  content,
+  workspaceContext,
+}: {
+  config: LlmProviderConfig;
+  content: string;
+  workspaceContext?: CaptureWorkspaceContext;
+}): Promise<{ ok: true; content: string } | { ok: false; error: string }> {
+  const fullSource = content.trim();
+  const structuredSource = buildCaptureSourceForStructuredProcessing(fullSource);
+  if (!shouldUseCaptureDigest(fullSource, resolveCaptureDigestThreshold(config.contextWindow))) {
+    return { ok: true, content: structuredSource };
+  }
+
+  const chunks = splitCaptureContentIntoChunks(fullSource, resolveDevCaptureDigestChunkSize(config.contextWindow), resolveDevCaptureDigestChunkLimit(fullSource.length));
+  const sourceIdentity = buildCaptureSourceIdentityBlock(fullSource);
+  const digests: string[] = [];
+
+  for (let index = 0; index < chunks.length; index += 1) {
+    const cacheId = buildDevCaptureDigestCacheId({
+      baseUrl: config.endpoint,
+      model: config.model,
+      providerName: config.providerId,
+      chunk: chunks[index],
+      workspaceContext,
+    });
+    const cached = devCaptureDigestCache.get(cacheId);
+    if (cached?.text?.trim()) {
+      cached.usedAt = Date.now();
+      digests.push(`## Chunk ${index + 1}/${chunks.length}\n\n${cached.text}`);
+      continue;
+    }
+
+    const digestResult = await requestConfiguredProviderText({
+      config,
+      prompt: buildCaptureDigestPrompt(chunks[index], index + 1, chunks.length, workspaceContext),
+      systemPrompt: 'You are the MyWiki long-document reading agent. Output only a Markdown reading digest, not JSON.',
+      maxTokens: 1800,
+    });
+    if (!digestResult.ok) return { ok: false, error: `${config.providerId} long document digest failed: ${digestResult.error}` };
+
+    const now = Date.now();
+    devCaptureDigestCache.set(cacheId, {
+      text: digestResult.text,
+      providerName: config.providerId,
+      model: config.model,
+      createdAt: now,
+      usedAt: now,
+    });
+    trimDevCaptureDigestCache();
+    digests.push(`## Chunk ${index + 1}/${chunks.length}\n\n${digestResult.text}`);
+  }
+
+  return {
+    ok: true,
+    content: [
+      ...(sourceIdentity ? [sourceIdentity, ''] : []),
+      '# Long Document Markdown Digest',
+      '',
+      'The following digest was generated from the complete raw source in chunks. The complete source remains stored in the raw entry.',
+      '',
+      ...digests,
+    ].join('\n'),
+  };
+}
+
 async function prepareContentForStructuredCapture({
   apiKey,
   baseUrl,
@@ -1426,6 +1618,47 @@ async function prepareContentForStructuredCapture({
   workspaceContext?: CaptureWorkspaceContext;
   extraBody?: Record<string, unknown>;
 }): Promise<{ ok: true; content: string } | { ok: false; error: string }> {
+  {
+    const fullSource = content.trim();
+    const structuredSource = buildCaptureSourceForStructuredProcessing(fullSource);
+    if (!shouldUseCaptureDigest(fullSource, resolveCaptureDigestThreshold(200000))) {
+      return { ok: true, content: structuredSource };
+    }
+
+    const chunks = splitCaptureContentIntoChunks(fullSource, resolveDevCaptureDigestChunkSize(200000), resolveDevCaptureDigestChunkLimit(fullSource.length));
+    const sourceIdentity = buildCaptureSourceIdentityBlock(fullSource);
+    const digests: string[] = [];
+
+    for (let index = 0; index < chunks.length; index += 1) {
+      const digestResult = await getOrCreateDevCaptureDigest({
+        apiKey,
+        baseUrl,
+        model,
+        providerName,
+        chunk: chunks[index],
+        chunkIndex: index + 1,
+        totalChunks: chunks.length,
+        workspaceContext,
+        extraBody,
+      });
+      if (!digestResult.ok) return digestResult;
+      digests.push(`## Chunk ${index + 1}/${chunks.length}\n\n${digestResult.text}`);
+    }
+
+    return {
+      ok: true,
+      content: [
+        ...(sourceIdentity ? [sourceIdentity, ''] : []),
+        '# Long Document Markdown Digest',
+        '',
+        'The following digest was generated from the complete raw source in chunks. The complete source remains stored in the raw entry.',
+        '',
+        ...digests,
+      ].join('\n'),
+    };
+  }
+
+  /*
   const structuredSource = buildCaptureSourceForStructuredProcessing(content);
   if (!shouldUseCaptureDigest(structuredSource, resolveCaptureDigestThreshold(200000))) {
     return { ok: true, content: structuredSource };
@@ -1464,6 +1697,111 @@ async function prepareContentForStructuredCapture({
       ...digests,
     ].join('\n'),
   };
+  */
+}
+
+function resolveDevCaptureDigestChunkSize(contextWindow?: number) {
+  if (!Number.isFinite(contextWindow) || !contextWindow || contextWindow < 32_000) return 8000;
+  if (contextWindow >= 128_000) return 14_000;
+  return 10_000;
+}
+
+function resolveDevCaptureDigestChunkLimit(contentLength: number) {
+  if (contentLength <= 50_000) return 6;
+  if (contentLength <= 120_000) return 10;
+  if (contentLength <= 260_000) return 16;
+  return 20;
+}
+
+async function getOrCreateDevCaptureDigest({
+  apiKey,
+  baseUrl,
+  model,
+  providerName,
+  chunk,
+  chunkIndex,
+  totalChunks,
+  workspaceContext,
+  extraBody,
+}: {
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  providerName: string;
+  chunk: string;
+  chunkIndex: number;
+  totalChunks: number;
+  workspaceContext?: CaptureWorkspaceContext;
+  extraBody?: Record<string, unknown>;
+}): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
+  const cacheId = buildDevCaptureDigestCacheId({ baseUrl, model, providerName, chunk, workspaceContext });
+  const cached = devCaptureDigestCache.get(cacheId);
+  if (cached?.text?.trim()) {
+    cached.usedAt = Date.now();
+    return { ok: true, text: cached.text };
+  }
+
+  const digestResult = await requestOpenAiCompatibleText({
+    apiKey,
+    baseUrl,
+    model,
+    providerName,
+    prompt: buildCaptureDigestPrompt(chunk, chunkIndex, totalChunks, workspaceContext),
+    systemPrompt: 'You are the MyWiki long-document reading agent. Output only a Markdown reading digest, not JSON.',
+    maxTokens: 1800,
+    extraBody: withoutJsonResponseFormat(extraBody),
+  });
+
+  if (!digestResult.ok) {
+    return { ok: false, error: `${providerName} long document digest failed: ${digestResult.error}` };
+  }
+
+  const now = Date.now();
+  devCaptureDigestCache.set(cacheId, {
+    text: digestResult.text,
+    providerName,
+    model,
+    createdAt: now,
+    usedAt: now,
+  });
+  trimDevCaptureDigestCache();
+  return digestResult;
+}
+
+function buildDevCaptureDigestCacheId(input: {
+  baseUrl: string;
+  model: string;
+  providerName: string;
+  chunk: string;
+  workspaceContext?: CaptureWorkspaceContext;
+}) {
+  return createHash('sha256')
+    .update(
+      [
+        DEV_CAPTURE_DIGEST_PROMPT_VERSION,
+        input.providerName,
+        input.baseUrl,
+        input.model,
+        input.workspaceContext?.templateId ?? '',
+        input.workspaceContext?.purpose ?? '',
+        input.workspaceContext?.schema ?? '',
+        input.chunk,
+      ].join('\n\n---mywiki-digest-cache---\n\n'),
+    )
+    .digest('hex');
+}
+
+function trimDevCaptureDigestCache() {
+  if (devCaptureDigestCache.size <= DEV_CAPTURE_DIGEST_CACHE_MAX_ENTRIES) return;
+  const keep = new Set(
+    [...devCaptureDigestCache.entries()]
+      .sort((left, right) => right[1].usedAt - left[1].usedAt)
+      .slice(0, DEV_CAPTURE_DIGEST_CACHE_MAX_ENTRIES)
+      .map(([key]) => key),
+  );
+  for (const key of devCaptureDigestCache.keys()) {
+    if (!keep.has(key)) devCaptureDigestCache.delete(key);
+  }
 }
 
 function withoutJsonResponseFormat(extraBody?: Record<string, unknown>) {
@@ -1754,16 +2092,15 @@ async function requestConfiguredProviderText({
   prompt,
   systemPrompt,
   maxTokens,
+  responseFormat,
+  structuredOutput,
 }: {
   config: LlmProviderConfig;
-  prompt: string;
-  systemPrompt: string;
-  maxTokens: number;
-}): Promise<{ ok: true; text: string; providerName: string; model: string } | { ok: false; error: string; providerName: string; model: string }> {
+} & LlmTextRequestInput): Promise<{ ok: true; text: string; providerName: string; model: string } | { ok: false; error: string; providerName: string; model: string }> {
   const providerName = config.providerId;
   try {
-    const request = buildProviderTextRequest(config, { prompt, systemPrompt, maxTokens });
-    const response = await fetch(request.url, {
+    const request = buildProviderTextRequest(config, { prompt, systemPrompt, maxTokens, responseFormat, structuredOutput });
+    const response = await fetchWithTimeout(request.url, {
       method: 'POST',
       headers: request.headers,
       body: JSON.stringify(request.body),
@@ -1779,7 +2116,7 @@ async function requestConfiguredProviderText({
       };
     }
 
-    const text = extractProviderText(data, request.responseApiMode);
+    const text = extractProviderText(data, request.responseApiMode, { includeToolUseInput: Boolean(structuredOutput) });
     if (!text) {
       return { ok: false, error: `${providerName} returned empty content.`, providerName, model: config.model };
     }
@@ -1867,7 +2204,7 @@ async function requestOpenAiCompatibleTextOnce({
           },
         }
       : null;
-    const response = await fetch(`${baseUrl}/chat/completions`, {
+    const response = await fetchWithTimeout(`${baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${apiKey}`,
@@ -1926,14 +2263,28 @@ async function requestOpenAiCompatibleTextOnce({
   }
 }
 
-function extractProviderText(data: unknown, apiMode: LlmProviderConfig['apiMode']) {
+function extractProviderText(
+  data: unknown,
+  apiMode: LlmProviderConfig['apiMode'],
+  options: { includeToolUseInput?: boolean } = {},
+) {
   if (!data || typeof data !== 'object') return '';
   const payload = data as Record<string, unknown>;
 
   if (apiMode === 'anthropic-compatible') {
     const content = Array.isArray(payload.content) ? payload.content : [];
     return content
-      .map((part) => (part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string' ? (part as { text: string }).text : ''))
+      .map((part) =>
+        part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string'
+          ? (part as { text: string }).text
+          : options.includeToolUseInput &&
+              part &&
+              typeof part === 'object' &&
+              (part as { type?: unknown }).type === 'tool_use' &&
+              (part as { input?: unknown }).input !== undefined
+            ? JSON.stringify((part as { input: unknown }).input)
+            : '',
+      )
       .join('')
       .trim();
   }
@@ -1949,7 +2300,13 @@ function extractProviderText(data: unknown, apiMode: LlmProviderConfig['apiMode'
   }
 
   const choices = Array.isArray(payload.choices) ? payload.choices : [];
-  const first = choices[0] as { message?: { content?: string } } | undefined;
+  const first = choices[0] as
+    | { message?: { content?: string; tool_calls?: Array<{ function?: { arguments?: string } }> } }
+    | undefined;
+  if (options.includeToolUseInput) {
+    const toolArguments = first?.message?.tool_calls?.find((call) => call.function?.arguments)?.function?.arguments;
+    if (toolArguments?.trim()) return toolArguments.trim();
+  }
   return first?.message?.content?.trim() ?? '';
 }
 
@@ -1966,6 +2323,22 @@ function isRetryableProviderError(error: string) {
   return /(429|rate.?limit|too many requests|timeout|timed out|temporarily|overloaded|503|502|504|500|ECONNRESET|ECONNREFUSED|network|fetch failed|socket|TLS|connection)/i.test(
     error,
   );
+}
+
+async function fetchWithTimeout(input: string | URL | Request, init: RequestInit = {}, timeoutMs = 600_000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(new Error(`Request timed out after ${timeoutMs}ms.`)), timeoutMs);
+  const externalSignal = init.signal;
+  const abortFromExternal = () => controller.abort(externalSignal?.reason ?? new Error('Request aborted.'));
+  if (externalSignal?.aborted) abortFromExternal();
+  else externalSignal?.addEventListener('abort', abortFromExternal, { once: true });
+
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+    externalSignal?.removeEventListener('abort', abortFromExternal);
+  }
 }
 
 function retryDelayMs(attempt: number) {
@@ -2181,7 +2554,7 @@ async function fetchUrlReadableText(url: string) {
     headers: {
       'User-Agent':
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) MyWiki/0.1 Safari/537.36',
-      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5',
+      Accept: `text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*${'/'}*;q=0.5`,
     },
   });
   if (!response.ok) {

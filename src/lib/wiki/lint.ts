@@ -25,6 +25,7 @@ export type WikiLintPage = {
   aliases?: string[];
   absolutePath?: string;
   related?: string[];
+  sources?: string[];
   wikilinks?: string[];
 };
 
@@ -140,7 +141,7 @@ export function runStructuralWikiLint(pages: WikiLintPage[], contextMap?: WikiLi
         pageId: page.id,
         pagePath: page.path,
         title: 'Broken Link',
-        detail: `Broken link: [[${link}]] - target page not found.`,
+        detail: `断链：找不到 [[${link}]] 指向的页面。`,
         affectedPages: [page.path],
       });
     }
@@ -265,6 +266,7 @@ type NormalizedLintPage = WikiLintPage & {
   aliases: string[];
   wikilinks: string[];
   related: string[];
+  sources: string[];
 };
 
 type TargetMapEntry = {
@@ -286,14 +288,23 @@ function normalizeLintPage(page: WikiLintPage): NormalizedLintPage {
     aliases: Array.from(new Set([...(page.aliases ?? []), ...stringArray(frontmatter.data.aliases)].map(normalizeWikiReferenceValue).filter(Boolean))),
     wikilinks: (page.wikilinks ?? extractWikilinks(frontmatter.body)).map(normalizeWikiReferenceValue).filter(Boolean),
     related: (page.related ?? stringArray(frontmatter.data.related)).map(normalizeWikiReferenceValue).filter(Boolean),
+    sources: (page.sources ?? stringArray(frontmatter.data.sources)).map(normalizeWikiReferenceValue).filter(Boolean),
   };
 }
 
 function buildPageTargetMap(pages: NormalizedLintPage[], contextMap?: WikiLintContextMap) {
   const map = new Map<string, TargetMapEntry>();
+  const ambiguousKeys = new Set<string>();
   const addEntry = (key: string, entry: TargetMapEntry, options: { overwrite?: boolean } = {}) => {
     for (const normalized of buildReferenceLookupKeys(key)) {
       if (!normalized) continue;
+      if (ambiguousKeys.has(normalized)) continue;
+      const existing = map.get(normalized);
+      if (existing && existing.canonicalKey !== entry.canonicalKey && !options.overwrite) {
+        map.delete(normalized);
+        ambiguousKeys.add(normalized);
+        continue;
+      }
       if (options.overwrite || !map.has(normalized)) map.set(normalized, entry);
     }
   };
@@ -306,11 +317,12 @@ function buildPageTargetMap(pages: NormalizedLintPage[], contextMap?: WikiLintCo
       page.slug,
       page.title,
       ...page.aliases,
+      ...(page.type === 'source' ? page.sources : []),
       slugFromPath(page.path),
     ];
     const canonicalKey = page.canonicalKey;
     for (const key of keys) {
-      addEntry(key, { page, canonicalKey }, { overwrite: true });
+      addEntry(key, { page, canonicalKey });
     }
   }
 
@@ -324,7 +336,13 @@ function buildPageTargetMap(pages: NormalizedLintPage[], contextMap?: WikiLintCo
 }
 
 function collectOutgoingReferences(page: NormalizedLintPage) {
-  return Array.from(new Set([...page.wikilinks, ...page.related].map(normalizeWikiReferenceValue).filter(Boolean)));
+  return Array.from(
+    new Set(
+      [...page.wikilinks, ...page.related]
+        .map(normalizeWikiReferenceValue)
+        .filter((reference) => reference && !isRawWorkspaceReference(reference)),
+    ),
+  );
 }
 
 function resolveReference(reference: string, targetMap: Map<string, TargetMapEntry>) {
@@ -531,6 +549,7 @@ function normalizeReferenceKey(value: string) {
     .replace(/\s*([()[\]{}])\s*/g, '$1')
     .replace(/\s+/g, ' ')
     .trim()
+    .replace(/\/+$/g, '')
     .toLowerCase();
 }
 
@@ -540,6 +559,17 @@ function buildReferenceLookupKeys(value: string) {
     const normalized = normalizeReferenceKey(candidate);
     if (!normalized) return;
     keys.add(normalized);
+    keys.add(normalized.replace(/[\s_-]+/g, '-'));
+    const withoutSourceDocumentExtension = stripSourceDocumentExtension(normalized);
+    if (withoutSourceDocumentExtension) {
+      keys.add(withoutSourceDocumentExtension);
+      keys.add(withoutSourceDocumentExtension.replace(/[\s_-]+/g, '-'));
+    }
+    const withoutAsciiParenthetical = stripAsciiParentheticalAlias(normalized);
+    if (withoutAsciiParenthetical) {
+      keys.add(withoutAsciiParenthetical);
+      keys.add(withoutAsciiParenthetical.replace(/[\s_-]+/g, '-'));
+    }
   };
 
   add(value);
@@ -549,6 +579,26 @@ function buildReferenceLookupKeys(value: string) {
   add(withoutWiki.replace(/\.md$/i, ''));
 
   return Array.from(keys);
+}
+
+function stripAsciiParentheticalAlias(value: string) {
+  if (!/[\u4e00-\u9fa5]/.test(value)) return '';
+  const stripped = value
+    .replace(/\((?=[^)]*[a-z0-9])[^)]*\)/gi, '')
+    .replace(/[\s_-]+/g, ' ')
+    .trim();
+  if (!stripped || stripped === value || stripped.length < 2) return '';
+  return stripped;
+}
+
+function stripSourceDocumentExtension(value: string) {
+  const stripped = value.replace(/\.(?:pdf|docx?|pptx?|xlsx?|xlsm|xlsb|csv|tsv|zip|html?|md|markdown|txt)$/i, '');
+  if (!stripped || stripped === value) return '';
+  return stripped;
+}
+
+function isRawWorkspaceReference(value: string) {
+  return /^raw\//i.test(value.replace(/\\/g, '/'));
 }
 
 function severityRank(severity: WikiLintSeverity) {

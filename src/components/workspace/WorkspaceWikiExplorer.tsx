@@ -26,7 +26,10 @@ import {
 import { resizeTriPaneLayout, type TriPaneLayout } from '@/lib/ui/triPaneLayout';
 import { parseMarkdownFrontmatter } from '@/lib/wiki/frontmatter';
 import { sanitizeWikiMarkdownOutput } from '@/lib/wiki/markdownCompiler';
+import { buildWikiTargetPath, normalizeWikiPageType, parseWikiSchemaPageTypes } from '@/lib/wiki/schemaRules';
+import { joinWorkspacePath } from '@/lib/workspace/paths';
 import { groupWikiPagesByType } from '@/lib/wiki/pageTree';
+import { normalizeEditedWikiMarkdownType } from '@/lib/wiki/browserWikiPageHelpers';
 import type { WikiPageIndexEntry } from '@/lib/wiki/scanner';
 import {
   buildWorkspaceFileEntries,
@@ -186,17 +189,50 @@ export function WorkspaceWikiExplorer() {
     setSaving(true);
     setSaveStatus('');
     try {
-      await storage.writeTextFile(selectedPage.absolutePath, draft);
-      setContent(draft);
+      const rules = await readWorkspaceSchemaRules();
+      const saveTarget = resolveWorkspaceWikiSaveTarget(draft, selectedPage, rules);
+      const normalizedDraft = normalizeEditedWikiMarkdownType(sanitizeWikiMarkdownOutput(draft).trim(), saveTarget.type);
+      await storage.writeTextFile(saveTarget.absolutePath, normalizedDraft);
+      if (saveTarget.absolutePath !== selectedPage.absolutePath && storage.deletePath) {
+        await storage.deletePath(workspaceRoot, selectedPage.absolutePath);
+      }
+      setContent(normalizedDraft);
       setEditing(false);
       setSaveStatus('已保存');
       await loadWorkspace();
-      setSelected({ kind: 'wiki', path: selectedPage.absolutePath });
+      setSelected({ kind: 'wiki', path: saveTarget.absolutePath });
     } catch (saveError) {
       setSaveStatus(saveError instanceof Error ? saveError.message : '保存失败。');
     } finally {
       setSaving(false);
     }
+  }
+
+  async function readWorkspaceSchemaRules() {
+    try {
+      const schemaPath = snapshot?.layout.schema;
+      const schema = schemaPath ? await storage?.readTextFile(schemaPath) : '';
+      return parseWikiSchemaPageTypes(schema);
+    } catch {
+      return parseWikiSchemaPageTypes();
+    }
+  }
+
+  function resolveWorkspaceWikiSaveTarget(
+    markdown: string,
+    page: WikiPageIndexEntry,
+    rules: ReturnType<typeof parseWikiSchemaPageTypes>,
+  ) {
+    const cleaned = sanitizeWikiMarkdownOutput(markdown).trim();
+    const parsed = parseMarkdownFrontmatter(cleaned);
+    const type = normalizeWikiPageType(typeof parsed.data.type === 'string' ? parsed.data.type : undefined) ?? page.type;
+    const title = frontmatterString(parsed.data.title) || firstMarkdownHeading(parsed.body) || page.title || page.slug;
+    const relativePath = buildWikiTargetPath(type, title, rules);
+    return {
+      type,
+      relativePath,
+      absolutePath: joinWorkspacePath(workspaceRoot, relativePath),
+    };
   }
 
   async function deleteWorkspacePath(path: string, label: string) {
@@ -705,6 +741,14 @@ function PaneResizer({
       <div className="w-px rounded-full bg-transparent transition group-hover:bg-[#c7d7ff]" />
     </div>
   );
+}
+
+function frontmatterString(value: unknown) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function firstMarkdownHeading(markdown: string) {
+  return markdown.match(/^#\s+(.+)$/m)?.[1]?.trim() ?? '';
 }
 
 function MarkdownPreview({ markdown }: { markdown: string }) {

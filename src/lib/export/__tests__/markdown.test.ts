@@ -170,6 +170,49 @@ describe('markdown export', () => {
     expect(sourcePage).toContain('type: "source"');
   });
 
+  it('exports manually edited pages to the folder declared by frontmatter type', () => {
+    const now = Date.now();
+    const entity: Entity = {
+      id: 'project_publication',
+      clientId: 'test-client',
+      type: 'project',
+      title: '出版业',
+      summary: '旧摘要。',
+      tags: ['项目', '产业链', '出版'],
+      scenes: ['work'],
+      properties: { status: 'active' },
+      sourceEntries: [],
+      createdAt: now,
+      updatedAt: now,
+      wikiMarkdown: [
+        '---',
+        'type: concept',
+        'title: 出版业',
+        'tags: ["项目","产业链","出版"]',
+        '---',
+        '',
+        '# 出版业',
+        '',
+        '## 摘要',
+        '出版业应归入概念目录。',
+      ].join('\n'),
+    };
+
+    const files = buildMarkdownExportFilesFromRecords({
+      entries: [],
+      entities: [entity],
+      relationships: [],
+      tasks: [],
+    });
+    const paths = files.map((file) => file.path);
+    const index = files.find((file) => file.path === 'wiki/index.md')?.content ?? '';
+
+    expect(paths).toContain('wiki/concepts/出版业.md');
+    expect(paths).not.toContain('wiki/projects/出版业.md');
+    expect(index).toContain('## 概念');
+    expect(index).toContain('[[wiki/concepts/出版业|出版业]]');
+  });
+
   it('parses a MyWiki markdown zip backup back into records', async () => {
     const now = Date.now();
     const entry: Entry = {

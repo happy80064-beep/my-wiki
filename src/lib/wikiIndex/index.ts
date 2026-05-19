@@ -140,12 +140,13 @@ export async function findCachedInsight(question: string) {
 }
 
 async function getKnowledgeUpdatedAt() {
-  const [entities, entries, tasks, relationships, compileSuggestions] = await Promise.all([
+  const [entities, entries, tasks, relationships, compileSuggestions, wikiReviewItems] = await Promise.all([
     db.entities.orderBy('updatedAt').last(),
     db.entries.orderBy('capturedAt').last(),
     db.tasks.orderBy('createdAt').last(),
     db.relationships.orderBy('createdAt').last(),
     db.compileSuggestions.orderBy('updatedAt').last(),
+    db.wikiReviewItems.orderBy('updatedAt').last(),
   ]);
 
   return Math.max(
@@ -154,6 +155,7 @@ async function getKnowledgeUpdatedAt() {
     tasks?.createdAt ?? 0,
     relationships?.createdAt ?? 0,
     compileSuggestions?.updatedAt ?? 0,
+    wikiReviewItems?.updatedAt ?? 0,
   );
 }
 

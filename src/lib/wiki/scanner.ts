@@ -1,6 +1,7 @@
 import { buildWorkspaceLayout, normalizeWorkspacePath } from '@/lib/workspace/paths';
 import { sanitizeWikiMarkdownOutput } from './markdownCompiler';
 import { parseMarkdownFrontmatter, type FrontmatterData } from './frontmatter';
+import { normalizeWikiPageType } from './schemaRules';
 
 export type WikiPageType =
   | 'entity'
@@ -215,11 +216,8 @@ async function scanWikiPage(
 
 function normalizeType(value: unknown): WikiPageType | undefined {
   if (typeof value !== 'string') return undefined;
-  const allowed = new Set<WikiPageType>(WIKI_PAGE_TYPES);
   const normalized = value.trim().toLowerCase();
-  return allowed.has(normalized as WikiPageType)
-    ? (normalized as WikiPageType)
-    : legacyFrontmatterTypeMap[normalized];
+  return normalizeWikiPageType(value) ?? legacyFrontmatterTypeMap[normalized];
 }
 
 function fileSlug(path: string) {

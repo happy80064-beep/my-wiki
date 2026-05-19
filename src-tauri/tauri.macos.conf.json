@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "MyWiki",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "identifier": "com.mywiki.desktop",
   "build": {
     "frontendDist": "../dist",
@@ -48,6 +48,9 @@
   "bundle": {
     "active": true,
     "targets": ["app", "dmg"],
+    "macOS": {
+      "frameworks": ["pdfium/libpdfium.dylib"]
+    },
     "resources": [
       "binaries/mywiki-markitdown"
     ],

@@ -121,6 +121,9 @@ export type BaseEntity<TType extends EntityType, TProps extends EntityProperties
   wikiMarkdown?: string;
   wikiCompiledAt?: number;
   wikiCompileModel?: string;
+  wikiHumanEditedAt?: number;
+  wikiHumanEditHash?: string;
+  wikiLastAiMarkdownHash?: string;
   sourceEntries: ID[];
   createdAt: number;
   updatedAt: number;
@@ -213,6 +216,34 @@ export type CompileSuggestionRecord = CompileSuggestionDraft & {
   fingerprint: string;
   status: CompileSuggestionStatus;
   sourceQuestion?: string;
+  createdAt: number;
+  updatedAt: number;
+  appliedAt?: number;
+  dismissedAt?: number;
+  supersededAt?: number;
+};
+
+export type WikiReviewStatus = 'pending' | 'applied' | 'dismissed' | 'superseded';
+export type WikiReviewType = 'human-edit-conflict';
+export type WikiReviewMergeMode = 'section' | 'whole-document';
+
+export type WikiReviewRecord = {
+  id: ID;
+  clientId: string;
+  fingerprint: string;
+  type: WikiReviewType;
+  status: WikiReviewStatus;
+  entityId: ID;
+  entityTitle: string;
+  title: string;
+  reason: string;
+  currentMarkdown: string;
+  proposedMarkdown: string;
+  mergedMarkdown?: string;
+  mergeMode?: WikiReviewMergeMode;
+  provider?: string;
+  model?: string;
+  sourceLabel?: string;
   createdAt: number;
   updatedAt: number;
   appliedAt?: number;

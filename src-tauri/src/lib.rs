@@ -19,6 +19,10 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_window_state::Builder::new().build())
         .setup(|app| {
+            if let Ok(resource_dir) = app.path().resource_dir() {
+                import_extract::set_pdfium_resource_dir_hint(resource_dir);
+            }
+
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()

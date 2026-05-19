@@ -4,6 +4,7 @@ import { buildInitialBrowserEntityMarkdown } from '@/lib/wiki/browserWikiPageHel
 import { inferWikiTargetSpec, sanitizeWikiMarkdownOutput } from '@/lib/wiki/markdownCompiler';
 import { buildWikiPageMetadata } from '@/lib/wiki/pageMetadata';
 import { normalizeWikiPageType } from '@/lib/wiki/schemaRules';
+import { stripSupersededMarkdown } from '@/lib/wiki/superseded';
 import type { Entity, Relationship } from '@/types';
 import type { QueryAnswerPageContext } from './queryAnswer';
 
@@ -209,7 +210,9 @@ export function retrieveQueryContextFromEntities(
 }
 
 function buildSearchableWikiPage(entity: Entity): SearchableWikiPage {
-  const markdown = (entity.wikiMarkdown?.trim() ? sanitizeWikiMarkdownOutput(entity.wikiMarkdown) : buildInitialBrowserEntityMarkdown(entity)).trim();
+  const markdown = stripSupersededMarkdown(
+    entity.wikiMarkdown?.trim() ? sanitizeWikiMarkdownOutput(entity.wikiMarkdown) : buildInitialBrowserEntityMarkdown(entity),
+  ).trim();
   const metadata = buildWikiPageMetadata(markdown, entity);
   const fallbackTarget = inferWikiTargetSpec(entity);
   const type = normalizePageType(metadata.type) ?? fallbackTarget.type;

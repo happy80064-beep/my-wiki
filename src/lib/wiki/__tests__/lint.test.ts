@@ -134,6 +134,155 @@ describe('wiki lint core', () => {
     expect(results.some((result) => result.type === 'broken-link')).toBe(false);
   });
 
+  it('matches slug-style wikilinks to spaced page titles without dropping meaningful punctuation', () => {
+    const pages: WikiLintPage[] = [
+      page('wiki/sources/runtime-source.md', 'Runtime Source', [
+        '---',
+        'type: source',
+        'title: Runtime Source',
+        'updated: 2026-05-18',
+        '---',
+        '',
+        'See [[concepts/agent-记忆运行时(调度层)]].',
+      ]),
+      page('wiki/concepts/Agent 记忆运行时（调度层）.md', 'Agent 记忆运行时（调度层）', [
+        '---',
+        'type: concept',
+        'title: Agent 记忆运行时（调度层）',
+        'updated: 2026-05-18',
+        '---',
+        '',
+        'Body',
+      ]),
+    ];
+
+    const results = runStructuralWikiLint(pages);
+
+    expect(results.some((result) => result.type === 'broken-link')).toBe(false);
+  });
+
+  it('matches Chinese titles when a wikilink adds an English parenthetical alias', () => {
+    const pages: WikiLintPage[] = [
+      page('wiki/sources/runtime-source.md', 'Runtime Source', [
+        '---',
+        'type: source',
+        'title: Runtime Source',
+        'updated: 2026-05-18',
+        '---',
+        '',
+        'See [[concepts/上下文压缩(context-compaction)]] and [[concepts/有损压缩(lossy-compression)]].',
+      ]),
+      page('wiki/concepts/上下文压缩.md', '上下文压缩', [
+        '---',
+        'type: concept',
+        'title: 上下文压缩',
+        'updated: 2026-05-18',
+        '---',
+        '',
+        'Body',
+      ]),
+      page('wiki/concepts/有损压缩.md', '有损压缩', [
+        '---',
+        'type: concept',
+        'title: 有损压缩',
+        'updated: 2026-05-18',
+        '---',
+        '',
+        'Body',
+      ]),
+    ];
+
+    const results = runStructuralWikiLint(pages);
+
+    expect(results.some((result) => result.type === 'broken-link')).toBe(false);
+  });
+
+  it('keeps parenthetical alias links broken when simplification would be ambiguous', () => {
+    const pages: WikiLintPage[] = [
+      page('wiki/sources/runtime-source.md', 'Runtime Source', [
+        '---',
+        'type: source',
+        'title: Runtime Source',
+        'updated: 2026-05-18',
+        '---',
+        '',
+        'See [[concepts/上下文压缩(context-compaction)]].',
+      ]),
+      page('wiki/concepts/上下文压缩.md', '上下文压缩', [
+        '---',
+        'type: concept',
+        'title: 上下文压缩',
+        'updated: 2026-05-18',
+        '---',
+        '',
+        'Body',
+      ]),
+      page('wiki/concepts/上下文压缩(other-alias).md', '上下文压缩(other-alias)', [
+        '---',
+        'type: concept',
+        'title: 上下文压缩(other-alias)',
+        'updated: 2026-05-18',
+        '---',
+        '',
+        'Body',
+      ]),
+    ];
+
+    const results = runStructuralWikiLint(pages);
+
+    expect(results).toContainEqual(
+      expect.objectContaining({
+        type: 'broken-link',
+        detail: expect.stringContaining('[[concepts/上下文压缩(context-compaction)]]'),
+      }),
+    );
+  });
+
+  it('resolves escaped table wikilinks and source-file aliases without reporting broken links', () => {
+    const pages: WikiLintPage[] = [
+      page('wiki/projects/project-a.md', 'Project A', [
+        '---',
+        'type: project',
+        'title: Project A',
+        'updated: 2026-05-18',
+        'related: ["sources/report.pdf"]',
+        '---',
+        '',
+        '| Source | Owner |',
+        '| --- | --- |',
+        '| [[sources/report.pdf|Report]] | [[entities/Owner\\|Owner]] |',
+        'Raw provenance: [[raw/entries/entry_1|entry_1]]',
+      ]),
+      {
+        ...page('wiki/sources/report-summary.md', 'Report Summary', [
+          '---',
+          'type: source',
+          'title: Report Summary',
+          'updated: 2026-05-18',
+          'sources: ["report.pdf"]',
+          '---',
+          '',
+          'Body',
+        ]),
+        type: 'source',
+        sources: ['report.pdf'],
+      },
+      page('wiki/entities/owner.md', 'Owner', [
+        '---',
+        'type: entity',
+        'title: Owner',
+        'updated: 2026-05-18',
+        '---',
+        '',
+        'Body',
+      ]),
+    ];
+
+    const results = runStructuralWikiLint(pages);
+
+    expect(results.some((result) => result.type === 'broken-link')).toBe(false);
+  });
+
   it('resolves related frontmatter entries that are written as wikilinks', () => {
     const pages: WikiLintPage[] = [
       page('wiki/entities/李俊杰.md', '李俊杰', [

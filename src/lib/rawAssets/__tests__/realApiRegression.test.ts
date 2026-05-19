@@ -11,10 +11,13 @@ import {
 } from '@/lib/ai/wikiPatch';
 import { requestConfiguredProviderText } from '@/lib/llm/runtimeProvider';
 import { createRawAssetFromFile, processRawAssetQueue } from '@/lib/rawAssets';
+import { createLocalCaptureDraft } from '@/lib/capture';
 import { db, resetDatabase } from '@/lib/db';
 import {
+  activateProvider,
   assignModelRole,
   createDefaultProviderSettings,
+  loadProviderSettings,
   saveProviderSettings,
   updateProviderConfig,
 } from '@/lib/llm/providerSettings';
@@ -31,8 +34,9 @@ describe.skipIf(!runRealApi)('real API Frog-style raw asset compilation', () => 
   beforeEach(async () => {
     await resetDatabase();
     window.localStorage.clear();
-    configureGlmVisionFromEnv();
-    saveMultimodalSettings({ enabled: true, captionStandaloneImages: true, includeOcrText: false });
+    configureMiniMaxTextFromEnv();
+    if (process.env.GLM_API_KEY) configureGlmVisionFromEnv();
+    saveMultimodalSettings({ enabled: false, captionStandaloneImages: false, includeOcrText: false });
     rewriteRelativeApiFetch();
   });
 
@@ -105,6 +109,238 @@ describe.skipIf(!runRealApi)('real API Frog-style raw asset compilation', () => 
       expect(analysis.recommendedUpdates.length).toBeGreaterThan(0);
     },
     180_000,
+  );
+
+  it(
+    'runs the raw source button path into default wiki generation for a small source',
+    async () => {
+      await createRawAssetFromFile(
+        new File(
+          [[
+            '# MyWiki Raw Source Button Regression',
+            '',
+            '福瑞健康科技园三期项目包含医疗与健康中心、文旅与科普园、智算中心三个板块。',
+            '项目预计总收入 40307 万元，其中医疗与健康中心 18059 万元，智算中心 21648 万元。',
+            '当前风险包括个人刑事风险防范、关键假设确认、跨境合规与全球资产配置。',
+          ].join('\n')],
+          'raw-source-button-regression.md',
+          { type: 'text/markdown' },
+        ),
+      );
+
+      const result = await processRawAssetQueue({
+        owner: 'wiki',
+        compileWiki: true,
+        extractor: async (content) => ({ draft: createLocalCaptureDraft(content) }),
+      });
+      const rawAsset = await db.rawAssets.orderBy('createdAt').first();
+      const entries = await db.entries.toArray();
+      const entities = await db.entities.toArray();
+      const wikiReadyEntities = entities.filter((entity) => hasUsefulRealApiWikiMarkdown(entity.wikiMarkdown));
+      console.info(
+        JSON.stringify(
+          {
+            rawSourceButtonPath: {
+              result,
+              rawAsset: rawAsset
+                ? {
+                    filename: rawAsset.filename,
+                    status: rawAsset.status,
+                    error: rawAsset.error,
+                    entryId: rawAsset.entryId,
+                  }
+                : null,
+              entries: entries.map((entry) => ({
+                id: entry.id,
+                processed: entry.processed,
+                derivedEntities: entry.derivedEntities,
+                contentLength: entry.content.length,
+              })),
+              entities: entities.map((entity) => ({
+                id: entity.id,
+                title: entity.title,
+                type: entity.type,
+                sourceEntries: entity.sourceEntries,
+                wikiCompiledAt: entity.wikiCompiledAt,
+                wikiLength: entity.wikiMarkdown?.length ?? 0,
+              })),
+              wikiReadyCount: wikiReadyEntities.length,
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      expect(result).toMatchObject({ total: 1, processed: 1, failed: 0 });
+      expect(rawAsset?.status).toBe('compiled');
+      expect(rawAsset?.error).toBeUndefined();
+      expect(entries.every((entry) => entry.processed && entry.derivedEntities.length > 0)).toBe(true);
+      expect(wikiReadyEntities.length).toBe(entities.length);
+    },
+    300_000,
+  );
+
+  it(
+    'runs already structured raw sources into default wiki generation',
+    async () => {
+      await createRawAssetFromFile(
+        new File(
+          [[
+            '# MyWiki Already Structured Regression',
+            '',
+            '福瑞健康科技园三期项目包含医疗与健康中心、文旅与科普园、智算中心三个板块。',
+            '项目风险包括关键假设确认、个人刑事风险防范、跨境合规与全球资产配置。',
+          ].join('\n')],
+          'already-structured-regression.md',
+          { type: 'text/markdown' },
+        ),
+      );
+
+      const ingestOnly = await processRawAssetQueue({
+        owner: 'wiki',
+        compileWiki: false,
+        extractor: async (content) => ({ draft: createLocalCaptureDraft(content) }),
+      });
+      expect(ingestOnly).toMatchObject({ total: 1, processed: 1, failed: 0 });
+      expect((await db.rawAssets.orderBy('createdAt').first())?.status).toBe('compiled');
+      expect((await db.entities.toArray()).filter((entity) => hasUsefulRealApiWikiMarkdown(entity.wikiMarkdown)).length).toBe(0);
+
+      const result = await processRawAssetQueue({
+        owner: 'wiki',
+        compileWiki: true,
+      });
+      const rawAsset = await db.rawAssets.orderBy('createdAt').first();
+      const entries = await db.entries.toArray();
+      const entities = await db.entities.toArray();
+      const wikiReadyEntities = entities.filter((entity) => hasUsefulRealApiWikiMarkdown(entity.wikiMarkdown));
+      console.info(
+        JSON.stringify(
+          {
+            alreadyStructuredRawSourceButtonPath: {
+              result,
+              rawAsset: rawAsset
+                ? {
+                    filename: rawAsset.filename,
+                    status: rawAsset.status,
+                    error: rawAsset.error,
+                    entryId: rawAsset.entryId,
+                  }
+                : null,
+              entries: entries.map((entry) => ({
+                id: entry.id,
+                processed: entry.processed,
+                derivedEntities: entry.derivedEntities,
+                contentLength: entry.content.length,
+              })),
+              entities: entities.map((entity) => ({
+                id: entity.id,
+                title: entity.title,
+                type: entity.type,
+                sourceEntries: entity.sourceEntries,
+                wikiCompiledAt: entity.wikiCompiledAt,
+                wikiLength: entity.wikiMarkdown?.length ?? 0,
+              })),
+              wikiReadyCount: wikiReadyEntities.length,
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      expect(result).toMatchObject({ total: 1, processed: 1, failed: 0 });
+      expect(rawAsset?.status).toBe('compiled');
+      expect(rawAsset?.error).toBeUndefined();
+      expect(entries.every((entry) => entry.processed && entry.derivedEntities.length > 0)).toBe(true);
+      expect(wikiReadyEntities.length).toBe(entities.length);
+    },
+    300_000,
+  );
+
+  it(
+    'compiles the real 149-page project PDF through raw ingest and wiki generation without fallback',
+    async () => {
+      const pdfPath = resolveReal149PdfPath();
+      const bytes = await readFile(pdfPath);
+      await createRawAssetFromFile(
+        new File([bytes], '22014-【修改稿V6】福瑞健康科技园三期项目可研报告20260310.pdf', { type: 'application/pdf' }),
+      );
+
+      const startedAt = Date.now();
+      const extractionModes: string[] = [];
+      const statusLog: string[] = [];
+      let capturedFullContentLength = 0;
+      let capturedPageMarkers = false;
+      const result = await processRawAssetQueue({
+        owner: 'frog',
+        compileWiki: true,
+        onStatus: (snapshot) => {
+          statusLog.push(`${snapshot.percent}% ${snapshot.label} ${snapshot.detail ?? ''}`.trim());
+        },
+        extractor: async (content) => {
+          capturedFullContentLength = content.length;
+          capturedPageMarkers = /--\s*1\s+of\s+149\s*--/i.test(content) && /--\s*149\s+of\s+149\s*--/i.test(content);
+          expect(content.length).toBeGreaterThan(50_000);
+          expect(capturedPageMarkers).toBe(true);
+          const extraction = await extractCaptureDraft(content);
+          if (extraction.fallbackFrom) {
+            throw new Error(`Unexpected Wiki compile fallback: ${extraction.fallbackFrom}`);
+          }
+          extractionModes.push(extraction.mode ?? 'unknown');
+          return { draft: extraction.draft };
+        },
+      });
+
+      const elapsedMs = Date.now() - startedAt;
+      const rawAssets = await db.rawAssets.orderBy('createdAt').toArray();
+      const entries = await db.entries.toArray();
+      const entities = await db.entities.toArray();
+      const pageTypes = new Set(entities.map((entity) => inferWikiTargetSpec(entity).type));
+      const wikiReadyEntities = entities.filter((entity) => hasUsefulRealApiWikiMarkdown(entity.wikiMarkdown));
+      const rawAssetDebug = rawAssets.map((asset) => ({
+        filename: asset.filename,
+        status: asset.status,
+        error: asset.error,
+        extractedTextLength: asset.extractedText?.length ?? 0,
+      }));
+      console.info(
+        JSON.stringify(
+          {
+            real149Pdf: {
+              elapsedMs,
+              capturedFullContentLength,
+              capturedPageMarkers,
+              extractionModes,
+              rawAssetDebug,
+              entityCount: entities.length,
+              wikiReadyCount: wikiReadyEntities.length,
+              pageTypes: [...pageTypes],
+              lastStatuses: statusLog.slice(-8),
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      expect(result).toMatchObject({ total: 1, processed: 1, failed: 0 });
+      expect(extractionModes).toEqual(['two-step']);
+      expect(rawAssetDebug).toEqual([
+        expect.objectContaining({
+          filename: '22014-【修改稿V6】福瑞健康科技园三期项目可研报告20260310.pdf',
+          status: 'compiled',
+          error: undefined,
+        }),
+      ]);
+      expect(rawAssetDebug[0].extractedTextLength).toBeGreaterThan(50_000);
+      expect(entries.every((entry) => entry.processed && entry.derivedEntities.length > 0)).toBe(true);
+      expect(entities.length).toBeGreaterThanOrEqual(6);
+      expect(wikiReadyEntities.length).toBeGreaterThanOrEqual(6);
+      expect(pageTypes.has('source')).toBe(true);
+      expect([...pageTypes].some((type) => ['project', 'concept', 'entity'].includes(type))).toBe(true);
+    },
+    2_700_000,
   );
 
   it(
@@ -282,7 +518,7 @@ function rewriteRelativeApiFetch() {
 function configureGlmVisionFromEnv() {
   const glmApiKey = process.env.GLM_API_KEY;
   if (!glmApiKey) throw new Error('GLM_API_KEY is required for RUN_REAL_API=1.');
-  let settings = createDefaultProviderSettings();
+  let settings = loadProviderSettings();
   settings = updateProviderConfig(settings, 'zhipu', {
     apiKey: glmApiKey,
     endpoint: process.env.GLM_BASE_URL || 'https://open.bigmodel.cn/api/paas/v4',
@@ -291,6 +527,44 @@ function configureGlmVisionFromEnv() {
   });
   settings = assignModelRole(settings, 'vision', 'zhipu');
   saveProviderSettings(settings);
+}
+
+function configureMiniMaxTextFromEnv() {
+  const apiKey = process.env.MINIMAX_API_KEY;
+  if (!apiKey) throw new Error('MINIMAX_API_KEY is required for RUN_REAL_API=1.');
+  let settings = createDefaultProviderSettings();
+  settings = updateProviderConfig(settings, 'minimax-cn', {
+    apiKey,
+    enabled: true,
+    apiMode: 'anthropic-compatible',
+    endpoint: process.env.MINIMAX_ANTHROPIC_BASE_URL || 'https://api.minimaxi.com/anthropic',
+    model: process.env.MINIMAX_MODEL || 'MiniMax-M2.7',
+    contextWindow: 200000,
+  });
+  settings = activateProvider(settings, 'minimax-cn');
+  settings = assignModelRole(settings, 'wiki-compile', 'minimax-cn');
+  saveProviderSettings(settings);
+}
+
+function resolveReal149PdfPath() {
+  const candidates = [
+    process.env.REAL_149_PDF_PATH,
+    'D:\\MyWiki-MVP\\ldj-wiki-002\\raw\\sources\\22014-【修改稿V6】福瑞健康科技园三期项目可研报告20260310.pdf',
+    process.env.REAL_PDF_PATH,
+  ].filter((path): path is string => Boolean(path));
+  const found = candidates.find((path) => existsSync(path));
+  if (!found) {
+    throw new Error('REAL_149_PDF_PATH is required for the real 149-page PDF regression test.');
+  }
+  return found;
+}
+
+function hasUsefulRealApiWikiMarkdown(markdown?: string) {
+  const text = markdown?.trim() ?? '';
+  if (text.length < 700) return false;
+  if (!text.startsWith('---') || !/^#\s+/m.test(text)) return false;
+  const sectionCount = text.match(/^##\s+/gm)?.length ?? 0;
+  return sectionCount >= 3;
 }
 
 function resolveRealPdfPath() {

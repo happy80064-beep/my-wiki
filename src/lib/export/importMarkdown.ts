@@ -1,4 +1,6 @@
 import { db, getClientId } from '@/lib/db';
+import { normalizeWikiPageType } from '@/lib/wiki/schemaRules';
+import type { WikiPageType } from '@/lib/wiki/scanner';
 import type { Entity, Entry, Relationship, RelationshipType, Scene, Task } from '@/types';
 
 export type MarkdownImportRecords = {
@@ -274,11 +276,20 @@ function inferEntityTypeFromWikiFile(path: string, data: Record<string, unknown>
 
   const frontmatterType = String(data.type ?? '');
   if (entityTypes.has(frontmatterType)) return frontmatterType as Entity['type'];
+  const wikiPageType = normalizeWikiPageType(frontmatterType);
+  if (wikiPageType) return wikiPageTypeToEntityType(wikiPageType);
 
   const normalizedPath = normalizePath(path);
   if (/^wiki\/projects?\//.test(normalizedPath)) return 'project';
   if (/^wiki\/(decisions|meetings|event)\//.test(normalizedPath)) return 'event';
   if (/^wiki\/(stakeholders|person)\//.test(normalizedPath)) return 'person';
+  return 'topic';
+}
+
+function wikiPageTypeToEntityType(type: WikiPageType): Entity['type'] {
+  if (type === 'project') return 'project';
+  if (type === 'decision' || type === 'meeting') return 'event';
+  if (type === 'stakeholder') return 'person';
   return 'topic';
 }
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import {
   AlertTriangle,
@@ -29,12 +29,14 @@ import {
   useWorkspaceRuntimeStore,
 } from '@/lib/workspace';
 import { parseMarkdownFrontmatter, stringifyMarkdownFrontmatter } from '@/lib/wiki/frontmatter';
+import { inferWikiTargetSpec } from '@/lib/wiki/markdownCompiler';
 import {
   buildInitialBrowserEntityMarkdown,
   buildBrowserEntityMarkdownPatch,
 } from '@/lib/wiki/browserWikiPageHelpers';
 import { buildWikiPageMetadata } from '@/lib/wiki/pageMetadata';
 import { normalizeWikiReferenceValue } from '@/lib/wiki/references';
+import { normalizeWikiPageType } from '@/lib/wiki/schemaRules';
 import {
   runStructuralWikiLint,
   type WikiLintContextMap,
@@ -61,6 +63,12 @@ type LintSessionSnapshot = {
   hasRun: boolean;
   activity: LintActivity | null;
   previewOpen: boolean;
+};
+
+type LintGuideHighlight = {
+  pagePath: string;
+  resultId: string;
+  terms: string[];
 };
 
 const lintSessionCache = new Map<string, LintSessionSnapshot>();
@@ -98,6 +106,7 @@ export function LintPage() {
   const [activity, setActivity] = useState<LintActivity | null>(null);
   const [fixStatus, setFixStatus] = useState('');
   const [previewOpen, setPreviewOpen] = useState(true);
+  const [guideHighlight, setGuideHighlight] = useState<LintGuideHighlight | null>(null);
 
   const usingBrowserPages = !tauriRuntime || browserPages.length > 0;
   const pages = usingBrowserPages ? browserPages : workspacePages;
@@ -132,6 +141,7 @@ export function LintPage() {
       setHasRun(false);
       setActivity(null);
       setFixStatus('');
+      setGuideHighlight(null);
       return;
     }
 
@@ -140,6 +150,7 @@ export function LintPage() {
     setActivity(cached.activity);
     setRunSemantic(cached.runSemantic);
     setPreviewOpen(cached.previewOpen);
+    setGuideHighlight(null);
     setSelectedPageKey(cached.selectedPageKey && findLintPage(pages, cached.selectedPageKey) ? cached.selectedPageKey : pages[0].path);
   }, [lintSessionKey, pages]);
 
@@ -155,6 +166,11 @@ export function LintPage() {
       previewOpen,
     });
   }, [activity, hasRun, lintSessionKey, previewOpen, results, runSemantic, selectedPageKey]);
+
+  useEffect(() => {
+    if (!guideHighlight || !selectedPageKey || guideHighlight.pagePath === selectedPageKey) return;
+    setGuideHighlight(null);
+  }, [guideHighlight, selectedPageKey]);
 
   async function loadWorkspacePages() {
     if (!tauriRuntime) return;
@@ -189,6 +205,7 @@ export function LintPage() {
           absolutePath: page.absolutePath,
           markdown,
           related: page.related,
+          sources: page.sources,
           wikilinks: page.wikilinks,
         })),
       );
@@ -204,6 +221,7 @@ export function LintPage() {
     if (running) return;
     setRunning(true);
     setFixStatus('');
+    setGuideHighlight(null);
     setResults([]);
     setHasRun(false);
     setActivity({ title: 'Wiki lint', status: 'running', detail: '正在检查结构、链接和 schema...' });
@@ -228,12 +246,14 @@ export function LintPage() {
 
       setResults(allResults);
       setHasRun(true);
+      const warningCount = allResults.filter((result) => result.severity === 'warning').length;
+      const infoCount = allResults.length - warningCount;
       setActivity({
         title: runSemantic ? 'Semantic wiki lint' : 'Wiki lint',
         status: 'done',
         detail: runSemantic
           ? `Found ${semanticCount} semantic issue(s).`
-          : `Found ${allResults.length} structural issue(s).`,
+          : `Found ${warningCount} warning(s) and ${infoCount} suggestion(s).`,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Lint 运行失败';
@@ -250,6 +270,7 @@ export function LintPage() {
     const target = findLintPage(pages, reference);
     if (target) setSelectedPageKey(target.path);
     setPreviewOpen(true);
+    setGuideHighlight(null);
   }
 
   async function handleFix(result: WikiLintResult) {
@@ -257,6 +278,11 @@ export function LintPage() {
     if (target) setSelectedPageKey(target.path);
     setPreviewOpen(true);
     setFixStatus('');
+    if (canAutoFixLintResult(result, { tauriRuntime, workspaceIndexPath, target })) {
+      setGuideHighlight(null);
+    } else {
+      setGuideHighlight(buildLintGuideHighlight(result, target));
+    }
 
     if (result.type === 'orphan' && tauriRuntime && target && workspaceIndexPath) {
       try {
@@ -294,7 +320,14 @@ export function LintPage() {
       }
     }
 
-    setFixStatus('已在右侧打开相关页面；这类问题需要结合内容手动补链接、改名或重编译后再运行 Lint。');
+    if (result.type === 'broken-link') {
+      setFixStatus(
+        '已在右侧打开包含断链的页面，并用黄色临时标出对应 [[...]]。如果目标页面已存在，把括号里的内容改成左侧页面名或 wiki 路径；如果目标页面不存在，先重新编译/创建对应页面；如果不需要跳转，删掉双方括号保留普通文字。保存后再运行 Lint。',
+      );
+      return;
+    }
+
+    setFixStatus('已在右侧打开相关页面，并尽量用黄色临时标出可能需要检查的位置；如果没有黄色标记，说明这是整页级建议。请按问题类型补链接、改标题/frontmatter、消除重定向循环，或重新编译该页面；保存后再运行 Lint。');
   }
 
   async function saveSelectedPageMarkdown(page: WikiLintPage, markdown: string) {
@@ -303,6 +336,7 @@ export function LintPage() {
       setWorkspacePages((current) => current.map((item) => (item.path === page.path ? { ...item, markdown } : item)));
       setActivity({ title: 'Wiki page saved', status: 'done', detail: `Saved ${page.path}.` });
       setFixStatus('已保存右侧 Wiki 页面。再次运行 Lint 可以刷新问题列表。');
+      setGuideHighlight(null);
       return;
     }
 
@@ -312,6 +346,12 @@ export function LintPage() {
     await syncIndexedDbKnowledgeToDefaultWorkspace().catch(() => undefined);
     setActivity({ title: 'Wiki page saved', status: 'done', detail: `Saved ${page.title}.` });
     setFixStatus('已保存右侧 Wiki 页面。再次运行 Lint 可以刷新问题列表。');
+    setGuideHighlight(null);
+  }
+
+  function lintActionLabel(result: WikiLintResult) {
+    const target = findLintPage(pages, result.pagePath || result.page);
+    return canAutoFixLintResult(result, { tauriRuntime, workspaceIndexPath, target }) ? 'Fix' : 'Guide';
   }
 
   return (
@@ -349,6 +389,7 @@ export function LintPage() {
                 onClick={() => {
                   setSelectedPageKey(page.path);
                   setPreviewOpen(true);
+                  setGuideHighlight(null);
                 }}
                 title={page.path}
               >
@@ -370,7 +411,7 @@ export function LintPage() {
               <h2 className="text-sm font-semibold text-[#1f2937]">Wiki Lint</h2>
               {hasRun && results.length > 0 ? (
                 <span className="rounded-full bg-[#fff2d6] px-2.5 py-1 text-xs font-medium text-[#a15c00]">
-                  {results.length} audit items
+                  {warnings.length} warnings · {infos.length} suggestions
                 </span>
               ) : null}
             </div>
@@ -426,11 +467,11 @@ export function LintPage() {
                   <SectionHeader icon={AlertTriangle} label="Warnings" count={warnings.length} tone="warning" />
                 ) : null}
                 {warnings.map((result) => (
-                  <LintCard key={result.id} result={result} onOpen={openResult} onFix={(item) => void handleFix(item)} />
+                  <LintCard key={result.id} result={result} actionLabel={lintActionLabel(result)} onOpen={openResult} onFix={(item) => void handleFix(item)} />
                 ))}
                 {infos.length > 0 ? <SectionHeader icon={Info} label="Info" count={infos.length} tone="info" /> : null}
                 {infos.map((result) => (
-                  <LintCard key={result.id} result={result} onOpen={openResult} onFix={(item) => void handleFix(item)} />
+                  <LintCard key={result.id} result={result} actionLabel={lintActionLabel(result)} onOpen={openResult} onFix={(item) => void handleFix(item)} />
                 ))}
               </div>
             )}
@@ -456,7 +497,7 @@ export function LintPage() {
                 <X size={15} />
               </button>
             </div>
-            <WikiLintPreview page={selectedPage} onSave={saveSelectedPageMarkdown} />
+            <WikiLintPreview page={selectedPage} guideHighlight={guideHighlight} onSave={saveSelectedPageMarkdown} />
           </aside>
         ) : null}
       </div>
@@ -466,10 +507,12 @@ export function LintPage() {
 
 function LintCard({
   result,
+  actionLabel,
   onOpen,
   onFix,
 }: {
   result: WikiLintResult;
+  actionLabel: 'Fix' | 'Guide';
   onOpen: (result: WikiLintResult) => void;
   onFix: (result: WikiLintResult) => void;
 }) {
@@ -515,7 +558,7 @@ function LintCard({
           onClick={() => onFix(result)}
         >
           <Wrench size={13} />
-          Fix
+          {actionLabel}
         </button>
       </div>
     </article>
@@ -583,23 +626,129 @@ function ActivityPanel({ activity }: { activity: LintActivity | null }) {
   );
 }
 
+function canAutoFixLintResult(
+  result: WikiLintResult,
+  context: { tauriRuntime: boolean; workspaceIndexPath: string; target: WikiLintPage | null | undefined },
+) {
+  if (result.type === 'orphan') return context.tauriRuntime && Boolean(context.workspaceIndexPath) && Boolean(context.target);
+  if (result.type === 'frontmatter') return !context.tauriRuntime && Boolean(context.target);
+  return false;
+}
+
+function buildLintGuideHighlight(result: WikiLintResult, page: WikiLintPage | null | undefined): LintGuideHighlight | null {
+  const pagePath = page?.path || result.pagePath || result.page;
+  if (!pagePath) return null;
+  const terms = collectLintGuideTerms(result, page);
+  return { pagePath, resultId: result.id, terms };
+}
+
+function collectLintGuideTerms(result: WikiLintResult, page: WikiLintPage | null | undefined) {
+  const terms: string[] = [];
+  const seen = new Set<string>();
+  const add = (term: string | undefined) => {
+    const value = term?.trim();
+    if (!value || value.length < 2) return;
+    const key = value.toLocaleLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    terms.push(value);
+  };
+
+  for (const link of extractGuideWikilinks(result.detail)) {
+    add(link);
+    add(`[[${link}]]`);
+    add(slugFromPath(link));
+  }
+
+  if (result.type === 'frontmatter') {
+    add('---');
+    add('type:');
+    add('title:');
+    add('updated:');
+  }
+
+  if (result.type === 'redirect-cycle') {
+    for (const affectedPage of result.affectedPages ?? []) {
+      add(slugFromPath(affectedPage));
+    }
+  }
+
+  if (result.type === 'semantic' || result.type === 'knowledge-gap') {
+    add(result.title);
+    for (const affectedPage of result.affectedPages ?? []) {
+      add(slugFromPath(affectedPage));
+    }
+  }
+
+  if (result.type === 'orphan' || result.type === 'weakly-linked' || result.type === 'no-outlinks') {
+    add(page?.title);
+    add(slugFromPath(page?.path ?? result.pagePath ?? result.page));
+  }
+
+  return terms.sort((left, right) => right.length - left.length).slice(0, 12);
+}
+
+function extractGuideWikilinks(value: string) {
+  return Array.from(value.matchAll(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g))
+    .map((match) => normalizeWikiReferenceValue(match[1]))
+    .filter(Boolean);
+}
+
+function findFirstHighlightMatch(text: string, terms: string[]) {
+  const lowerText = text.toLocaleLowerCase();
+  let best: { index: number; length: number } | null = null;
+  for (const term of terms) {
+    const normalized = term.trim().toLocaleLowerCase();
+    if (!normalized) continue;
+    const index = lowerText.indexOf(normalized);
+    if (index < 0) continue;
+    if (!best || index < best.index || (index === best.index && normalized.length > best.length)) {
+      best = { index, length: normalized.length };
+    }
+  }
+  return best;
+}
+
 function WikiLintPreview({
   page,
+  guideHighlight,
   onSave,
 }: {
   page: WikiLintPage | null;
+  guideHighlight?: LintGuideHighlight | null;
   onSave: (page: WikiLintPage, markdown: string) => Promise<void>;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const previewBodyRef = useRef<HTMLElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const activeHighlightTerms = page && guideHighlight?.pagePath === page.path ? guideHighlight.terms : [];
+  const highlightSignature = activeHighlightTerms.join('\u0000');
 
   useEffect(() => {
     setEditing(false);
     setDraft(page?.markdown ?? '');
     setError('');
   }, [page?.path, page?.markdown]);
+
+  useEffect(() => {
+    if (editing || !highlightSignature) return;
+    const mark = previewBodyRef.current?.querySelector('[data-lint-highlight="true"]');
+    mark?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }, [editing, highlightSignature, page?.path]);
+
+  useEffect(() => {
+    if (!editing || !highlightSignature) return;
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    const match = findFirstHighlightMatch(draft, activeHighlightTerms);
+    if (!match) return;
+    textarea.focus();
+    textarea.setSelectionRange(match.index, match.index + match.length);
+    textarea.scrollTop = Math.max(0, (match.index / Math.max(draft.length, 1)) * textarea.scrollHeight - textarea.clientHeight / 2);
+  }, [editing, highlightSignature, page?.path]);
 
   if (!page) {
     return <p className="p-5 text-sm text-[#626965]">选择左侧页面或点击 Lint 问题的 Open。</p>;
@@ -678,6 +827,7 @@ function WikiLintPreview({
       {editing ? (
         <div className="px-5 py-4">
           <textarea
+            ref={textareaRef}
             className="min-h-[520px] w-full resize-none rounded-[10px] border border-[#d9d9d6] bg-[#fbfbfa] p-3 font-mono text-sm leading-6 text-[#1f2937] outline-none focus:border-[#155eef]"
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
@@ -685,8 +835,8 @@ function WikiLintPreview({
           />
         </div>
       ) : (
-        <article className="px-5 py-4">
-          <QueryAnswerRenderer content={body} />
+        <article ref={previewBodyRef} className="px-5 py-4">
+          <QueryAnswerRenderer content={body} highlightTerms={activeHighlightTerms} />
         </article>
       )}
     </div>
@@ -705,17 +855,20 @@ function buildBrowserLintPages(entities: Entity[]): WikiLintPage[] {
   return entities.map((entity) => {
     const markdown = entity.wikiMarkdown?.trim() || buildInitialBrowserEntityMarkdown(entity);
     const metadata = buildWikiPageMetadata(markdown, entity);
-    const folder = browserTypeFolder(metadata.type || entity.type);
+    const fallbackTarget = inferWikiTargetSpec(entity);
+    const type = normalizeWikiPageType(metadata.type) ?? fallbackTarget.type;
+    const folder = browserTypeFolder(type);
     const slug = slugify(metadata.title || entity.title);
     return {
       id: entity.id,
       title: metadata.title || entity.title,
-      type: metadata.type || entity.type,
+      type,
       path: `wiki/${folder}/${slug}.md`,
       slug,
       aliases: metadata.aliases,
       markdown,
       related: metadata.related,
+      sources: metadata.sources,
     };
   });
 }

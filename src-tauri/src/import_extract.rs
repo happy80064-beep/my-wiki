@@ -3,13 +3,20 @@ use std::{
     io::{Cursor, Read},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::{Mutex, MutexGuard, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 use base64::{engine::general_purpose, Engine as _};
 use calamine::{open_workbook_auto, Reader};
 use tauri::Manager;
 use zip::ZipArchive;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,6 +41,14 @@ pub struct ImportExtractUrlRequest {
 pub struct ImportExtractUrlResponse {
     url: String,
     text: String,
+}
+
+static PDFIUM: OnceLock<Result<pdfium_render::prelude::Pdfium, String>> = OnceLock::new();
+static PDFIUM_LOCK: Mutex<()> = Mutex::new(());
+static PDFIUM_RESOURCE_DIR_HINT: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn set_pdfium_resource_dir_hint(dir: PathBuf) {
+    let _ = PDFIUM_RESOURCE_DIR_HINT.set(dir);
 }
 
 #[tauri::command]
@@ -109,6 +124,20 @@ fn extract_bytes_to_markdown(
     let extension = file_extension(filename);
     let normalized_mime = mime_type.to_ascii_lowercase();
 
+    if extension == "pdf" || normalized_mime == "application/pdf" {
+        if let Ok(text) = extract_pdf_text(bytes) {
+            if is_useful_pdf_text(&text) {
+                return Ok(text);
+            }
+        }
+        if let Ok(text) = extract_with_markitdown(app, filename, &extension, bytes) {
+            if is_useful_pdf_text(&text) {
+                return Ok(text);
+            }
+        }
+        return extract_pdf_text_with_pdf_extract(bytes);
+    }
+
     if should_try_markitdown(&extension, &normalized_mime) {
         if let Ok(text) = extract_with_markitdown(app, filename, &extension, bytes) {
             if !text.trim().is_empty() {
@@ -135,10 +164,6 @@ fn extract_bytes_to_markdown(
 
     if extension == "docx" || normalized_mime.contains("wordprocessingml") {
         return extract_docx_text(bytes);
-    }
-
-    if extension == "pdf" || normalized_mime == "application/pdf" {
-        return extract_pdf_text(bytes);
     }
 
     if extension == "pptx" || normalized_mime.contains("presentationml") {
@@ -197,7 +222,9 @@ fn find_markitdown_converter(app: &tauri::AppHandle) -> Option<PathBuf> {
 }
 
 fn run_markitdown_converter(converter_path: &Path, input_path: &Path) -> Result<String, String> {
-    let output = Command::new(converter_path)
+    let mut command = Command::new(converter_path);
+    hide_child_console(&mut command);
+    let output = command
         .arg(input_path)
         .stdin(Stdio::null())
         .output()
@@ -223,7 +250,9 @@ fn extract_url_with_markitdown(app: &tauri::AppHandle, url: &str) -> Result<Stri
 }
 
 fn run_markitdown_url_converter(converter_path: &Path, url: &str) -> Result<String, String> {
-    let output = Command::new(converter_path)
+    let mut command = Command::new(converter_path);
+    hide_child_console(&mut command);
+    let output = command
         .arg("--url")
         .arg(url)
         .stdin(Stdio::null())
@@ -242,6 +271,14 @@ fn run_markitdown_url_converter(converter_path: &Path, url: &str) -> Result<Stri
         format!("MarkItDown URL conversion failed: {stderr}")
     })
 }
+
+#[cfg(windows)]
+fn hide_child_console(command: &mut Command) {
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn hide_child_console(_command: &mut Command) {}
 
 async fn fetch_url_readable_text(url: &str) -> Result<String, String> {
     let client = reqwest::Client::builder()
@@ -311,12 +348,141 @@ fn is_useful_imported_web_text(value: &str) -> bool {
 }
 
 fn extract_pdf_text(bytes: &[u8]) -> Result<String, String> {
+    match extract_pdf_text_with_pdfium(bytes) {
+        Ok(text) if is_useful_pdf_text(&text) => Ok(text),
+        Ok(_) => extract_pdf_text_with_pdf_extract(bytes),
+        Err(pdfium_error) => extract_pdf_text_with_pdf_extract(bytes)
+            .map_err(|fallback_error| format!("{pdfium_error}; fallback failed: {fallback_error}")),
+    }
+}
+
+fn extract_pdf_text_with_pdfium(bytes: &[u8]) -> Result<String, String> {
+    use pdfium_render::prelude::*;
+
+    let _guard = lock_pdfium();
+    let pdfium = pdfium()?;
+    let document = pdfium
+        .load_pdf_from_byte_slice(bytes, None)
+        .map_err(|error| match error {
+            PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::PasswordError) => {
+                "PDF is password-protected and cannot be read.".to_string()
+            }
+            _ => format!("PDFium failed to open PDF: {error}"),
+        })?;
+
+    let page_count = document.pages().len();
+    let mut output = String::new();
+    for (page_index, page) in document.pages().iter().enumerate() {
+        let page_number = page_index + 1;
+        if !output.is_empty() {
+            output.push_str("\n\n");
+        }
+        output.push_str(&format!("-- {page_number} of {page_count} --\n\n"));
+        let page_text = page
+            .text()
+            .map_err(|error| format!("PDFium failed to extract text from page {page_number}: {error}"))?;
+        output.push_str(&page_text.all());
+    }
+
+    let normalized = normalize_text(&output);
+    if is_useful_pdf_text(&normalized) {
+        Ok(normalized)
+    } else {
+        Err("PDFium extracted too little useful text.".to_string())
+    }
+}
+
+fn extract_pdf_text_with_pdf_extract(bytes: &[u8]) -> Result<String, String> {
     let result = std::panic::catch_unwind(|| pdf_extract::extract_text_from_mem(bytes));
     match result {
         Ok(Ok(text)) => Ok(normalize_text(&text)),
         Ok(Err(error)) => Err(format!("PDF 文本解析失败：{error}")),
         Err(_) => Err("PDF 文本解析失败：解析器遇到异常。".to_string()),
     }
+}
+
+fn lock_pdfium() -> MutexGuard<'static, ()> {
+    PDFIUM_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn pdfium() -> Result<&'static pdfium_render::prelude::Pdfium, String> {
+    PDFIUM
+        .get_or_init(|| {
+            use pdfium_render::prelude::*;
+            let candidates = pdfium_candidate_paths();
+            for path in &candidates {
+                if let Ok(bindings) = Pdfium::bind_to_library(path) {
+                    return Ok(Pdfium::new(bindings));
+                }
+            }
+            Pdfium::bind_to_system_library()
+                .map(Pdfium::new)
+                .map_err(|error| {
+                    let tried = if candidates.is_empty() {
+                        "(no bundled candidates)".to_string()
+                    } else {
+                        candidates.join(", ")
+                    };
+                    format!("Failed to locate Pdfium library. Tried: {tried}. Last error: {error}")
+                })
+        })
+        .as_ref()
+        .map_err(|error| error.clone())
+}
+
+fn pdfium_candidate_paths() -> Vec<String> {
+    let mut paths = Vec::new();
+    if let Ok(path) = std::env::var("PDFIUM_DYNAMIC_LIB_PATH") {
+        paths.push(path);
+    }
+
+    if let Some(resource_dir) = PDFIUM_RESOURCE_DIR_HINT.get() {
+        push_pdfium_paths(&mut paths, resource_dir);
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            push_pdfium_paths(&mut paths, exe_dir);
+            push_pdfium_paths(&mut paths, &exe_dir.join("resources"));
+            #[cfg(target_os = "macos")]
+            {
+                push_pdfium_paths(&mut paths, &exe_dir.join("../Frameworks"));
+                push_pdfium_paths(&mut paths, &exe_dir.join("../Resources"));
+            }
+        }
+    }
+
+    push_pdfium_paths(&mut paths, Path::new("src-tauri"));
+    paths
+}
+
+fn push_pdfium_paths(paths: &mut Vec<String>, root: &Path) {
+    #[cfg(target_os = "windows")]
+    {
+        paths.push(root.join("pdfium").join("pdfium.dll").to_string_lossy().into_owned());
+        paths.push(root.join("pdfium.dll").to_string_lossy().into_owned());
+        paths.push(root.join("libpdfium.dll").to_string_lossy().into_owned());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        paths.push(root.join("pdfium").join("libpdfium.dylib").to_string_lossy().into_owned());
+        paths.push(root.join("libpdfium.dylib").to_string_lossy().into_owned());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        paths.push(root.join("pdfium").join("libpdfium.so").to_string_lossy().into_owned());
+        paths.push(root.join("libpdfium.so").to_string_lossy().into_owned());
+    }
+}
+
+fn is_useful_pdf_text(value: &str) -> bool {
+    let semantic_len = value
+        .replace(|ch: char| ch.is_whitespace() || ch.is_ascii_punctuation() || ch.is_ascii_digit(), "")
+        .chars()
+        .count();
+    semantic_len >= 80 || value.contains("-- 1 of ")
 }
 
 fn extract_docx_text(bytes: &[u8]) -> Result<String, String> {

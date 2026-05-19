@@ -1,5 +1,7 @@
 import { db } from '@/lib/db';
 import { inferWikiTargetSpec } from '@/lib/wiki/markdownCompiler';
+import { buildWikiPageMetadata } from '@/lib/wiki/pageMetadata';
+import { normalizeWikiPageType } from '@/lib/wiki/schemaRules';
 import type { WikiPageType } from '@/lib/wiki/scanner';
 import type { Entity, Entry, Relationship, Task } from '@/types';
 
@@ -185,7 +187,7 @@ function buildReadme({
 }
 
 function buildIndex(entities: Entity[]) {
-  const grouped = groupBy(entities, (entity) => inferWikiTargetSpec(entity).type);
+  const grouped = groupBy(entities, (entity) => buildEntityTarget(entity).type);
   const typeOrder: WikiPageType[] = [
     'overview',
     'project',
@@ -421,7 +423,13 @@ function formatRelationshipLine(
 }
 
 function buildEntityPath(entity: Entity) {
-  return inferWikiTargetSpec(entity).path;
+  return buildEntityTarget(entity).path;
+}
+
+function buildEntityTarget(entity: Entity) {
+  if (!entity.wikiMarkdown?.trim()) return inferWikiTargetSpec(entity);
+  const metadata = buildWikiPageMetadata(entity.wikiMarkdown, entity);
+  return inferWikiTargetSpec(entity, { preferredType: normalizeWikiPageType(metadata.type) });
 }
 
 function withoutMd(path: string) {

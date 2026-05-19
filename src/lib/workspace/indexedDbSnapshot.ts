@@ -11,6 +11,7 @@ import type {
   Task,
   WikiBatchJob,
   Entity,
+  WikiReviewRecord,
 } from '@/types';
 
 export const workspaceIndexedDbSnapshotFileName = 'indexeddb-snapshot.json';
@@ -30,6 +31,7 @@ export type WorkspaceIndexedDbSnapshot = {
     rawAssets: RawAssetSnapshot[];
     queryCache: QueryCacheRecord[];
     wikiBatchJobs: WikiBatchJob[];
+    wikiReviewItems: WikiReviewRecord[];
   };
 };
 
@@ -50,6 +52,7 @@ export async function buildIndexedDbSnapshot(): Promise<WorkspaceIndexedDbSnapsh
     rawAssets,
     queryCache,
     wikiBatchJobs,
+    wikiReviewItems,
   ] = await Promise.all([
     db.entries.toArray(),
     db.entities.toArray(),
@@ -62,6 +65,7 @@ export async function buildIndexedDbSnapshot(): Promise<WorkspaceIndexedDbSnapsh
     db.rawAssets.toArray(),
     db.queryCache.toArray(),
     db.wikiBatchJobs.toArray(),
+    db.wikiReviewItems.toArray(),
   ]);
 
   return {
@@ -79,6 +83,7 @@ export async function buildIndexedDbSnapshot(): Promise<WorkspaceIndexedDbSnapsh
       rawAssets: await Promise.all(rawAssets.map(serializeRawAsset)),
       queryCache,
       wikiBatchJobs,
+      wikiReviewItems,
     },
   };
 }
@@ -104,6 +109,7 @@ export async function restoreIndexedDbSnapshot(snapshot: WorkspaceIndexedDbSnaps
       db.rawAssets,
       db.queryCache,
       db.wikiBatchJobs,
+      db.wikiReviewItems,
     ],
     async () => {
       await Promise.all([
@@ -118,6 +124,7 @@ export async function restoreIndexedDbSnapshot(snapshot: WorkspaceIndexedDbSnaps
         db.rawAssets.clear(),
         db.queryCache.clear(),
         db.wikiBatchJobs.clear(),
+        db.wikiReviewItems.clear(),
       ]);
 
       await Promise.all([
@@ -134,6 +141,7 @@ export async function restoreIndexedDbSnapshot(snapshot: WorkspaceIndexedDbSnaps
         rawAssets.length ? db.rawAssets.bulkPut(rawAssets) : Promise.resolve(),
         snapshot.records.queryCache.length ? db.queryCache.bulkPut(snapshot.records.queryCache) : Promise.resolve(),
         snapshot.records.wikiBatchJobs.length ? db.wikiBatchJobs.bulkPut(snapshot.records.wikiBatchJobs) : Promise.resolve(),
+        snapshot.records.wikiReviewItems.length ? db.wikiReviewItems.bulkPut(snapshot.records.wikiReviewItems) : Promise.resolve(),
       ]);
     },
   );
@@ -149,6 +157,7 @@ export function countIndexedDbSnapshotRecords(snapshot: WorkspaceIndexedDbSnapsh
     ingestJobs: snapshot.records.ingestJobs.length,
     rawAssets: snapshot.records.rawAssets.length,
     wikiBatchJobs: snapshot.records.wikiBatchJobs.length,
+    wikiReviewItems: snapshot.records.wikiReviewItems.length,
   };
 }
 
@@ -175,6 +184,7 @@ function assertWorkspaceIndexedDbSnapshot(value: unknown): WorkspaceIndexedDbSna
       rawAssets: asArray<RawAssetSnapshot>(snapshot.records.rawAssets),
       queryCache: asArray<QueryCacheRecord>(snapshot.records.queryCache),
       wikiBatchJobs: asArray<WikiBatchJob>(snapshot.records.wikiBatchJobs),
+      wikiReviewItems: asArray<WikiReviewRecord>(snapshot.records.wikiReviewItems),
     },
   };
 }

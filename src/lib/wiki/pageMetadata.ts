@@ -2,6 +2,7 @@ import type { Entity } from '@/types';
 import { parseMarkdownFrontmatter, stringifyMarkdownFrontmatter, type FrontmatterData, type FrontmatterValue } from './frontmatter';
 import { sanitizeWikiMarkdownOutput } from './markdownCompiler';
 import { normalizeWikiReferenceValue } from './references';
+import { compactWikiSummaryText } from './summaryText';
 
 export type WikiPageMetadata = {
   title: string;
@@ -41,7 +42,7 @@ export function buildWikiPageMetadata(markdown: string, fallback: Pick<Entity, '
 }
 
 export function normalizeWikiDescription(description: string, body: string, fallbackSummary = '') {
-  const trimmed = description.trim();
+  const trimmed = compactWikiSummaryText(description, 220);
   if (trimmed && !isSuspiciousWikiDescription(trimmed)) {
     return trimmed;
   }
@@ -135,14 +136,14 @@ function isEmptyValue(value: FrontmatterValue) {
 }
 
 function buildBodySummary(body: string) {
-  return stripLeadingFrontmatterLikeBlocks(body)
+  const text = stripLeadingFrontmatterLikeBlocks(body)
     .split(/\n+/)
     .map((line) => line.trim())
     .filter((line) => line && !line.startsWith('#') && !line.startsWith('|') && !/^[-*]\s*$/.test(line))
     .map((line) => line.replace(/^[-*]\s+/, ''))
     .join(' ')
-    .slice(0, 180)
     .trim();
+  return compactWikiSummaryText(text, 180);
 }
 
 function stripLeadingFrontmatterLikeBlocks(body: string) {

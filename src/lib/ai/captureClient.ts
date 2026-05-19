@@ -23,6 +23,10 @@ import {
   type CaptureWorkspaceContext,
 } from './wikiPatch';
 
+const captureDigestCacheKey = 'mywiki.v2.captureDigestCache.v1';
+const captureDigestPromptVersion = '2026-05-18-long-pdf-v1';
+const captureDigestCacheMaxEntries = 400;
+
 export type ExtractCaptureResult = {
   draft: CaptureDraft;
   provider: LlmProviderId | 'minimax' | 'deepseek';
@@ -52,7 +56,12 @@ export async function extractCaptureDraft(
   const response = await fetch('/api/capture/extract', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content, entityIndex, workspaceContext }),
+    body: JSON.stringify({
+      content,
+      entityIndex,
+      workspaceContext,
+      providerConfig: getProviderConfigForRole(loadProviderSettings(), 'wiki-compile'),
+    }),
     signal: options.signal,
   });
 
@@ -125,15 +134,31 @@ async function prepareContentForStructuredCapture(
   workspaceContext: CaptureWorkspaceContext,
   options: ExtractCaptureOptions,
 ) {
-  const structuredSource = buildCaptureSourceForStructuredProcessing(content);
-  if (!shouldUseCaptureDigest(structuredSource, resolveCaptureDigestThreshold(config.contextWindow))) return structuredSource;
+  const fullSource = content.trim();
+  const structuredSource = buildCaptureSourceForStructuredProcessing(fullSource);
+  if (!shouldUseCaptureDigest(fullSource, resolveCaptureDigestThreshold(config.contextWindow))) return structuredSource;
 
-  const chunks = splitCaptureContentIntoChunks(structuredSource);
-  const sourceIdentity = buildCaptureSourceIdentityBlock(structuredSource);
+  const chunks = splitCaptureContentIntoChunks(
+    fullSource,
+    resolveCaptureDigestChunkSize(config.contextWindow),
+    resolveCaptureDigestChunkLimit(fullSource.length),
+  );
+  const sourceIdentity = buildCaptureSourceIdentityBlock(fullSource);
   const digests: string[] = [];
   for (let index = 0; index < chunks.length; index += 1) {
+    const digest = await getOrCreateCaptureDigest({
+      config,
+      chunk: chunks[index],
+      chunkIndex: index + 1,
+      totalChunks: chunks.length,
+      workspaceContext,
+      signal: options.signal,
+    });
+    digests.push(`## Chunk ${index + 1}/${chunks.length}\n\n${digest}`);
+    /*
     const digestResult = await requestConfiguredProviderText(config, {
       prompt: buildCaptureDigestPrompt(chunks[index], index + 1, chunks.length, workspaceContext),
+      systemPrompt: 'You are the MyWiki long-document reading agent. Output only a Markdown reading digest, not JSON.',
       systemPrompt: '你是 MyWiki 长文档阅读 Agent。只输出 Markdown 阅读摘要，不要输出 JSON。',
       maxTokens: 1600,
     }, { signal: options.signal });
@@ -141,16 +166,150 @@ async function prepareContentForStructuredCapture(
       throw new Error(`${digestResult.providerName} long document digest failed: ${digestResult.error}`);
     }
     digests.push(`## 分块 ${index + 1}/${chunks.length}\n\n${digestResult.text}`);
+    */
   }
 
   return [
     ...(sourceIdentity ? [sourceIdentity, ''] : []),
+    '# Long Document Markdown Digest',
+    '',
+    'The following digest was generated from the complete raw source in chunks. The complete source remains stored in the raw entry.',
+    /*
     '# 长文档 Markdown 阅读摘要',
     '',
     '以下内容由 MyWiki 长文档阅读 Agent 从原始材料分块整理而来。结构化 WikiPatch 只能基于这些摘要生成；完整原文已保存在原始 Entry 中。',
     '',
+    */
     ...digests,
   ].join('\n');
+}
+
+function resolveCaptureDigestChunkSize(contextWindow?: number) {
+  if (!Number.isFinite(contextWindow) || !contextWindow || contextWindow < 32_000) return 8000;
+  if (contextWindow >= 128_000) return 14_000;
+  return 10_000;
+}
+
+function resolveCaptureDigestChunkLimit(contentLength: number) {
+  if (contentLength <= 50_000) return 6;
+  if (contentLength <= 120_000) return 10;
+  if (contentLength <= 260_000) return 16;
+  return 20;
+}
+
+async function getOrCreateCaptureDigest(input: {
+  config: NonNullable<ReturnType<typeof getProviderConfigForRole>>;
+  chunk: string;
+  chunkIndex: number;
+  totalChunks: number;
+  workspaceContext: CaptureWorkspaceContext;
+  signal?: AbortSignal;
+}) {
+  const prompt = buildCaptureDigestPrompt(input.chunk, input.chunkIndex, input.totalChunks, input.workspaceContext);
+  const digestId = await buildCaptureDigestCacheId(input.config, input.workspaceContext, input.chunk);
+  const cached = digestId ? readCaptureDigestCacheEntry(digestId) : '';
+  if (cached) return cached;
+
+  const digestResult = await requestConfiguredProviderText(input.config, {
+    prompt,
+    systemPrompt: 'You are the MyWiki long-document reading agent. Output only a Markdown reading digest, not JSON.',
+    maxTokens: 1800,
+  }, { signal: input.signal });
+  if (!digestResult.ok) {
+    throw new Error(`${digestResult.providerName} long document digest failed: ${digestResult.error}`);
+  }
+
+  if (digestId) writeCaptureDigestCacheEntry(digestId, digestResult.text, input.config);
+  return digestResult.text;
+}
+
+async function buildCaptureDigestCacheId(
+  config: NonNullable<ReturnType<typeof getProviderConfigForRole>>,
+  workspaceContext: CaptureWorkspaceContext,
+  chunk: string,
+) {
+  return sha256Text([
+    captureDigestPromptVersion,
+    config.providerId,
+    config.apiMode,
+    config.endpoint,
+    config.model,
+    workspaceContext.templateId ?? '',
+    workspaceContext.purpose ?? '',
+    workspaceContext.schema ?? '',
+    chunk,
+  ].join('\n\n---mywiki-digest-cache---\n\n'));
+}
+
+function readCaptureDigestCacheEntry(id: string) {
+  const cache = loadCaptureDigestCache();
+  const entry = cache[id];
+  if (!entry?.text?.trim()) return '';
+  entry.usedAt = Date.now();
+  saveCaptureDigestCache(cache);
+  return entry.text;
+}
+
+function writeCaptureDigestCacheEntry(
+  id: string,
+  text: string,
+  config: NonNullable<ReturnType<typeof getProviderConfigForRole>>,
+) {
+  if (!text.trim()) return;
+  const cache = loadCaptureDigestCache();
+  const now = Date.now();
+  cache[id] = {
+    text,
+    providerId: config.providerId,
+    model: config.model,
+    createdAt: cache[id]?.createdAt ?? now,
+    usedAt: now,
+  };
+  saveCaptureDigestCache(cache);
+}
+
+type CaptureDigestCacheEntry = {
+  text: string;
+  providerId: string;
+  model: string;
+  createdAt: number;
+  usedAt: number;
+};
+
+function loadCaptureDigestCache(): Record<string, CaptureDigestCacheEntry> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = window.localStorage.getItem(captureDigestCacheKey);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, CaptureDigestCacheEntry>;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveCaptureDigestCache(cache: Record<string, CaptureDigestCacheEntry>) {
+  if (typeof window === 'undefined') return;
+  try {
+    const trimmed = Object.fromEntries(
+      Object.entries(cache)
+        .filter(([, entry]) => entry?.text?.trim())
+        .sort((left, right) => (right[1].usedAt || 0) - (left[1].usedAt || 0))
+        .slice(0, captureDigestCacheMaxEntries),
+    );
+    window.localStorage.setItem(captureDigestCacheKey, JSON.stringify(trimmed));
+  } catch {
+    // Cache failures must never block source ingestion.
+  }
+}
+
+async function sha256Text(value: string) {
+  if (!globalThis.crypto?.subtle) return '';
+  const bytes = new TextEncoder().encode(value);
+  const hash = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(hash))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
 }
 
 async function normalizeCaptureAnalysisWithRepair(input: {

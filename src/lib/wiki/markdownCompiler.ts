@@ -6,6 +6,7 @@ import {
   type WikiTargetSpec,
 } from './schemaRules';
 import { unwrapWikiReference } from './references';
+import { compactWikiSummaryText } from './summaryText';
 
 export type WikiMarkdownCompileInput = {
   entity: Entity;
@@ -563,13 +564,13 @@ export function extractMarkdownSummary(markdown: string) {
     extractSection(withoutFrontmatter, '项目概述') ??
     extractSection(withoutFrontmatter, '主题概述');
   const source = summarySection ?? withoutFrontmatter;
-  return source
+  const text = source
     .split(/\n+/)
     .map((line) => line.replace(/^[-*]\s+/, '').trim())
     .filter((line) => line && !line.startsWith('#') && !line.startsWith('|'))
     .join(' ')
-    .slice(0, 220)
     .trim();
+  return compactWikiSummaryText(text, 220);
 }
 
 export function extractFrontmatterTags(markdown: string, fallback: string[] = []) {

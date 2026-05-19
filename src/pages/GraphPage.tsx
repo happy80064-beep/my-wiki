@@ -1,7 +1,6 @@
 import {
   Activity,
   AlertTriangle,
-  Box,
   GitBranch,
   Map as MapIcon,
   Maximize2,
@@ -51,6 +50,11 @@ type SceneNode = {
   isCommunityHub: boolean;
   phase: number;
   drift: number;
+};
+
+type LayoutNode = SceneNode & {
+  vx: number;
+  vy: number;
 };
 
 type SceneLink = {
@@ -202,8 +206,8 @@ const insightTypeLabels = {
   'dense-hub': '高密',
 } as const;
 
-const GRAPH_WIDTH = 1240;
-const GRAPH_HEIGHT = 760;
+const GRAPH_WIDTH = 1900;
+const GRAPH_HEIGHT = 1180;
 const flatRotation: Rotation = { x: 0, y: 0 };
 const spaceRotation: Rotation = { x: -0.38, y: 0.44 };
 
@@ -594,18 +598,6 @@ export function GraphPage() {
               <MapIcon size={14} />
               平面
             </button>
-            <button
-              type="button"
-              onClick={() => changeViewMode('space')}
-              className={[
-                'inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 transition',
-                viewMode === 'space' ? 'bg-[#155eef] text-white' : 'text-[#4b5563] hover:text-[#155eef]',
-              ].join(' ')}
-              title="空间视角：拖拽旋转，Shift/Alt 拖拽平移"
-            >
-              <Box size={14} />
-              空间
-            </button>
           </div>
         </div>
       </div>
@@ -790,9 +782,6 @@ export function GraphPage() {
                 })}
               </svg>
             )}
-            {scene.nodes.length > 0 && legendItems.length > 0 ? (
-              <GraphLegendCard title={legendTitle} items={legendItems} />
-            ) : null}
           </div>
         </section>
 
@@ -1716,14 +1705,14 @@ function runCommunityLayout(
   const centerY = height / 2;
   const selectedIds = new Set(entities.map((entity) => entity.id));
   const visibleHubs = communityModel.hubs.filter((hub) => selectedIds.has(hub.id));
-  const communityCenters = placeCommunityCenters(visibleHubs, entities, communityModel, salt);
+  const communityCenters = placeCommunityCenters(visibleHubs, entities, relationships, communityModel, salt);
   const membersByCommunity = new Map<string, Entity[]>();
   for (const entity of entities) {
     const communityId = communityModel.assignment.get(entity.id) ?? entity.id;
     membersByCommunity.set(communityId, [...(membersByCommunity.get(communityId) ?? []), entity]);
   }
 
-  const nodes = entities.map((entity, index) => {
+  const nodes: LayoutNode[] = entities.map((entity) => {
     const communityId = communityModel.assignment.get(entity.id) ?? entity.id;
     const hub = communityCenters.get(communityId) ?? { x: centerX, y: centerY, z: 0, rank: 0 };
     const members = membersByCommunity.get(communityId) ?? [];
@@ -1739,11 +1728,11 @@ function runCommunityLayout(
     const tightness = communityModel.weightToHub.get(entity.id) ?? 0;
     const ring = isCommunityHub ? 0 : Math.floor(memberIndex / 8) + 1;
     const slot = isCommunityHub ? 0 : memberIndex % 8;
-    const slotCount = Math.min(8 + ring * 3, Math.max(6, sortedMembers.length - (ring - 1) * 8));
+    const slotCount = Math.min(9 + ring * 4, Math.max(6, sortedMembers.length - (ring - 1) * 8));
     const angle =
       ((slot + (hashCode(`${communityId}:${salt}`) % 12) / 12) / Math.max(slotCount, 1)) * Math.PI * 2 +
       ring * 0.42;
-    const orbit = isCommunityHub ? 0 : 62 + ring * 42 - Math.min(26, tightness * 5);
+    const orbit = isCommunityHub ? 0 : 66 + ring * 50 - Math.min(28, tightness * 5);
     const ellipse = 0.72 + (hashCode(`${entity.id}:ellipse`) % 18) / 100;
     return {
       entity,
@@ -1772,10 +1761,10 @@ function runCommunityLayout(
         const dy = right.y - left.y;
         const distanceSq = Math.max(dx * dx + dy * dy, 64);
         const sameCommunity = left.communityId === right.communityId;
-        const minDistance = sameCommunity
-          ? 34 + Math.min(left.degree + right.degree, 12) * 2.2
-          : 54 + Math.min(left.degree + right.degree, 12) * 2.8;
-        const collisionBoost = distanceSq < minDistance * minDistance ? 7.2 : sameCommunity ? 0.36 : 1.28;
+        const minDistance = layoutCollisionDistance(left, right);
+        const overlap = minDistance - Math.sqrt(distanceSq);
+        if (overlap <= 0 && !sameCommunity) continue;
+        const collisionBoost = overlap > 0 ? (sameCommunity ? 9.4 : 14.2) : 0.18;
         const force = (7200 * collisionBoost) / distanceSq;
         const distance = Math.sqrt(distanceSq);
         const fx = (dx / distance) * force;
@@ -1784,6 +1773,16 @@ function runCommunityLayout(
         left.vy -= fy;
         right.vx += fx;
         right.vy += fy;
+        if (overlap > 0) {
+          const leftMobility = layoutNodeMobility(left);
+          const rightMobility = layoutNodeMobility(right);
+          const mobilityTotal = leftMobility + rightMobility;
+          const push = overlap * (sameCommunity ? 0.052 : 0.076);
+          left.vx -= (dx / distance) * push * (leftMobility / mobilityTotal);
+          left.vy -= (dy / distance) * push * (leftMobility / mobilityTotal);
+          right.vx += (dx / distance) * push * (rightMobility / mobilityTotal);
+          right.vy += (dy / distance) * push * (rightMobility / mobilityTotal);
+        }
       }
     }
 
@@ -1795,10 +1794,9 @@ function runCommunityLayout(
       const dy = to.y - from.y;
       const distance = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
       const sameCommunity = from.communityId === to.communityId;
-      const desired = sameCommunity
-        ? 76 + Math.max(from.communityRank, to.communityRank) * 18
-        : 250 + Math.min(from.degree + to.degree, 12) * 7;
-      const force = (distance - desired) * (sameCommunity ? 0.011 : 0.0018) * relationshipStrength(relationship);
+      if (!sameCommunity) continue;
+      const desired = 76 + Math.max(from.communityRank, to.communityRank) * 18;
+      const force = (distance - desired) * 0.011 * relationshipStrength(relationship);
       const fx = (dx / distance) * force;
       const fy = (dy / distance) * force;
       from.vx += fx;
@@ -1809,11 +1807,9 @@ function runCommunityLayout(
 
     for (const node of nodes) {
       const hub = communityCenters.get(node.communityId) ?? { x: centerX, y: centerY };
-      const anchorStrength = node.isCommunityHub ? 0.016 : 0.0058;
+      const anchorStrength = node.isCommunityHub ? 0.038 : 0.018;
       node.vx += (hub.x - node.x) * anchorStrength;
       node.vy += (hub.y - node.y) * anchorStrength;
-      node.vx += (centerX - node.x) * 0.00025;
-      node.vy += (centerY - node.y) * 0.00025;
       node.x += node.vx;
       node.y += node.vy;
       node.vx *= 0.66;
@@ -1823,7 +1819,7 @@ function runCommunityLayout(
     }
   }
 
-  const fittedNodes = fitLayoutToViewport(
+  let fittedNodes = fitLayoutToViewport(
     nodes.map(({ entity, x, y, z, degree, communityId, communityRank, communityWeight, isCommunityHub, phase, drift }) => ({
       entity,
       x,
@@ -1840,6 +1836,12 @@ function runCommunityLayout(
     width,
     height,
   );
+  for (let pass = 0; pass < 5; pass += 1) {
+    fittedNodes = keepMembersNearCommunityHubs(fittedNodes, width, height);
+    fittedNodes = relaxNodeCollisions(fittedNodes, width, height);
+  }
+  fittedNodes = keepMembersNearCommunityHubs(fittedNodes, width, height);
+  fittedNodes = repelForeignCommunityIntrusions(fittedNodes, width, height);
 
   const fittedNodeById = new Map(fittedNodes.map((node) => [node.entity.id, node]));
   const communities = visibleHubs
@@ -1884,6 +1886,7 @@ function runCommunityLayout(
 function placeCommunityCenters(
   hubs: Entity[],
   entities: Entity[],
+  relationships: Relationship[],
   communityModel: CommunityModel,
   salt: number,
 ) {
@@ -1898,25 +1901,337 @@ function placeCommunityCenters(
     .slice()
     .sort((a, b) => (sizes.get(b.id) ?? 0) - (sizes.get(a.id) ?? 0) || communityHubScore(b, new Map()) - communityHubScore(a, new Map()));
   const centers = new Map<string, { x: number; y: number; z: number; rank: number }>();
-  sortedHubs.forEach((hub, index) => {
-    if (index === 0) {
-      centers.set(hub.id, { x: centerX, y: centerY, z: 0, rank: 0 });
-      return;
-    }
-    const ringIndex = index <= 7 ? 1 : 2;
-    const indexInRing = ringIndex === 1 ? index - 1 : index - 8;
-    const countInRing = ringIndex === 1 ? Math.min(7, sortedHubs.length - 1) : Math.max(1, sortedHubs.length - 8);
-    const angle = (indexInRing / countInRing) * Math.PI * 2 + 0.36 + (salt % 7) * 0.018;
-    const rx = ringIndex === 1 ? GRAPH_WIDTH * 0.31 : GRAPH_WIDTH * 0.43;
-    const ry = ringIndex === 1 ? GRAPH_HEIGHT * 0.28 : GRAPH_HEIGHT * 0.39;
+  const candidates = buildCommunityCenterCandidates(salt, Math.max(sortedHubs.length, 8));
+  const communityLinkWeights = buildCommunityLinkWeights(relationships, communityModel.assignment);
+  const placed: CommunityCenterPlacement[] = [];
+  sortedHubs.forEach((hub) => {
+    const nodeCount = sizes.get(hub.id) ?? 1;
+    const radius = communityCenterRadius(nodeCount);
+    const center = chooseSparseCommunityCenter(
+      candidates,
+      placed,
+      communityLinkWeights,
+      radius,
+      nodeCount,
+      centerX,
+      centerY,
+      hub.id,
+    );
+    const rank = Math.hypot(center.x - centerX, center.y - centerY) < GRAPH_WIDTH * 0.18 ? 0 : 1;
     centers.set(hub.id, {
-      x: centerX + Math.cos(angle) * rx,
-      y: centerY + Math.sin(angle) * ry,
+      x: center.x,
+      y: center.y,
       z: ((hashCode(`${hub.id}:community:z`) % 240) - 120) * 0.5,
-      rank: ringIndex,
+      rank,
     });
+    placed.push({ id: hub.id, x: center.x, y: center.y, radius, nodeCount });
   });
   return centers;
+}
+
+type CommunityCenterPlacement = {
+  id: string;
+  x: number;
+  y: number;
+  radius: number;
+  nodeCount: number;
+};
+
+function buildCommunityCenterCandidates(salt: number, communityCount: number) {
+  const centerX = GRAPH_WIDTH / 2;
+  const centerY = GRAPH_HEIGHT * 0.5;
+  const candidates: Array<{ x: number; y: number }> = [{ x: centerX, y: centerY }];
+  const rings = [
+    { count: Math.max(8, Math.min(12, communityCount + 2)), rx: GRAPH_WIDTH * 0.31, ry: GRAPH_HEIGHT * 0.27 },
+    { count: Math.max(12, Math.min(18, communityCount + 8)), rx: GRAPH_WIDTH * 0.43, ry: GRAPH_HEIGHT * 0.38 },
+  ];
+
+  rings.forEach((ring, ringIndex) => {
+    for (let index = 0; index < ring.count; index += 1) {
+      const angle = (index / ring.count) * Math.PI * 2 + 0.34 + ringIndex * 0.21 + (salt % 11) * 0.014;
+      candidates.push({
+        x: centerX + Math.cos(angle) * ring.rx,
+        y: centerY + Math.sin(angle) * ring.ry,
+      });
+    }
+  });
+
+  for (let row = 0; row < 3; row += 1) {
+    for (let column = 0; column < 5; column += 1) {
+      candidates.push({
+        x: 170 + column * ((GRAPH_WIDTH - 340) / 4),
+        y: 126 + row * ((GRAPH_HEIGHT - 252) / 2),
+      });
+    }
+  }
+
+  return candidates;
+}
+
+function chooseSparseCommunityCenter(
+  candidates: Array<{ x: number; y: number }>,
+  placed: CommunityCenterPlacement[],
+  communityLinkWeights: Map<string, Map<string, number>>,
+  radius: number,
+  nodeCount: number,
+  centerX: number,
+  centerY: number,
+  hubId: string,
+) {
+  let best = candidates[0];
+  let bestScore = Number.NEGATIVE_INFINITY;
+  for (const candidate of candidates) {
+    const edgeRoom = Math.min(candidate.x - 84, GRAPH_WIDTH - 84 - candidate.x, candidate.y - 90, GRAPH_HEIGHT - 96 - candidate.y);
+    if (edgeRoom < 0) continue;
+
+    let score = edgeRoom * 0.72 - Math.hypot(candidate.x - centerX, candidate.y - centerY) * 0.18;
+    score += (hashCode(`${hubId}:${candidate.x}:${candidate.y}`) % 19) * 0.1;
+    for (const other of placed) {
+      const distance = Math.max(Math.hypot(candidate.x - other.x, candidate.y - other.y), 1);
+      const required = radius + other.radius + 38;
+      const linkWeight = communityLinkWeights.get(hubId)?.get(other.id) ?? 0;
+      score += Math.min(distance, required * 1.28) * 0.56;
+      score += Math.min(linkWeight, 8) * Math.min(distance, required * 1.8) * 0.08;
+      score -= (other.nodeCount / distance) * 420;
+      if (distance < required) score -= (required - distance) * 8.6;
+    }
+    score -= communityLinePenalty(candidate, hubId, placed, communityLinkWeights);
+
+    if (placed.length === 0 && nodeCount >= 2) {
+      score -= Math.hypot(candidate.x - centerX, candidate.y - centerY) * 0.4;
+    }
+
+    if (score > bestScore) {
+      best = candidate;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
+function buildCommunityLinkWeights(relationships: Relationship[], assignment: Map<string, string>) {
+  const weights = new Map<string, Map<string, number>>();
+  for (const relationship of relationships) {
+    const fromCommunity = assignment.get(relationship.from);
+    const toCommunity = assignment.get(relationship.to);
+    if (!fromCommunity || !toCommunity || fromCommunity === toCommunity) continue;
+    addCommunityLinkWeight(weights, fromCommunity, toCommunity);
+    addCommunityLinkWeight(weights, toCommunity, fromCommunity);
+  }
+  return weights;
+}
+
+function addCommunityLinkWeight(weights: Map<string, Map<string, number>>, from: string, to: string) {
+  const links = weights.get(from) ?? new Map<string, number>();
+  links.set(to, (links.get(to) ?? 0) + 1);
+  weights.set(from, links);
+}
+
+function communityLinePenalty(
+  candidate: { x: number; y: number },
+  hubId: string,
+  placed: CommunityCenterPlacement[],
+  communityLinkWeights: Map<string, Map<string, number>>,
+) {
+  let penalty = 0;
+  for (let leftIndex = 0; leftIndex < placed.length; leftIndex += 1) {
+    const left = placed[leftIndex];
+    for (let rightIndex = leftIndex + 1; rightIndex < placed.length; rightIndex += 1) {
+      const right = placed[rightIndex];
+      const linkWeight = communityLinkWeights.get(left.id)?.get(right.id) ?? 0;
+      if (linkWeight <= 0) continue;
+      const clearance = 34 + Math.min(24, linkWeight * 3);
+      const distance = distanceToSegment(candidate, left, right);
+      if (distance < clearance) penalty += (clearance - distance) * (7.5 + linkWeight);
+    }
+  }
+
+  for (const linked of placed) {
+    const linkWeight = communityLinkWeights.get(hubId)?.get(linked.id) ?? 0;
+    if (linkWeight <= 0) continue;
+    for (const other of placed) {
+      if (other.id === linked.id) continue;
+      const clearance = other.radius + 28;
+      const distance = distanceToSegment(other, candidate, linked);
+      if (distance < clearance) penalty += (clearance - distance) * (4.2 + linkWeight * 0.8);
+    }
+  }
+  return penalty;
+}
+
+function distanceToSegment(
+  point: { x: number; y: number },
+  start: { x: number; y: number },
+  end: { x: number; y: number },
+) {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const lengthSq = dx * dx + dy * dy;
+  if (lengthSq <= 0.001) return Math.hypot(point.x - start.x, point.y - start.y);
+  const t = clamp(((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSq, 0, 1);
+  const x = start.x + dx * t;
+  const y = start.y + dy * t;
+  return Math.hypot(point.x - x, point.y - y);
+}
+
+function communityCenterRadius(nodeCount: number) {
+  return clamp(130 + Math.sqrt(Math.max(nodeCount, 1)) * 26, 160, 270);
+}
+
+function layoutCollisionDistance(left: SceneNode, right: SceneNode) {
+  const sameCommunity = left.communityId === right.communityId;
+  const degreePadding = Math.min(left.degree + right.degree, 12) * (sameCommunity ? 1.15 : 1.6);
+  const hubPadding = left.isCommunityHub || right.isCommunityHub ? 10 : 6;
+  const communityPadding = sameCommunity ? 11 : 22;
+  return nodeRadius(left.degree) + nodeRadius(right.degree) + hubPadding + communityPadding + degreePadding;
+}
+
+function layoutNodeMobility(node: SceneNode) {
+  if (node.isCommunityHub) return 0.34;
+  return clamp(1.18 - node.communityRank * 0.08 + Math.max(0, 5 - node.degree) * 0.025, 0.72, 1.28);
+}
+
+function keepMembersNearCommunityHubs(nodes: SceneNode[], width: number, height: number) {
+  const next = nodes.map((node) => ({ ...node }));
+  keepMembersNearCommunityHubsInPlace(next, width, height);
+  return next;
+}
+
+function keepMembersNearCommunityHubsInPlace(nodes: SceneNode[], width: number, height: number) {
+  const hubs = new Map(nodes.filter((node) => node.isCommunityHub).map((node) => [node.communityId, node]));
+  const counts = communityCounts(nodes);
+  for (const node of nodes) {
+    if (node.isCommunityHub) continue;
+    const hub = hubs.get(node.communityId);
+    if (!hub) continue;
+    const dx = node.x - hub.x;
+    const dy = node.y - hub.y;
+    const distance = Math.max(Math.hypot(dx, dy), 1);
+    const maxDistance = communityMemberMaxDistance(node, counts.get(node.communityId) ?? 1);
+    const preferredDistance = maxDistance * 0.72;
+    if (distance > maxDistance) {
+      node.x = hub.x + (dx / distance) * maxDistance;
+      node.y = hub.y + (dy / distance) * maxDistance;
+    } else if (distance > preferredDistance) {
+      const pull = (distance - preferredDistance) * 0.18;
+      node.x -= (dx / distance) * pull;
+      node.y -= (dy / distance) * pull;
+    }
+    const padding = nodeRadius(node.degree) + 18;
+    node.x = clamp(node.x, padding, width - padding);
+    node.y = clamp(node.y, padding, height - padding);
+  }
+}
+
+function repelForeignCommunityIntrusionsInPlace(nodes: SceneNode[], width: number, height: number) {
+  const hubs = new Map(nodes.filter((node) => node.isCommunityHub).map((node) => [node.communityId, node]));
+  const counts = communityCounts(nodes);
+  let moved = false;
+  for (const node of nodes) {
+    const ownHub = hubs.get(node.communityId);
+    for (const [communityId, foreignHub] of hubs) {
+      if (communityId === node.communityId) continue;
+      let dx = node.x - foreignHub.x;
+      let dy = node.y - foreignHub.y;
+      let distance = Math.hypot(dx, dy);
+      if (distance < 0.01) {
+        const angle = ((hashCode(`${node.entity.id}:${communityId}:foreign`) % 628) / 100) * Math.PI;
+        dx = Math.cos(angle);
+        dy = Math.sin(angle);
+        distance = 1;
+      }
+      const territory = communityTerritoryRadius(counts.get(communityId) ?? 1);
+      const minDistance = territory + nodeRadius(node.degree) + (node.isCommunityHub ? 18 : 12);
+      if (distance >= minDistance) continue;
+
+      const ownDistance = ownHub ? Math.hypot(node.x - ownHub.x, node.y - ownHub.y) : Number.POSITIVE_INFINITY;
+      const strength = node.isCommunityHub ? 0.22 : ownDistance > distance ? 0.92 : 0.58;
+      const push = (minDistance - distance) * strength;
+      node.x += (dx / distance) * push;
+      node.y += (dy / distance) * push;
+      moved = true;
+    }
+    const padding = nodeRadius(node.degree) + 18;
+    node.x = clamp(node.x, padding, width - padding);
+    node.y = clamp(node.y, padding, height - padding);
+  }
+  return moved;
+}
+
+function repelForeignCommunityIntrusions(nodes: SceneNode[], width: number, height: number) {
+  const next = nodes.map((node) => ({ ...node }));
+  repelForeignCommunityIntrusionsInPlace(next, width, height);
+  return next;
+}
+
+function communityCounts(nodes: SceneNode[]) {
+  const counts = new Map<string, number>();
+  for (const node of nodes) {
+    counts.set(node.communityId, (counts.get(node.communityId) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function communityMemberMaxDistance(node: SceneNode, communityNodeCount: number) {
+  return clamp(
+    110 + Math.sqrt(Math.max(communityNodeCount, 1)) * 24 + Math.min(node.communityRank, 4) * 28,
+    150,
+    280,
+  );
+}
+
+function communityTerritoryRadius(communityNodeCount: number) {
+  return clamp(84 + Math.sqrt(Math.max(communityNodeCount, 1)) * 24, 128, 220);
+}
+
+function relaxNodeCollisions(nodes: SceneNode[], width: number, height: number) {
+  const relaxed = nodes.map((node) => ({ ...node }));
+  if (relaxed.length <= 1) return relaxed;
+
+  for (let step = 0; step < 180; step += 1) {
+    let moved = false;
+    for (let leftIndex = 0; leftIndex < relaxed.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < relaxed.length; rightIndex += 1) {
+        const left = relaxed[leftIndex];
+        const right = relaxed[rightIndex];
+        let dx = right.x - left.x;
+        let dy = right.y - left.y;
+        let distance = Math.hypot(dx, dy);
+        if (distance < 0.01) {
+          const angle = ((hashCode(`${left.entity.id}:${right.entity.id}`) % 628) / 100) * Math.PI;
+          dx = Math.cos(angle);
+          dy = Math.sin(angle);
+          distance = 1;
+        }
+
+        const minDistance = layoutCollisionDistance(left, right);
+        const overlap = minDistance - distance;
+        if (overlap <= 0) continue;
+
+        const leftMobility = layoutNodeMobility(left);
+        const rightMobility = layoutNodeMobility(right);
+        const mobilityTotal = leftMobility + rightMobility;
+        const pushX = (dx / distance) * (overlap + 0.35);
+        const pushY = (dy / distance) * (overlap + 0.35);
+        left.x -= pushX * (leftMobility / mobilityTotal);
+        left.y -= pushY * (leftMobility / mobilityTotal);
+        right.x += pushX * (rightMobility / mobilityTotal);
+        right.y += pushY * (rightMobility / mobilityTotal);
+        moved = true;
+      }
+    }
+
+    keepMembersNearCommunityHubsInPlace(relaxed, width, height);
+    repelForeignCommunityIntrusionsInPlace(relaxed, width, height);
+    for (const node of relaxed) {
+      const padding = nodeRadius(node.degree) + 18;
+      node.x = clamp(node.x, padding, width - padding);
+      node.y = clamp(node.y, padding, height - padding);
+    }
+    if (!moved) break;
+  }
+
+  return relaxed;
 }
 
 function fitLayoutToViewport(nodes: SceneNode[], width: number, height: number) {
@@ -1954,9 +2269,11 @@ function projectGraphScene(
   viewMode: GraphViewMode,
   offset: GraphOffset,
 ): ProjectedScene {
-  const projectedNodes = scene.nodes
-    .map((node) => projectNode(node, rotation, time, zoom, viewMode, offset))
-    .sort((a, b) => a.depth - b.depth);
+  const projectedNodes = relaxProjectedNodeCollisions(
+    scene.nodes
+      .map((node) => projectNode(node, rotation, time, zoom, viewMode, offset))
+      .sort((a, b) => a.depth - b.depth),
+  );
   const projectedById = new Map(projectedNodes.map((node) => [node.node.entity.id, node]));
   const links = scene.links
     .map((link) => {
@@ -2089,11 +2406,186 @@ function projectNode(
 }
 
 function nodeRadius(degree: number) {
-  return Math.min(15.5, 6.5 + degree * 1.05);
+  return Math.min(22, 9.5 + degree * 1.25);
+}
+
+function relaxProjectedNodeCollisions(nodes: ProjectedNode[]) {
+  const relaxed = nodes.map((node) => ({ ...node }));
+  if (relaxed.length <= 1) return relaxed;
+  const hubs = new Map(relaxed.filter((node) => node.node.isCommunityHub).map((node) => [node.node.communityId, node]));
+  const counts = projectedCommunityCounts(relaxed);
+
+  for (let step = 0; step < 44; step += 1) {
+    let moved = false;
+    for (let leftIndex = 0; leftIndex < relaxed.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < relaxed.length; rightIndex += 1) {
+        const left = relaxed[leftIndex];
+        const right = relaxed[rightIndex];
+        let dx = right.x - left.x;
+        let dy = right.y - left.y;
+        let distance = Math.hypot(dx, dy);
+        if (distance < 0.01) {
+          const angle = ((hashCode(`${left.node.entity.id}:${right.node.entity.id}:projected`) % 628) / 100) * Math.PI;
+          dx = Math.cos(angle);
+          dy = Math.sin(angle);
+          distance = 1;
+        }
+
+        const minDistance = left.radius + right.radius + (left.node.isCommunityHub || right.node.isCommunityHub ? 18 : 14);
+        const overlap = minDistance - distance;
+        if (overlap <= 0) continue;
+
+        const leftMobility = layoutNodeMobility(left.node);
+        const rightMobility = layoutNodeMobility(right.node);
+        const mobilityTotal = leftMobility + rightMobility;
+        const pushX = (dx / distance) * (overlap + 0.2);
+        const pushY = (dy / distance) * (overlap + 0.2);
+        left.x -= pushX * (leftMobility / mobilityTotal);
+        left.y -= pushY * (leftMobility / mobilityTotal);
+        right.x += pushX * (rightMobility / mobilityTotal);
+        right.y += pushY * (rightMobility / mobilityTotal);
+        moved = true;
+      }
+    }
+    if (keepProjectedMembersNearHubsInPlace(relaxed, hubs, counts)) moved = true;
+    if (repelProjectedForeignCommunityIntrusionsInPlace(relaxed, hubs, counts)) moved = true;
+    clampProjectedNodesInPlace(relaxed);
+    if (!moved) break;
+  }
+  for (let step = 0; step < 48; step += 1) {
+    const pulled = keepProjectedMembersNearHubsInPlace(relaxed, hubs, counts);
+    const repelled = repelProjectedForeignCommunityIntrusionsInPlace(relaxed, hubs, counts);
+    const separated = resolveProjectedPairCollisions(relaxed);
+    clampProjectedNodesInPlace(relaxed);
+    if (!pulled && !repelled && !separated) break;
+  }
+
+  return relaxed;
+}
+
+function clampProjectedNodesInPlace(nodes: ProjectedNode[]) {
+  for (const node of nodes) {
+    const padding = node.radius + (node.node.isCommunityHub ? 20 : 16);
+    node.x = clamp(node.x, padding, GRAPH_WIDTH - padding);
+    node.y = clamp(node.y, padding, GRAPH_HEIGHT - padding - 8);
+  }
+}
+
+function resolveProjectedPairCollisions(nodes: ProjectedNode[]) {
+  let moved = false;
+  for (let leftIndex = 0; leftIndex < nodes.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < nodes.length; rightIndex += 1) {
+      const left = nodes[leftIndex];
+      const right = nodes[rightIndex];
+      let dx = right.x - left.x;
+      let dy = right.y - left.y;
+      let distance = Math.hypot(dx, dy);
+      if (distance < 0.01) {
+        const angle = ((hashCode(`${left.node.entity.id}:${right.node.entity.id}:projected-final`) % 628) / 100) * Math.PI;
+        dx = Math.cos(angle);
+        dy = Math.sin(angle);
+        distance = 1;
+      }
+
+      const minDistance = left.radius + right.radius + (left.node.isCommunityHub || right.node.isCommunityHub ? 18 : 14);
+      const overlap = minDistance - distance;
+      if (overlap <= 0) continue;
+
+      const leftMobility = layoutNodeMobility(left.node);
+      const rightMobility = layoutNodeMobility(right.node);
+      const mobilityTotal = leftMobility + rightMobility;
+      const pushX = (dx / distance) * (overlap + 0.2);
+      const pushY = (dy / distance) * (overlap + 0.2);
+      left.x -= pushX * (leftMobility / mobilityTotal);
+      left.y -= pushY * (leftMobility / mobilityTotal);
+      right.x += pushX * (rightMobility / mobilityTotal);
+      right.y += pushY * (rightMobility / mobilityTotal);
+      moved = true;
+    }
+  }
+  return moved;
+}
+
+function repelProjectedForeignCommunityIntrusionsInPlace(
+  nodes: ProjectedNode[],
+  hubs: Map<string, ProjectedNode>,
+  counts: Map<string, number>,
+) {
+  let moved = false;
+  for (const node of nodes) {
+    const ownHub = hubs.get(node.node.communityId);
+    for (const [communityId, foreignHub] of hubs) {
+      if (communityId === node.node.communityId) continue;
+      let dx = node.x - foreignHub.x;
+      let dy = node.y - foreignHub.y;
+      let distance = Math.hypot(dx, dy);
+      if (distance < 0.01) {
+        const angle = ((hashCode(`${node.node.entity.id}:${communityId}:projected-foreign`) % 628) / 100) * Math.PI;
+        dx = Math.cos(angle);
+        dy = Math.sin(angle);
+        distance = 1;
+      }
+      const territory = communityTerritoryRadius(counts.get(communityId) ?? 1) * clamp(foreignHub.scale, 0.82, 1.22);
+      const minDistance = territory + node.radius + (node.node.isCommunityHub ? 18 : 12);
+      if (distance >= minDistance) continue;
+
+      const ownDistance = ownHub ? Math.hypot(node.x - ownHub.x, node.y - ownHub.y) : Number.POSITIVE_INFINITY;
+      const strength = node.node.isCommunityHub ? 0.18 : ownDistance > distance ? 0.88 : 0.54;
+      const push = (minDistance - distance) * strength;
+      node.x += (dx / distance) * push;
+      node.y += (dy / distance) * push;
+      moved = true;
+    }
+  }
+  return moved;
+}
+
+function keepProjectedMembersNearHubsInPlace(
+  nodes: ProjectedNode[],
+  hubs: Map<string, ProjectedNode>,
+  counts: Map<string, number>,
+) {
+  let moved = false;
+  for (const node of nodes) {
+    if (node.node.isCommunityHub) continue;
+    const hub = hubs.get(node.node.communityId);
+    if (!hub) continue;
+    const dx = node.x - hub.x;
+    const dy = node.y - hub.y;
+    const distance = Math.max(Math.hypot(dx, dy), 1);
+    const maxDistance = communityMemberMaxDistance(node.node, counts.get(node.node.communityId) ?? 1) * clamp(node.scale, 0.82, 1.22);
+    const preferredDistance = maxDistance * 0.72;
+    if (distance > maxDistance) {
+      node.x = hub.x + (dx / distance) * maxDistance;
+      node.y = hub.y + (dy / distance) * maxDistance;
+      moved = true;
+    } else if (distance > preferredDistance) {
+      const pull = (distance - preferredDistance) * 0.12;
+      node.x -= (dx / distance) * pull;
+      node.y -= (dy / distance) * pull;
+      moved = true;
+    }
+  }
+  return moved;
+}
+
+function projectedCommunityCounts(nodes: ProjectedNode[]) {
+  const counts = new Map<string, number>();
+  for (const node of nodes) {
+    counts.set(node.node.communityId, (counts.get(node.node.communityId) ?? 0) + 1);
+  }
+  return counts;
 }
 
 function buildVisibleLabelIds(nodes: ProjectedNode[], zoom: number, viewMode: GraphViewMode) {
   const boxes: Array<{ left: number; right: number; top: number; bottom: number }> = [];
+  const nodeBoxes = nodes.map((node) => ({
+    id: node.node.entity.id,
+    left: node.x - node.radius - 18,
+    right: node.x + node.radius + 18,
+    top: node.y - node.radius - 18,
+    bottom: node.y + node.radius + 18,
+  }));
   const visible = new Set<string>();
   const maxLabels = viewMode === 'map'
     ? zoom >= 1.35 ? 74 : zoom >= 1.08 ? 54 : 38
@@ -2120,11 +2612,12 @@ function buildVisibleLabelIds(nodes: ProjectedNode[], zoom: number, viewMode: Gr
     const box = {
       left: node.x - width / 2,
       right: node.x + width / 2,
-      top: node.y + node.radius + 4,
-      bottom: node.y + node.radius + 24,
+      top: node.y + node.radius + 2,
+      bottom: node.y + node.radius + 30,
     };
     if (box.left < 6 || box.right > GRAPH_WIDTH - 6 || box.bottom > GRAPH_HEIGHT - 8) continue;
     if (boxes.some((other) => intersects(box, other))) continue;
+    if (nodeBoxes.some((other) => other.id !== node.node.entity.id && intersects(box, other))) continue;
     boxes.push(box);
     visible.add(node.node.entity.id);
   }

@@ -79,6 +79,28 @@ describe('wiki scanner', () => {
       }),
     ]);
   });
+
+  it('indexes pages by frontmatter type even when the file is still in an old folder', async () => {
+    const adapter = memoryAdapter({
+      'D:/Workspace/wiki/projects/publication.md': [
+        '---',
+        'type: 概念',
+        'title: 出版业',
+        'tags: ["项目","产业链","出版"]',
+        '---',
+        '# 出版业',
+      ].join('\n'),
+    });
+
+    await expect(scanWikiPages(adapter, 'D:/Workspace')).resolves.toEqual([
+      expect.objectContaining({
+        slug: 'publication',
+        type: 'concept',
+        title: '出版业',
+      }),
+    ]);
+  });
+
   it('does not index model thinking accidentally saved in markdown files', async () => {
     const adapter = memoryAdapter({
       'D:/Workspace/wiki/entities/clean.md': [

@@ -133,6 +133,41 @@ describe('browser wiki page helpers', () => {
     expect(patch.wikiMarkdown).toContain('type: concept');
   });
 
+  it('lets edited type frontmatter override stale type tags and cleans those tags', async () => {
+    const entity = await createEntity({
+      type: 'project',
+      title: '出版业',
+      summary: 'Old summary.',
+      tags: ['项目', '产业链', '出版'],
+      sourceEntries: [],
+    });
+
+    const patch = buildBrowserEntityMarkdownPatch(
+      entity,
+      [
+        '---',
+        'type: concept',
+        'title: "出版业"',
+        'tags: ["项目","产业链","出版"]',
+        'sources: []',
+        'related: []',
+        '---',
+        '',
+        '# 出版业',
+        '',
+        '## 摘要',
+        '出版业应作为概念页维护。',
+      ].join('\n'),
+    );
+
+    expect(patch).toMatchObject({
+      type: 'topic',
+      tags: ['概念', '产业链', '出版'],
+    });
+    expect(patch.wikiMarkdown).toContain('type: concept');
+    expect(patch.wikiMarkdown).toContain('tags: ["概念","产业链","出版"]');
+  });
+
   it('moves a page when the visible type tags are edited from project to concept', async () => {
     const entity = await createEntity({
       type: 'project',
@@ -162,7 +197,7 @@ describe('browser wiki page helpers', () => {
 
     expect(patch).toMatchObject({
       type: 'topic',
-      tags: ['concept', '概念'],
+      tags: ['concept'],
     });
     expect(patch.wikiMarkdown).toContain('type: concept');
   });

@@ -10,6 +10,7 @@ import type {
   RawAsset,
   Relationship,
   Task,
+  WikiReviewRecord,
   WikiBatchJob,
 } from '@/types';
 import { getClientId } from './clientId';
@@ -39,6 +40,7 @@ export class MyWikiDatabase extends Dexie {
   rawAssets!: Table<RawAsset, string>;
   queryCache!: Table<QueryCacheRecord, string>;
   wikiBatchJobs!: Table<WikiBatchJob, string>;
+  wikiReviewItems!: Table<WikiReviewRecord, string>;
 
   constructor(name = 'mywiki') {
     super(name);
@@ -128,6 +130,21 @@ export class MyWikiDatabase extends Dexie {
       rawAssets: 'id, clientId, status, kind, contentHash, filename, createdAt, updatedAt',
       queryCache: '&key, clientId, updatedAt, dataUpdatedAt',
       wikiBatchJobs: 'id, clientId, owner, status, createdAt, updatedAt',
+    });
+
+    this.version(8).stores({
+      entries: 'id, clientId, capturedAt, processed, source',
+      entities: 'id, clientId, type, title, *tags, *scenes, createdAt, updatedAt',
+      relationships: 'id, clientId, from, to, type, createdAt, *evidence',
+      tasks: 'id, clientId, owner, status, createdAt, dueDate, source, *linkedTo',
+      compileSuggestions: 'id, clientId, &fingerprint, status, entityId, propertyKey, evidenceEntryId, createdAt, updatedAt',
+      ingestJobs: 'id, clientId, status, contentHash, createdAt, updatedAt',
+      ingestCache: '&contentHash, clientId, updatedAt, *entryIds',
+      graphInsightDismissals: 'id, clientId, type, dismissedAt',
+      rawAssets: 'id, clientId, status, kind, contentHash, filename, createdAt, updatedAt',
+      queryCache: '&key, clientId, updatedAt, dataUpdatedAt',
+      wikiBatchJobs: 'id, clientId, owner, status, createdAt, updatedAt',
+      wikiReviewItems: 'id, clientId, &fingerprint, status, type, entityId, createdAt, updatedAt',
     });
   }
 }

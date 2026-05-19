@@ -1,10 +1,12 @@
 import { db } from '@/lib/db';
 import { getProviderConfigForRole, loadProviderSettings } from '@/lib/llm/providerSettings';
 import { requestConfiguredProviderText } from '@/lib/llm/runtimeProvider';
+import { isProviderRetryableError } from '@/lib/llm/requestScheduler';
 import { isTauriRuntime } from '@/lib/runtime/tauri';
 import { resolveActiveWorkspaceSchemaContext } from '@/lib/workspace/schemaContext';
 import type { Entity, RawAsset } from '@/types';
 import { buildBrowserWikiCompileContext } from '@/lib/wiki/browserCompileContext';
+import { persistWikiCompileCandidate } from '@/lib/wiki/compilePersistence';
 import {
   buildWikiMarkdownBatchCompilePrompt,
   normalizeWikiMarkdownBatchCompileResult,
@@ -16,12 +18,15 @@ import {
 export type RawAssetSourceWikiBatchResult = {
   compiled: number;
   missingEntityIds: string[];
+  reviewQueuedEntityIds: string[];
   warnings: string[];
   provider: string;
   model: string;
 };
 
 const sourceWikiBatchSize = 6;
+const sourceWikiBatchRetryLimit = 2;
+const sourceWikiBatchRetryBaseDelayMs = 2500;
 
 export async function compileRawAssetWikiPagesFromSource(
   asset: RawAsset,
@@ -29,7 +34,7 @@ export async function compileRawAssetWikiPagesFromSource(
   options: { signal?: AbortSignal } = {},
 ): Promise<RawAssetSourceWikiBatchResult> {
   if (!asset.entryId) {
-    return { compiled: 0, missingEntityIds: entityIds, warnings: [], provider: '', model: '' };
+    return { compiled: 0, missingEntityIds: entityIds, reviewQueuedEntityIds: [], warnings: [], provider: '', model: '' };
   }
 
   const sourceEntry = await db.entries.get(asset.entryId);
@@ -37,7 +42,7 @@ export async function compileRawAssetWikiPagesFromSource(
 
   const targetEntities = (await db.entities.bulkGet(entityIds)).filter((entity): entity is Entity => Boolean(entity));
   if (targetEntities.length === 0) {
-    return { compiled: 0, missingEntityIds: entityIds, warnings: [], provider: '', model: '' };
+    return { compiled: 0, missingEntityIds: entityIds, reviewQueuedEntityIds: [], warnings: [], provider: '', model: '' };
   }
 
   const [allEntities, allEntries, allRelationships] = await Promise.all([
@@ -60,6 +65,7 @@ export async function compileRawAssetWikiPagesFromSource(
   const today = new Date().toISOString().slice(0, 10);
   const warnings: string[] = [];
   const missingEntityIds = new Set(targetEntities.map((entity) => entity.id));
+  const reviewQueuedEntityIds = new Set<string>();
   let compiled = 0;
   let provider = '';
   let model = '';
@@ -75,7 +81,7 @@ export async function compileRawAssetWikiPagesFromSource(
       today,
       providerConfig,
     };
-    const batchResult = await requestSourceWikiBatchCompile(payload, options);
+    const batchResult = await requestSourceWikiBatchCompileWithRetry(payload, options);
     provider = batchResult.provider || provider;
     model = batchResult.model || model;
     warnings.push(...(batchResult.warnings ?? []));
@@ -83,13 +89,18 @@ export async function compileRawAssetWikiPagesFromSource(
     for (const result of batchResult.results) {
       const entity = batch.find((item) => item.id === result.entityId);
       if (!entity) continue;
-      await persistSourceBatchWikiResult(entity, result, provider, model, 1);
+      const persisted = await persistSourceBatchWikiResult(entity, result, provider, model, 1);
+      if (!persisted.applied) {
+        reviewQueuedEntityIds.add(entity.id);
+        warnings.push(`Wiki update for "${entity.title}" was queued for human review.`);
+      } else {
+        compiled += 1;
+      }
       missingEntityIds.delete(entity.id);
-      compiled += 1;
     }
   }
 
-  return { compiled, missingEntityIds: Array.from(missingEntityIds), warnings, provider, model };
+  return { compiled, missingEntityIds: Array.from(missingEntityIds), reviewQueuedEntityIds: Array.from(reviewQueuedEntityIds), warnings, provider, model };
 }
 
 async function requestSourceWikiBatchCompile(
@@ -136,6 +147,37 @@ async function requestSourceWikiBatchCompile(
   return data;
 }
 
+async function requestSourceWikiBatchCompileWithRetry(
+  payload: WikiMarkdownBatchCompileInput & {
+    providerConfig?: ReturnType<typeof getProviderConfigForRole>;
+  },
+  options: { signal?: AbortSignal },
+): Promise<WikiMarkdownBatchCompileResult & { provider: string; model: string }> {
+  let lastError: unknown;
+  let lastPartialResult: (WikiMarkdownBatchCompileResult & { provider: string; model: string }) | undefined;
+
+  for (let attempt = 1; attempt <= sourceWikiBatchRetryLimit; attempt += 1) {
+    throwIfAborted(options.signal);
+    try {
+      const result = await requestSourceWikiBatchCompile(payload, options);
+      if (result.missingEntityIds.length === 0 || attempt >= sourceWikiBatchRetryLimit) return result;
+      lastPartialResult = result;
+      throw new Error(`Wiki batch compiler did not return all requested FILE blocks: ${result.missingEntityIds.length} missing.`);
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      lastError = error;
+      if (attempt >= sourceWikiBatchRetryLimit || !isRetryableSourceWikiBatchError(error)) {
+        if (lastPartialResult) return lastPartialResult;
+        throw error;
+      }
+      await sleep(sourceWikiBatchRetryBaseDelayMs * attempt, options.signal);
+    }
+  }
+
+  if (lastPartialResult) return lastPartialResult;
+  throw lastError;
+}
+
 async function persistSourceBatchWikiResult(
   entity: Entity,
   payload: WikiMarkdownCompileResult,
@@ -143,22 +185,13 @@ async function persistSourceBatchWikiResult(
   model: string,
   sourceCount: number,
 ) {
-  const now = Date.now();
-  await db.entities.update(entity.id, {
-    summary: payload.summary || entity.summary,
-    tags: mergeTags(entity.tags, payload.tags),
-    wikiMarkdown: payload.markdown,
-    wikiCompiledAt: now,
-    wikiCompileModel: `${provider}:${model}`,
-    compiledProfile: {
-      overview: payload.summary || entity.summary,
-      keyFacts: [],
-      openTasks: [],
-      relationshipSummary: [],
-      sourceSummary: `${sourceCount} 条来源已用于文件级 Wiki 页面批量编译。`,
-      updatedAt: now,
-    },
-    updatedAt: now,
+  return persistWikiCompileCandidate({
+    entity,
+    payload,
+    provider,
+    model,
+    sourceCount,
+    sourceLabel: 'raw-asset-source-compile',
   });
 }
 
@@ -170,11 +203,40 @@ function chunkEntities(entities: Entity[], size: number) {
   return chunks;
 }
 
-function mergeTags(existing: string[], incoming: string[]) {
-  return Array.from(new Set([...existing, ...incoming].map((tag) => tag.trim()).filter(Boolean))).slice(0, 16);
-}
-
 function throwIfAborted(signal?: AbortSignal) {
   if (!signal?.aborted) return;
   throw signal.reason ?? new DOMException('Aborted', 'AbortError');
+}
+
+function isAbortError(error: unknown) {
+  return (
+    (error instanceof DOMException && error.name === 'AbortError') ||
+    (error instanceof Error && error.name === 'AbortError')
+  );
+}
+
+function isRetryableSourceWikiBatchError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error || 'unknown error');
+  return (
+    isProviderRetryableError(message) ||
+    /valid file block|file blocks|did not return|missing pages|missing file|malformed|empty content/i.test(message)
+  );
+}
+
+function sleep(ms: number, signal?: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+    const timeout = globalThis.setTimeout(() => {
+      signal?.removeEventListener('abort', abort);
+      resolve();
+    }, ms);
+    const abort = () => {
+      globalThis.clearTimeout(timeout);
+      reject(signal?.reason ?? new DOMException('Aborted', 'AbortError'));
+    };
+    signal?.addEventListener('abort', abort, { once: true });
+  });
 }

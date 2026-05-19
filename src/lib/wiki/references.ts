@@ -13,7 +13,11 @@ export function normalizeWikiReferenceValue(value: string) {
     next = next.slice(0, pipeIndex).trim();
   }
 
-  return next.replace(/^\[+/, '').replace(/\]+$/, '').trim();
+  return next
+    .replace(/^\[+/, '')
+    .replace(/\]+$/, '')
+    .replace(/\\+$/, '')
+    .trim();
 }
 
 export function unwrapWikiReference(value: string): { target: string; label: string } {
@@ -30,7 +34,7 @@ export function unwrapWikiReference(value: string): { target: string; label: str
   const pipeIndex = raw.indexOf('|');
   if (pipeIndex < 0) return { target: raw, label: raw };
 
-  const target = raw.slice(0, pipeIndex).trim();
+  const target = raw.slice(0, pipeIndex).replace(/\\+$/, '').trim();
   const alias = raw.slice(pipeIndex + 1).trim();
   return { target, label: alias || target };
 }

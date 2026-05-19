@@ -5,6 +5,7 @@ import { isTauriRuntime } from '@/lib/runtime/tauri';
 import { resolveActiveWorkspaceSchemaContext } from '@/lib/workspace/schemaContext';
 import type { Entity, Entry } from '@/types';
 import { buildBrowserWikiCompileContext } from './browserCompileContext';
+import { persistWikiCompileCandidate } from './compilePersistence';
 import {
   buildWikiMarkdownCompilePrompt,
   normalizeWikiMarkdownCompileResult,
@@ -14,6 +15,8 @@ import {
 export type BrowserRecompileResult = WikiMarkdownCompileResult & {
   provider: string;
   model: string;
+  reviewQueued?: boolean;
+  reviewId?: string;
 };
 
 export async function recompileBrowserEntityWikiPage(
@@ -21,7 +24,7 @@ export async function recompileBrowserEntityWikiPage(
   options: { signal?: AbortSignal } = {},
 ): Promise<BrowserRecompileResult> {
   const entity = await db.entities.get(entityId);
-  if (!entity) throw new Error('未找到要重编译的实体。');
+  if (!entity) throw new Error('Cannot find entity to recompile.');
 
   const [sourceEntries, relationships] = await Promise.all([
     entity.sourceEntries.length ? db.entries.bulkGet(entity.sourceEntries) : Promise.resolve([]),
@@ -56,13 +59,13 @@ export async function recompileBrowserEntityWikiPage(
 
   if (!import.meta.env.DEV && isTauriRuntime()) {
     if (!providerConfig) {
-      throw new Error('请先在设置里配置 Wiki 编译模型，安装版才能重编译 Wiki 页面。');
+      throw new Error('Please configure a Wiki compile model before recompiling a wiki page.');
     }
     const today = new Date().toISOString().slice(0, 10);
     const providerResult = await requestConfiguredProviderText(providerConfig, {
       prompt: buildWikiMarkdownCompilePrompt({ ...requestPayload, today }),
       systemPrompt:
-        '你是 MyWiki v2 的中文 Wiki 编译 Agent。完整回复必须且只能是一个 ---FILE: wiki/...--- 到 ---END FILE--- 的 FILE block。第一字符必须是 -。严禁输出 <think>、思考过程、分析过程、任务复述或任何 FILE block 外说明。',
+        'You are the MyWiki v2 wiki compiler. Return exactly one FILE block and no commentary.',
       maxTokens: 4200,
     }, { signal: options.signal });
     if (!providerResult.ok) {
@@ -71,11 +74,13 @@ export async function recompileBrowserEntityWikiPage(
     const normalized = normalizeWikiMarkdownCompileResult(providerResult.text, entity, today, {
       requireFileBlock: true,
     });
-    await persistRecompileResult(entity, normalized, providerResult.providerName, providerResult.model, usableSourceEntries.length);
+    const persisted = await persistRecompileResult(entity, normalized, providerResult.providerName, providerResult.model, usableSourceEntries.length);
     return {
       ...normalized,
       provider: providerResult.providerName,
       model: providerResult.model,
+      reviewQueued: !persisted.applied,
+      reviewId: persisted.review?.id,
     };
   }
 
@@ -88,41 +93,31 @@ export async function recompileBrowserEntityWikiPage(
 
   const payload = (await response.json()) as BrowserRecompileResult | { error?: string };
   if (!response.ok || !('markdown' in payload)) {
-    throw new Error((payload as { error?: string }).error || 'Wiki 重编译失败。');
+    throw new Error((payload as { error?: string }).error || 'Wiki recompilation failed.');
   }
 
-  await persistRecompileResult(entity, payload, payload.provider, payload.model, usableSourceEntries.length);
+  const persisted = await persistRecompileResult(entity, payload, payload.provider, payload.model, usableSourceEntries.length);
 
-  return payload;
+  return {
+    ...payload,
+    reviewQueued: !persisted.applied,
+    reviewId: persisted.review?.id,
+  };
 }
 
-async function persistRecompileResult(
+function persistRecompileResult(
   entity: Entity,
   payload: WikiMarkdownCompileResult,
   provider: string,
   model: string,
   sourceCount: number,
 ) {
-  const now = Date.now();
-  const tags = mergeTags(entity.tags, payload.tags);
-  await db.entities.update(entity.id, {
-    summary: payload.summary || entity.summary,
-    tags,
-    wikiMarkdown: payload.markdown,
-    wikiCompiledAt: now,
-    wikiCompileModel: `${provider}:${model}`,
-    compiledProfile: {
-      overview: payload.summary || entity.summary,
-      keyFacts: [],
-      openTasks: [],
-      relationshipSummary: [],
-      sourceSummary: `${sourceCount} 条来源已用于 v2 Wiki 页面重编译。`,
-      updatedAt: now,
-    },
-    updatedAt: now,
+  return persistWikiCompileCandidate({
+    entity,
+    payload,
+    provider,
+    model,
+    sourceCount,
+    sourceLabel: 'manual-recompile',
   });
-}
-
-function mergeTags(existing: string[], incoming: string[]) {
-  return Array.from(new Set([...existing, ...incoming].map((tag) => tag.trim()).filter(Boolean))).slice(0, 16);
 }

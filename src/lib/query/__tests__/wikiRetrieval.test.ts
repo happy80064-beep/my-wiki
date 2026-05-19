@@ -138,4 +138,42 @@ describe('wiki retrieval', () => {
 
     expect(context.pages.map((page) => page.title)).toContain('集宁区中蒙医院');
   });
+  it('ignores superseded wiki content when retrieving query context', () => {
+    const project = makeEntity({
+      id: 'project_superseded',
+      type: 'project',
+      title: '福瑞三期',
+      summary: '项目最新住宅建筑面积为 14.2 万平方米。',
+      wikiMarkdown: [
+        '# 福瑞三期',
+        '',
+        '## 住宅建筑面积',
+        '福瑞三期住宅建筑面积为 14.2 万平方米。',
+        '',
+        '<!-- mywiki:superseded reason="reviewed" supersededAt="2026-05-18T00:00:00.000Z" -->',
+        '~~福瑞三期住宅建筑面积为 12 万平方米。~~',
+        '<!-- /mywiki:superseded -->',
+      ].join('\n'),
+    });
+    const wikiIndex: WikiIndexEntry[] = [
+      {
+        entityId: project.id,
+        type: project.type,
+        title: project.title,
+        aliases: [project.title],
+        shortSummary: project.summary,
+        importance: 10,
+        sourceCount: 1,
+        relationshipCount: 0,
+        updatedAt: project.updatedAt,
+      },
+    ];
+
+    const oldContext = retrieveQueryContextFromEntities('12 万平方米', [project], [], wikiIndex);
+    const newContext = retrieveQueryContextFromEntities('14.2 万平方米', [project], [], wikiIndex);
+
+    expect(oldContext.pages[0]?.content ?? '').not.toContain('12 万平方米');
+    expect(newContext.pages[0]?.content).toContain('14.2 万平方米');
+    expect(newContext.pages[0]?.content).not.toContain('12 万平方米');
+  });
 });

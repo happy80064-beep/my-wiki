@@ -64,6 +64,7 @@ const LONG_TEXT_PDF_IMAGE_ENRICHMENT_PAGE_LIMIT = 30;
 const rawAssetCancelMessage = 'User cancelled this raw asset ingest task.';
 const rawAssetWikiEntityRetryLimit = 3;
 const rawAssetWikiEntityRetryBaseDelayMs = 1500;
+const rawAssetQueueFailureCooldownMs = 8000;
 const minUsefulWikiMarkdownLength = 700;
 
 let activeRawAssetQueueAbort:
@@ -358,6 +359,24 @@ export async function processRawAssetQueue(input: {
     if (finalResult.status === 'failed' || finalResult.status === 'wiki_failed') failed += 1;
     result = finalResult.status === 'wiki_failed' ? ({ ...finalResult, status: 'failed' } as RawAsset) : finalResult;
     remainingIds.delete(candidateIds[index]);
+    if (
+      remainingIds.size > 0 &&
+      (finalResult.status === 'failed' || finalResult.status === 'wiki_failed') &&
+      isLikelyTransportWikiCompileError(finalResult.error)
+    ) {
+      publish({
+        stage: 'running',
+        percent: Math.min(98, Math.round((processed / total) * 100)),
+        label: '模型服务冷却后继续处理队列',
+        detail: `刚才的任务疑似网络、超时或限流失败，暂停 ${Math.round(rawAssetQueueFailureCooldownMs / 1000)} 秒后再处理下一个文件。`,
+        currentAssetId: undefined,
+        queuedAssetIds: Array.from(remainingIds),
+        total,
+        processed,
+        failed,
+      });
+      await sleep(rawAssetQueueFailureCooldownMs, abortController?.signal).catch(() => undefined);
+    }
     publish({
       stage: 'running',
       percent: Math.min(98, Math.round((processed / total) * 100)),
@@ -591,13 +610,29 @@ export async function compileRawAssetWikiPages(
       if (pendingEntityIds.length > 0) {
         const { compileRawAssetWikiPagesFromSource } = await import('./sourceWikiCompiler');
         const batchResult = await compileRawAssetWikiPagesFromSource(asset, pendingEntityIds, { signal: options.signal });
-        if (batchResult.missingEntityIds.length > 0) {
-          const missing = (await db.entities.bulkGet(batchResult.missingEntityIds))
-            .map((entity) => entity?.title)
-            .filter(Boolean)
-            .slice(0, 5)
-            .join('、');
-          throw new Error(`Wiki batch generation missing pages: ${missing || batchResult.missingEntityIds.length}`);
+        const retryEntityIds = new Set(batchResult.missingEntityIds);
+        const reviewQueuedEntityIds = new Set(batchResult.reviewQueuedEntityIds);
+        const refreshedEntities = (await db.entities.bulkGet(pendingEntityIds)).filter((entity): entity is Entity => Boolean(entity));
+        for (const entity of refreshedEntities) {
+          if (reviewQueuedEntityIds.has(entity.id)) continue;
+          if (!hasUsefulCompiledWikiMarkdown(entity)) retryEntityIds.add(entity.id);
+        }
+
+        for (const entityId of retryEntityIds) {
+          throwIfAborted(options.signal);
+          const entity = await db.entities.get(entityId);
+          try {
+            await compileRawAssetWikiEntityWithRetry(entityId, asset, defaultRawAssetWikiCompiler, options);
+          } catch (error) {
+            if (isAbortError(error)) throw error;
+            failures.push(`${entity?.title ?? entityId}: ${formatErrorMessage(error)}`);
+            if (isLikelyTransportWikiCompileError(error)) break;
+            continue;
+          }
+          const updated = await db.entities.get(entityId);
+          if (!updated || (!hasUsefulCompiledWikiMarkdown(updated) && !(await hasPendingWikiReviewForEntity(entityId)))) {
+            failures.push(`${updated?.title ?? entity?.title ?? entityId}: Wiki generation returned incomplete content`);
+          }
         }
       }
     } else {
@@ -608,6 +643,10 @@ export async function compileRawAssetWikiPages(
 
         try {
           await compileRawAssetWikiEntityWithRetry(entityId, asset, wikiCompiler, options);
+          const updated = await db.entities.get(entityId);
+          if (!updated || !hasUsefulCompiledWikiMarkdown(updated)) {
+            failures.push(`${updated?.title ?? entity?.title ?? entityId}: Wiki generation returned incomplete content`);
+          }
         } catch (error) {
           if (isAbortError(error)) throw error;
           failures.push(`${entity?.title ?? entityId}: ${formatErrorMessage(error)}`);
@@ -672,6 +711,15 @@ function hasUsefulCompiledWikiMarkdown(entity: Entity) {
   if (!markdown.startsWith('---') || !/^#\s+/m.test(markdown)) return false;
   const sectionCount = markdown.match(/^##\s+/gm)?.length ?? 0;
   return sectionCount >= 3;
+}
+
+async function hasPendingWikiReviewForEntity(entityId: string) {
+  const count = await db.wikiReviewItems
+    .where('entityId')
+    .equals(entityId)
+    .filter((review) => review.status === 'pending')
+    .count();
+  return count > 0;
 }
 
 function isRetryableWikiCompileError(error: unknown) {

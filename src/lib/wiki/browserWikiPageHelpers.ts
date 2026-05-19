@@ -5,9 +5,12 @@ import type { CompiledEntityProfile, Entity, Entry, EntityType } from '@/types';
 import { parseMarkdownFrontmatter, stringifyMarkdownFrontmatter } from './frontmatter';
 import { extractMarkdownSummary, inferWikiTargetSpec, sanitizeWikiMarkdownOutput } from './markdownCompiler';
 import { buildWikiPageMetadata, repairWikiMarkdownDescription } from './pageMetadata';
+import { typeLabel } from './pageTree';
 import type { WikiPageMetadata } from './pageMetadata';
 import { normalizeWikiPageType } from './schemaRules';
 import type { WikiPageType } from './scanner';
+import { buildHumanEditedWikiPatch } from './humanEditGuard';
+import { stripSupersededMarkdown } from './superseded';
 
 export function getWikiCompileProviderSummary(settings: LlmProviderSettings) {
   const config = getProviderConfigForRole(settings, 'wiki-compile');
@@ -25,12 +28,14 @@ export function buildBrowserEntityMarkdownPatch(entity: Entity, markdown: string
   const metadata = buildWikiPageMetadata(cleaned, entity);
   const pageType = resolveEditedWikiPageType(metadata, entity);
   const normalizedMarkdown = normalizeEditedWikiMarkdownType(cleaned, pageType);
+  const normalizedMetadata = buildWikiPageMetadata(normalizedMarkdown, entity);
   const nextEntityType = wikiPageTypeToEntityType(pageType, entity.type);
   const patch: Partial<Entity> = {
-    title: metadata.title,
-    summary: extractMarkdownSummary(normalizedMarkdown) || metadata.description || entity.summary,
-    tags: metadata.tags,
+    title: normalizedMetadata.title,
+    summary: extractMarkdownSummary(normalizedMarkdown) || normalizedMetadata.description || entity.summary,
+    tags: normalizedMetadata.tags,
     wikiMarkdown: normalizedMarkdown,
+    ...buildHumanEditedWikiPatch(normalizedMarkdown, updatedAt),
     updatedAt,
   };
   if (nextEntityType !== entity.type) {
@@ -110,7 +115,7 @@ export function buildCompiledProfileFromWikiMarkdown(input: {
   relatedTitles?: string[];
   updatedAt?: number;
 }): CompiledEntityProfile {
-  const cleaned = sanitizeWikiMarkdownOutput(input.markdown).trim();
+  const cleaned = stripSupersededMarkdown(sanitizeWikiMarkdownOutput(input.markdown)).trim();
   const summary = extractMarkdownSummary(cleaned) || input.entity.summary || `${input.entity.title} 相关 Wiki 页面。`;
   const lines = cleaned.replace(/\r\n/g, '\n').split('\n');
   const keyFacts = collectListItems(lines, ['关键事实', '关键指标', '指标', '要点', 'Facts', 'Metrics']).slice(0, 8);
@@ -208,17 +213,65 @@ function resolveEditedWikiPageType(metadata: WikiPageMetadata, entity: Entity): 
   return metadataType ?? tagType ?? currentType;
 }
 
-function normalizeEditedWikiMarkdownType(markdown: string, pageType: WikiPageType) {
+export function normalizeEditedWikiMarkdownType(markdown: string, pageType: WikiPageType) {
   const parsed = parseMarkdownFrontmatter(markdown);
   if (!parsed.raw) return markdown;
   const currentType = normalizeWikiPageType(typeof parsed.data.type === 'string' ? parsed.data.type : undefined);
-  if (currentType === pageType && parsed.data.type === pageType) return markdown;
+  const currentTags = Array.isArray(parsed.data.tags) ? parsed.data.tags.map(String) : [];
+  const nextTags = normalizeWikiPageTypeTags(currentTags, pageType);
+  const tagsChanged = JSON.stringify(currentTags) !== JSON.stringify(nextTags);
+  if (currentType === pageType && parsed.data.type === pageType && !tagsChanged) return markdown;
 
   const nextData = {
     ...parsed.data,
     type: pageType,
+    tags: nextTags,
   };
   return `${stringifyMarkdownFrontmatter(nextData)}\n\n${parsed.body.trimStart()}`.trim();
+}
+
+export function normalizeWikiPageTypeTags(tags: string[], pageType: WikiPageType) {
+  if (['schema', 'purpose', 'overview'].includes(pageType)) return dedupeTags(tags);
+
+  let sawTypeTag = false;
+  let hasTargetTypeTag = false;
+  const next: string[] = [];
+
+  for (const tag of tags) {
+    const trimmed = tag.trim();
+    if (!trimmed) continue;
+
+    const normalized = normalizeWikiPageType(trimmed);
+    if (normalized && !['schema', 'purpose', 'overview'].includes(normalized)) {
+      sawTypeTag = true;
+      if (normalized === pageType && !hasTargetTypeTag) {
+        next.push(trimmed);
+        hasTargetTypeTag = true;
+      }
+      continue;
+    }
+
+    next.push(trimmed);
+  }
+
+  if (sawTypeTag && !hasTargetTypeTag) {
+    next.unshift(typeLabel(pageType));
+  }
+
+  return dedupeTags(next);
+}
+
+function dedupeTags(tags: string[]) {
+  const seen = new Set<string>();
+  const next: string[] = [];
+  for (const tag of tags) {
+    const trimmed = tag.trim();
+    const key = trimmed.toLowerCase();
+    if (!trimmed || seen.has(key)) continue;
+    seen.add(key);
+    next.push(trimmed);
+  }
+  return next;
 }
 
 function entityTypeToWikiPageType(type: EntityType): WikiPageType {

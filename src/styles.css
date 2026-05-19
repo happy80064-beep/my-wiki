@@ -204,6 +204,13 @@ body {
   user-select: none;
 }
 
+.frog-drop-zone {
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
 .frog-widget-hover .frog-drop-zone {
   border-color: #27a65b;
   background: rgb(240 255 244 / 0.94);
@@ -213,9 +220,12 @@ body {
 }
 
 .frog-widget-compact.frog-widget-hover .frog-drop-zone {
-  border-color: transparent;
-  background: rgb(255 255 255 / 0.62);
-  box-shadow: 0 5px 14px rgb(31 41 55 / 0.08);
+  border-color: rgb(39 166 91 / 0.55);
+  background: rgb(232 255 240 / 0.96);
+  box-shadow:
+    0 0 0 3px rgb(39 166 91 / 0.18),
+    0 8px 20px rgb(39 166 91 / 0.16),
+    0 5px 14px rgb(31 41 55 / 0.08);
 }
 
 .frog-face {

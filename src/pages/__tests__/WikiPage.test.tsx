@@ -1,11 +1,13 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+﻿import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createEntity, createEntry, db, resetDatabase } from '@/lib/db';
 import { publishWikiBatchCompileStatus } from '@/lib/wiki/batchCompileStatus';
+import { getBrowserWikiBatchRecompilePromise } from '@/lib/wiki/batchRecompileQueue';
 import { BrowserIndexedDbWikiPage } from '../WikiPage';
 
 describe('BrowserIndexedDbWikiPage', () => {
   beforeEach(async () => {
+    await getBrowserWikiBatchRecompilePromise()?.catch(() => undefined);
     window.localStorage.clear();
     vi.restoreAllMocks();
     Object.defineProperty(window, 'confirm', {
@@ -271,6 +273,113 @@ describe('BrowserIndexedDbWikiPage', () => {
     expect(within(leftTree as HTMLElement).getByText('概念')).toBeTruthy();
     expect(within(leftTree as HTMLElement).getByText('本地优先存储')).toBeTruthy();
     expect(within(leftTree as HTMLElement).queryByText(/这是一段很长的摘要/)).toBeNull();
+  });
+
+  it('groups edited wiki pages by frontmatter type instead of stale type tags', async () => {
+    const entity = await createEntity({
+      type: 'project',
+      title: '出版业',
+      summary: '旧摘要。',
+      tags: ['项目', '产业链', '出版'],
+    });
+    await db.entities.update(entity.id, {
+      wikiMarkdown: [
+        '---',
+        'type: concept',
+        'title: "出版业"',
+        'tags: ["项目","产业链","出版"]',
+        '---',
+        '',
+        '# 出版业',
+        '',
+        '## 摘要',
+        '出版业应归为概念页。',
+      ].join('\n'),
+    });
+
+    render(<BrowserIndexedDbWikiPage />);
+
+    await screen.findAllByText('出版业');
+    const leftTree = screen.getByText('知识树').closest('main');
+    expect(leftTree).toBeTruthy();
+
+    expect(within(leftTree as HTMLElement).getByText('概念')).toBeTruthy();
+    expect(within(leftTree as HTMLElement).getByText('出版业')).toBeTruthy();
+    expect(within(leftTree as HTMLElement).queryByText('项目')).toBeNull();
+  });
+
+  it('prioritizes source-backed pages whose wiki is still ungenerated during batch generation', async () => {
+    const confirmSpy = vi.fn(() => false);
+    Object.defineProperty(window, 'confirm', {
+      value: confirmSpy,
+      configurable: true,
+    });
+    await createEntity({
+      type: 'project',
+      title: '未生成项目',
+      summary: '已有结构化来源，尚未生成 Wiki。',
+      sourceEntries: ['entry_missing'],
+    });
+    const complete = await createEntity({
+      type: 'project',
+      title: '已生成项目',
+      summary: '已有完整 Wiki。',
+      sourceEntries: ['entry_complete'],
+    });
+    await db.entities.update(complete.id, {
+      wikiMarkdown: ['# 已生成项目', '', '## 摘要', '这是一份已经生成过的 Wiki 页面。'].join('\n'),
+      wikiCompiledAt: Date.now(),
+      wikiCompileModel: 'test/mock',
+    });
+    await createEntity({
+      type: 'project',
+      title: '无来源项目',
+      summary: '没有来源，不应参与批量生成。',
+    });
+
+    render(<BrowserIndexedDbWikiPage />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '批量生成/更新wiki页' }));
+
+    await waitFor(() => {
+      expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('1 个未生成词条'));
+    });
+  });
+
+  it('runs a full batch update only when every source-backed page already has wiki content', async () => {
+    const confirmSpy = vi.fn(() => false);
+    Object.defineProperty(window, 'confirm', {
+      value: confirmSpy,
+      configurable: true,
+    });
+    const first = await createEntity({
+      type: 'project',
+      title: '已生成项目 A',
+      summary: '已有完整 Wiki。',
+      sourceEntries: ['entry_a'],
+    });
+    const second = await createEntity({
+      type: 'topic',
+      title: '已生成概念 B',
+      summary: '已有完整 Wiki。',
+      sourceEntries: ['entry_b'],
+    });
+    const compiledPatch = {
+      wikiMarkdown: ['# 已生成', '', '## 摘要', '这是一份已经生成过的 Wiki 页面。'].join('\n'),
+      wikiCompiledAt: Date.now(),
+      wikiCompileModel: 'test/mock',
+    };
+    await db.entities.update(first.id, compiledPatch);
+    await db.entities.update(second.id, compiledPatch);
+
+    render(<BrowserIndexedDbWikiPage />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '批量生成/更新wiki页' }));
+
+    await waitFor(() => {
+      expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('2 个 Wiki 页面'));
+      expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('全量更新'));
+    });
   });
 
   it('deletes a wiki page from the left knowledge tree', async () => {

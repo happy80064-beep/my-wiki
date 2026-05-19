@@ -2,29 +2,39 @@
 
 MyWiki 是一个本地优先的个人 AI 知识中枢。它把 PDF、Word、Excel、PPT、图片、网页、压缩包和文本等原始材料放入统一工作区，经过结构化入库和 Wiki 编译后，生成可阅读、可检索、可追溯、可持续编辑的 Markdown Wiki。
 
-当前仓库版本：`v0.1.4`
+当前仓库版本：`v0.1.5`
 
 最新安装包：<https://github.com/happy80064-beep/my-wiki/releases/latest>
 
 ## 当前状态
 
-`v0.1.4` 是内测 MVP 版本，重点修复和验证原始材料导入、网页 URL 抓取、知识库切换和跨平台安装包发布链路。
+`v0.1.5` 是内测 MVP 的稳定性与验收版本，重点提升长 PDF 入库、结构化编译、Wiki 批量生成、图谱筛选和人工审核流程。
 
-本版本相对 `v0.1.3` 的主要更新：
+本版本相对 `v0.1.4` 的主要更新：
 
-1. 桌面 Frog 和应用内捕获页粘贴网页 URL 时，会先提取网页正文，再保存到 Raw Inbox，不再把 URL 当成一行普通 Markdown 文本。
-2. 网页提取优先使用随安装包分发的 MarkItDown；当 MarkItDown 抓到验证页或空内容时，会改走网页 fetch 提取。遇到站点登录、验证或反爬拦截时会明确失败，不再生成“内容待补充”类假 wiki。
-3. 导入链路补齐 MarkItDown README 中常见格式的本地验证：HTML、CSV、JSON、XML、ZIP 均有可运行链路；ZIP 现在可作为 Raw Inbox 原始材料导入。
-4. 总览页“切换知识库”修复空输入时“打开”按钮循环箭头误转的问题，并增加“浏览”按钮，可从资源管理器选择本地知识库文件夹。
-5. 保留 v0.1.3 已有的 Frog 小尺寸透明悬浮窗、Raw Inbox 队列、Wiki 批量生成、巡检、查询、图谱和多模型配置能力。
+1. PDF 提取优先使用随桌面安装包分发的 PDFium，并通过全局锁串行 PDF 解析，降低长 PDF 和多文件并发解析时的崩溃、卡死和相互影响风险。
+2. 长文档结构化入库改为完整原文分块摘要和 SHA-256 digest 缓存，再进入结构化抽取，避免在进入模型前过早截断 149 页 PDF 这类长材料。
+3. LLM 请求增加同 provider/model 串行调度和失败冷却；Raw Inbox 队列在网络、限流、超时失败后会短暂停顿再处理下一个任务，减少长 PDF 失败拖累后续任务。
+4. Source Wiki 批量编译增加可重试请求，遇到缺失 FILE block、超时或限流时会按明确失败类型重试，不再把异常结果当成可用 Wiki。
+5. 知识树栏“批量生成/更新wiki页”会优先只处理状态为“未生成”的来源词条；当所有来源词条都已生成 Wiki 后，才进入全量更新并提示会覆盖旧 Markdown。
+6. Wiki 人工编辑保护增强：AI 重编译遇到人工修改会进入审核队列，采纳新版本时保留被替换内容的 superseded 记录，降低误覆盖风险。
+7. 查询保存回 Wiki 和 Wiki 检索继续收敛到页面优先、来源可追溯的结果，减少“问题描述”或污染 frontmatter 对页面内容的影响。
+8. 巡检页补充孤立页面、frontmatter 和引用问题处理能力，图谱页筛选项进一步对齐当前 Wiki page types 和社区视图，隐藏不匹配的旧标签入口。
+9. Wiki 页头部 description/摘要展示改为句子感知压缩，避免长 frontmatter 或正文摘要被截断在“2026年开”“1993年2月”这类半句话上。
+10. 保留 v0.1.4 已有的网页 URL 正文抓取、MarkItDown sidecar、项目工作区、Raw Inbox、图谱、查询、巡检、多模型角色配置和客户端更新检测能力。
+
+本地打包版验收记录：
+
+- Windows 打包版已用 149 页真实 PDF 做干净工作区端到端测试：PDFium 提取文本 100,378 字符，包含 `1/149` 与 `149/149` 页标记；结构化生成 37 个实体、40 条关系；Wiki 生成 37/37；未检测到 fallback/兜底/降级文本；队列最终清空，原文件状态为 `compiled`。
+- 本机环境为 Windows，无法在本机安装运行 macOS `.dmg`。macOS 包通过 GitHub Actions 的 `macos-latest` runner 执行 `pnpm test` 与 `pnpm desktop:build:macos` 后生成。
 
 当前发布安装包：
 
 | 平台 | 文件 | 说明 |
 | --- | --- | --- |
-| Windows | `MyWiki_0.1.4_x64-setup.exe` | 推荐给普通 Windows 用户的安装包 |
-| Windows | `MyWiki_0.1.4_x64_en-US.msi` | Windows MSI 安装包 |
-| macOS | `MyWiki_0.1.4_aarch64.dmg` | Apple Silicon Mac 推荐安装包 |
+| Windows | `MyWiki_0.1.5_x64-setup.exe` | 推荐给普通 Windows 用户的安装包 |
+| Windows | `MyWiki_0.1.5_x64_en-US.msi` | Windows MSI 安装包 |
+| macOS | `MyWiki_0.1.5_aarch64.dmg` | Apple Silicon Mac 推荐安装包 |
 | macOS | `MyWiki_macos_ARM64.app.zip` | Apple Silicon Mac app 压缩包 |
 
 > 说明：当前 macOS 包是 ARM64 / Apple Silicon 版本。iOS 分发不是普通桌面安装包链路，需要后续单独规划 TestFlight、App Store 或企业签名分发。
@@ -93,7 +103,7 @@ pnpm desktop:build:macos
 
 1. 同步 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json`、`src-tauri/tauri.macos.conf.json` 的版本号。
 2. 合并并推送到 `main`。
-3. 创建并推送 tag，例如 `v0.1.4`。
+3. 创建并推送 tag，例如 `v0.1.5`。
 4. `Release Packages` workflow 构建 Windows/macOS 安装包。
 5. workflow 创建 GitHub Release，客户端通过 `/releases/latest` 检查更新。
 

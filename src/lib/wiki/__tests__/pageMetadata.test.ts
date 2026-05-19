@@ -258,4 +258,53 @@ describe('wiki page metadata view model', () => {
     expect(metadata.body).not.toContain('created:');
     expect(metadata.body).toContain('Local-first storage keeps user data on the local machine by default.');
   });
+
+  it('does not cut long descriptions in the middle of a sentence', () => {
+    const metadata = buildWikiPageMetadata(
+      [
+        '---',
+        'type: project',
+        'title: "Long Project"',
+        'description: "福瑞健康科技园三期项目是内蒙古福瑞医疗科技股份有限公司在乌兰察布市集宁区实施的重大战略扩建工程，聚焦医疗、康养住宅、研发生产和文旅休闲五大业态，构建医康旅一体融合的综合性医疗康养产业集群。项目总投资12.03亿元，预计年均营业收入4.22亿元，税后内部收益率8.68%，2026年开工，建设周期3年，预计2029年开始运营。后续还有更长的背景介绍和运营安排。继续补充医疗板块康养住宅研发生产文旅板块财务指标市场空间投资回收风险控制合作医院健康管理服务会员权益运营节奏"',
+        'tags: ["project"]',
+        'sources: []',
+        'related: []',
+        '---',
+        '',
+        '# Long Project',
+      ].join('\n'),
+      fallback,
+    );
+
+    expect(metadata.description).toBe(
+      '福瑞健康科技园三期项目是内蒙古福瑞医疗科技股份有限公司在乌兰察布市集宁区实施的重大战略扩建工程，聚焦医疗、康养住宅、研发生产和文旅休闲五大业态，构建医康旅一体融合的综合性医疗康养产业集群。项目总投资12.03亿元，预计年均营业收入4.22亿元，税后内部收益率8.68%，2026年开工，建设周期3年，预计2029年开始运营。后续还有更长的背景介绍和运营安排。...',
+    );
+    expect(metadata.description).not.toMatch(/2026年开$/);
+  });
+
+  it('falls back to a sentence-aware body summary when frontmatter description is unusable', () => {
+    const metadata = buildWikiPageMetadata(
+      [
+        '---',
+        'type: entity',
+        'title: "Person"',
+        'description: "MiniMax failed: fetch failed"',
+        'tags: ["entity"]',
+        'sources: []',
+        'related: []',
+        '---',
+        '',
+        '# Person',
+        '',
+        '## 摘要',
+        '王冠一长期担任公司核心管理职务，是内蒙古福瑞医疗科技股份有限公司董事长兼总经理，也是公司实际控制人，长期推动公司从工业生产型向综合医药企业转型。1993年2月至1995年5月任内蒙古蒙电无损检测技术公司经理，1995年5月至1998年11月任北京福麦特副总经理，1998年起担任公司总经理，2005年起担任董事长。继续补充项目投资医疗资源整合康养运营上市公司战略规划',
+      ].join('\n'),
+      fallback,
+    );
+
+    expect(metadata.description).toBe(
+      '王冠一长期担任公司核心管理职务，是内蒙古福瑞医疗科技股份有限公司董事长兼总经理，也是公司实际控制人，长期推动公司从工业生产型向综合医药企业转型。1993年2月至1995年5月任内蒙古蒙电无损检测技术公司经理，1995年5月至1998年11月任北京福麦特副总经理，1998年起担任公司总经理，2005年起担任董事长。...',
+    );
+    expect(metadata.description).not.toMatch(/1993年2月$/);
+  });
 });

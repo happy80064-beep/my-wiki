@@ -63,6 +63,7 @@ import { groupWikiPagesByType } from '@/lib/wiki/pageTree';
 import { normalizeWikiReferenceValue } from '@/lib/wiki/references';
 import { normalizeWikiPageType } from '@/lib/wiki/schemaRules';
 import { WIKI_PAGE_TYPE_ORDER, type WikiPageIndexEntry, type WikiPageType } from '@/lib/wiki/scanner';
+import { stripSupersededMarkdown } from '@/lib/wiki/superseded';
 import type { Entity, Entry, RawAsset } from '@/types';
 
 type BrowserWikiTreePage = WikiPageIndexEntry & { entity: Entity; wikiStatus: BrowserWikiEntityStatus };
@@ -200,7 +201,7 @@ export function BrowserIndexedDbWikiPage() {
   );
   const selectedEntity = selected?.kind === 'entity' ? sortedEntities.find((entity) => entity.id === selected.id) ?? null : null;
   const selectedEntry = selected?.kind === 'entry' ? entries.find((entry) => entry.id === selected.id) ?? null : null;
-  const sourceItems = useMemo(() => buildBrowserSourceItems(entries, rawAssets), [entries, rawAssets]);
+  const sourceItems = useMemo(() => buildBrowserSourceItems(entries, rawAssets, entities), [entries, rawAssets, entities]);
   const browserRuntimeOrigin = typeof window === 'undefined' ? '' : window.location.origin;
   const emptyBrowserCompat = !isTauriRuntime() && entities.length === 0 && entries.length === 0 && rawAssetCount === 0;
   const compatibilityNote = isTauriRuntime()
@@ -491,12 +492,16 @@ export function BrowserIndexedDbWikiPage() {
   }
 
   async function saveEntityDraft(entity: Entity) {
-    const previousPath = inferWikiTargetSpec(entity, { schema: activeWorkspaceSchema }).path;
+    const previousPaths = [
+      resolveBrowserEntityWikiTarget(entity, activeWorkspaceSchema).path,
+      inferWikiTargetSpec(entity, { schema: activeWorkspaceSchema }).path,
+    ];
     const patch = buildBrowserEntityMarkdownPatch(entity, draftMarkdown);
     await db.entities.update(entity.id, patch);
     const updatedEntity = (await db.entities.get(entity.id)) ?? ({ ...entity, ...patch } as Entity);
     await syncIndexedDbKnowledgeToDefaultWorkspace().catch(() => undefined);
-    await deleteMovedWorkspaceWikiFile(previousPath, inferWikiTargetSpec(updatedEntity, { schema: activeWorkspaceSchema }).path).catch(() => undefined);
+    const nextPath = resolveBrowserEntityWikiTarget(updatedEntity, activeWorkspaceSchema).path;
+    await Promise.all(previousPaths.map((previousPath) => deleteMovedWorkspaceWikiFile(previousPath, nextPath).catch(() => undefined)));
     setEditing(false);
     setSaveStatus('已保存页面。');
   }
@@ -518,6 +523,10 @@ export function BrowserIndexedDbWikiPage() {
     try {
       const result = await recompileBrowserEntityWikiPage(entity.id);
       await syncIndexedDbKnowledgeToDefaultWorkspace().catch(() => undefined);
+      if (result.reviewQueued) {
+        setCompileStatus(`AI 已生成「${entity.title}」的新版本，但检测到人工编辑差异，已进入审核队列。`);
+        return;
+      }
       setCompileStatus(`已完成《${entity.title}》的 v2 Wiki 页面生成/更新，使用模型：${result.provider} / ${result.model}。`);
     } catch (error) {
       setCompileStatus(error instanceof Error ? error.message : 'Wiki 页面生成/更新失败。');
@@ -546,14 +555,14 @@ export function BrowserIndexedDbWikiPage() {
       return;
     }
 
-    const candidates = sortedEntities.filter((entity) => (entity.sourceEntries?.length ?? 0) > 0);
-    if (!candidates.length) {
+    const sourceBackedCandidates = sortedEntities.filter((entity) => (entity.sourceEntries?.length ?? 0) > 0);
+    if (!sourceBackedCandidates.length) {
       setCompileStatus('没有找到可生成/更新的 Wiki 页面，至少需要 1 条来源原文。');
       return;
     }
 
     const legacyJob = await recoverLegacyWikiBatchJob(
-      candidates.map((entity) => ({ id: entity.id, title: entity.title })),
+      sourceBackedCandidates.map((entity) => ({ id: entity.id, title: entity.title })),
       { owner: 'wiki' },
     );
     if (legacyJob && legacyJob.status === 'paused') {
@@ -566,14 +575,23 @@ export function BrowserIndexedDbWikiPage() {
       return;
     }
 
+    const missingCandidates = sourceBackedCandidates.filter((entity) => getBrowserWikiEntityStatus(entity).state === 'structured');
+    const candidates = missingCandidates.length > 0 ? missingCandidates : sourceBackedCandidates;
+    const onlyMissingPages = missingCandidates.length > 0;
     const provider = getWikiCompileProviderSummary(loadProviderSettings());
     const providerLabel = provider ? `${provider.label} / ${provider.model}` : '当前 Wiki 模型';
     const confirmed = window.confirm(
-      `即将使用 ${providerLabel} 生成/更新 ${candidates.length} 个 Wiki 页面。这个过程会覆盖旧的 Wiki Markdown，是否继续？`,
+      onlyMissingPages
+        ? `即将使用 ${providerLabel} 为 ${candidates.length} 个未生成词条生成 Wiki 页面。已有完整 Wiki 的词条本次不会更新，是否继续？`
+        : `即将使用 ${providerLabel} 生成/更新 ${candidates.length} 个 Wiki 页面。当前没有未生成词条，因此会执行全量更新并覆盖旧的 Wiki Markdown，是否继续？`,
     );
     if (!confirmed) return;
 
-    setCompileStatus(`已启动 ${candidates.length} 个 Wiki 页面的批量生成/更新。`);
+    setCompileStatus(
+      onlyMissingPages
+        ? `已启动 ${candidates.length} 个未生成 Wiki 页面的批量生成。`
+        : `已启动 ${candidates.length} 个 Wiki 页面的全量生成/更新。`,
+    );
     void startBrowserWikiBatchRecompile(
       candidates.map((entity) => ({ id: entity.id, title: entity.title })),
       { owner: 'wiki' },
@@ -1130,7 +1148,7 @@ export function BrowserIndexedDbWikiPage() {
 		                    ? wikiBatchStatus?.detail ?? wikiBatchStatus?.label ?? 'Wiki 页面正在批量生成/更新中'
 		                    : hasRecoverableWikiBatchJob
 		                      ? `继续未完成任务：已处理 ${recoverableWikiBatchJob?.processed ?? 0}/${recoverableWikiBatchJob?.total ?? 0}`
-		                    : '用当前已入库材料生成或更新所有已存在 Wiki 页面的 Markdown 内容'
+		                    : '优先为未生成的词条生成 Wiki；如果全部词条都已生成，再执行全量更新'
 		                }
 	              >
 	                {wikiBatchRunning ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}
@@ -1987,8 +2005,8 @@ function findBrowserEntryByReference(reference: string, entries: Entry[]) {
 
 function sortBrowserEntities(entities: Entity[], schema?: string) {
   return [...entities].sort((left, right) => {
-    const leftTarget = inferWikiTargetSpec(left, { schema });
-    const rightTarget = inferWikiTargetSpec(right, { schema });
+    const leftTarget = resolveBrowserEntityWikiTarget(left, schema);
+    const rightTarget = resolveBrowserEntityWikiTarget(right, schema);
     const typeOrder = wikiTypeSortOrder(leftTarget.type) - wikiTypeSortOrder(rightTarget.type);
     if (typeOrder !== 0) return typeOrder;
 
@@ -2006,9 +2024,8 @@ function buildBrowserWikiTreePages(entities: Entity[], schema?: string): Browser
   return entities.map((entity) => {
     const markdown = entity.wikiMarkdown?.trim() || buildInitialBrowserEntityMarkdown(entity, schema);
     const metadata = buildWikiPageMetadata(markdown, entity);
-    const fallbackTarget = inferWikiTargetSpec(entity, { schema });
-    const type = resolveBrowserWikiDisplayType(metadata, fallbackTarget.type);
-    const target = inferWikiTargetSpec(entity, { schema, preferredType: type });
+    const target = resolveBrowserEntityWikiTarget(entity, schema, metadata);
+    const type = target.type;
     const path = target.path;
     const slug = path.split('/').pop()?.replace(/\.md$/i, '') || entity.id;
 
@@ -2035,11 +2052,9 @@ function buildBrowserWikiTreePages(entities: Entity[], schema?: string): Browser
 
 function buildBrowserWikiSearchDocuments(entities: Entity[], schema?: string): BrowserWikiSearchDocument[] {
   return entities.map((entity) => {
-    const markdown = entity.wikiMarkdown?.trim() || buildInitialBrowserEntityMarkdown(entity, schema);
+    const markdown = stripSupersededMarkdown(entity.wikiMarkdown?.trim() || buildInitialBrowserEntityMarkdown(entity, schema));
     const metadata = buildWikiPageMetadata(markdown, entity);
-    const fallbackTarget = inferWikiTargetSpec(entity, { schema });
-    const type = resolveBrowserWikiDisplayType(metadata, fallbackTarget.type);
-    const target = inferWikiTargetSpec(entity, { schema, preferredType: type });
+    const target = resolveBrowserEntityWikiTarget(entity, schema, metadata);
     const summary = metadata.description || entity.summary || '';
     const body = buildBrowserSearchText([
       metadata.body,
@@ -2053,7 +2068,7 @@ function buildBrowserWikiSearchDocuments(entities: Entity[], schema?: string): B
       entity,
       title: metadata.title || entity.title,
       path: target.path,
-      type,
+      type: target.type,
       summary,
       body,
       updated: metadata.updated,
@@ -2220,8 +2235,15 @@ function resolveBrowserWikiDisplayType(metadata: WikiPageMetadata, fallback: Wik
   const tagType = metadata.tags
     .map((tag) => normalizeBrowserWikiPageType(tag))
     .find((type): type is WikiPageType => Boolean(type && !['schema', 'purpose', 'overview'].includes(type)));
-  if (tagType && tagType !== metadataType) return tagType;
   return metadataType ?? tagType ?? fallback;
+}
+
+function resolveBrowserEntityWikiTarget(entity: Entity, schema?: string, metadata?: WikiPageMetadata) {
+  const markdown = entity.wikiMarkdown?.trim() || buildInitialBrowserEntityMarkdown(entity, schema);
+  const effectiveMetadata = metadata ?? buildWikiPageMetadata(markdown, entity);
+  const fallbackTarget = inferWikiTargetSpec(entity, { schema });
+  const type = resolveBrowserWikiDisplayType(effectiveMetadata, fallbackTarget.type);
+  return inferWikiTargetSpec(entity, { schema, preferredType: type });
 }
 
 function getBrowserWikiEntityStatus(entity: Entity, metadata?: WikiPageMetadata): BrowserWikiEntityStatus {
@@ -2283,13 +2305,15 @@ function extractBrowserWikiLinks(body: string) {
     .slice(0, 40);
 }
 
-function buildBrowserSourceItems(entries: Entry[], rawAssets: RawAsset[]): BrowserSourceItem[] {
+function buildBrowserSourceItems(entries: Entry[], rawAssets: RawAsset[], entities: Entity[]): BrowserSourceItem[] {
+  const entryById = new Map(entries.map((entry) => [entry.id, entry]));
+  const entityById = new Map(entities.map((entity) => [entity.id, entity]));
   const assetItems = rawAssets.map((asset) => ({
     id: asset.entryId ?? asset.id,
     entryId: asset.entryId,
     rawAssetId: asset.id,
     title: asset.filename,
-    summary: buildRawAssetSourceSummary(asset),
+    summary: buildRawAssetSourceSummary(asset, entryById.get(asset.entryId ?? ''), entityById),
   }));
   const entryItems = entries.map((entry) => ({
     id: entry.id,
@@ -2306,8 +2330,13 @@ function buildBrowserSourceItems(entries: Entry[], rawAssets: RawAsset[]): Brows
   });
 }
 
-function buildRawAssetSourceSummary(asset: RawAsset) {
+function buildRawAssetSourceSummary(asset: RawAsset, entry?: Entry, entityById: Map<string, Entity> = new Map()) {
   const parts = [rawAssetKindLabel(asset.kind), rawAssetStatusLabel(asset.status)];
+  const derivedEntities = (entry?.derivedEntities ?? []).map((id) => entityById.get(id)).filter((entity): entity is Entity => Boolean(entity));
+  if (derivedEntities.length > 0) {
+    const complete = derivedEntities.filter((entity) => getBrowserWikiEntityStatus(entity).state === 'complete').length;
+    parts.push(complete === derivedEntities.length ? `Wiki 已生成 ${complete}/${derivedEntities.length}` : `Wiki 未完成 ${complete}/${derivedEntities.length}`);
+  }
   if (asset.status === 'wiki_failed') {
     parts.push('结构化内容已保留，Wiki 生成可重试');
   }
@@ -2367,7 +2396,7 @@ function slugFromBrowserReference(value: string) {
 }
 
 function buildBrowserEntityReferenceKeys(entity: Entity) {
-  const target = inferWikiTargetSpec(entity);
+  const target = resolveBrowserEntityWikiTarget(entity);
   const path = target.path;
   const relative = path.replace(/^wiki\//i, '');
   const withoutExtension = relative.replace(/\.md$/i, '');

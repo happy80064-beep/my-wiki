@@ -8,6 +8,7 @@ import {
 } from './textProvider';
 import { validateLlmProviderConfig, type LlmProviderConfig } from './providers';
 import { parseRuntimeJson, postJsonThroughRuntime } from '@/lib/runtime/httpJson';
+import { isProviderRetryableError, rememberProviderFailure, withProviderRequestSlot } from './requestScheduler';
 
 export type RuntimeProviderResult =
   | { ok: true; text: string; providerName: string; model: string }
@@ -32,12 +33,23 @@ export async function requestConfiguredProviderText(
   input: LlmTextRequestInput,
   options: RuntimeProviderRequestOptions = {},
 ): Promise<RuntimeProviderResult> {
+  return withProviderRequestSlot(config, options.signal, () => requestConfiguredProviderTextScheduled(config, input, options));
+}
+
+async function requestConfiguredProviderTextScheduled(
+  config: LlmProviderConfig,
+  input: LlmTextRequestInput,
+  options: RuntimeProviderRequestOptions,
+): Promise<RuntimeProviderResult> {
   const providerName = config.providerId;
   let lastRetryableError = '';
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     throwIfAborted(options.signal);
     const result = await requestConfiguredProviderTextOnce(config, input, options);
-    if (result.ok || !isRetryableProviderError(result.error) || attempt === 3) return result;
+    if (result.ok || !isProviderRetryableError(result.error) || attempt === 3) {
+      if (!result.ok && isProviderRetryableError(result.error)) rememberProviderFailure(config, result.error);
+      return result;
+    }
     lastRetryableError = result.error;
     await sleep(retryDelayMs(attempt), options.signal);
   }
@@ -89,12 +101,23 @@ export async function requestConfiguredProviderVision(
   input: { prompt: string; imageBase64: string; mimeType: string; maxTokens: number },
   options: RuntimeProviderRequestOptions = {},
 ): Promise<RuntimeProviderResult> {
+  return withProviderRequestSlot(config, options.signal, () => requestConfiguredProviderVisionScheduled(config, input, options));
+}
+
+async function requestConfiguredProviderVisionScheduled(
+  config: LlmProviderConfig,
+  input: { prompt: string; imageBase64: string; mimeType: string; maxTokens: number },
+  options: RuntimeProviderRequestOptions,
+): Promise<RuntimeProviderResult> {
   const providerName = config.providerId;
   let lastRetryableError = '';
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     throwIfAborted(options.signal);
     const result = await requestConfiguredProviderVisionOnce(config, input, options);
-    if (result.ok || !isRetryableProviderError(result.error) || attempt === 3) return result;
+    if (result.ok || !isProviderRetryableError(result.error) || attempt === 3) {
+      if (!result.ok && isProviderRetryableError(result.error)) rememberProviderFailure(config, result.error);
+      return result;
+    }
     lastRetryableError = result.error;
     await sleep(retryDelayMs(attempt), options.signal);
   }
@@ -317,14 +340,8 @@ function formatUnknownError(error: unknown, fallback: string) {
   return fallback;
 }
 
-function isRetryableProviderError(error: string) {
-  return /(429|rate.?limit|too many requests|timeout|timed out|temporarily|overloaded|503|502|504|500|ECONNRESET|ECONNREFUSED|network|fetch failed|socket|TLS|connection)/i.test(
-    error,
-  );
-}
-
 function retryDelayMs(attempt: number) {
-  return 1200 * attempt * attempt;
+  return 2000 * attempt * attempt;
 }
 
 function sleep(ms: number, signal?: AbortSignal) {

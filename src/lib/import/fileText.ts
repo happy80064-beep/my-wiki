@@ -166,6 +166,7 @@ export async function extractImportBlobText(
   onProgress?.({ percent: 48, label: `解析 ${input.filename}` });
   throwIfAborted(options.signal);
   let browserExtractionError: unknown;
+  if (kind !== 'pdf') {
   try {
     const browserText = await extractBrowserReadableText({
       arrayBuffer,
@@ -182,6 +183,7 @@ export async function extractImportBlobText(
     }
   } catch (error) {
     browserExtractionError = error;
+  }
   }
 
   if (!import.meta.env.DEV && isTauriRuntime()) {
