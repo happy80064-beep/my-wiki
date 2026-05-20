@@ -216,8 +216,17 @@ async function findReusableEntity(draftEntity: DraftEntity) {
 
   return (
     candidates.find((entity) => normalizeTitle(entity.title) === normalizedTitle) ??
-    candidates.find((entity) => isReusableTitleMatch(normalizeTitle(entity.title), normalizedTitle, draftEntity.type))
+    candidates.find((entity) => isReusableTitleMatch(normalizeTitle(entity.title), normalizedTitle, draftEntity.type)) ??
+    (await findExactReusableEntityAcrossCompatibleTypes(draftEntity, normalizedTitle))
   );
+}
+
+async function findExactReusableEntityAcrossCompatibleTypes(draftEntity: DraftEntity, normalizedTitle: string) {
+  if (draftEntity.type === 'person') return undefined;
+  const candidates = await db.entities
+    .filter((entity) => entity.type !== 'event' && entity.type !== 'person' && normalizeTitle(entity.title) === normalizedTitle)
+    .toArray();
+  return candidates.sort((left, right) => right.sourceEntries.length - left.sourceEntries.length || right.updatedAt - left.updatedAt)[0];
 }
 
 async function createOrUpdateRelationship(input: {

@@ -87,16 +87,23 @@ function ReferencePreviewBody({ preview }: { preview: EffectiveReferencePreview 
         ) : null}
 
         {preview.kind === 'web' ? (
-          <a
-            href={preview.url}
-            target="_blank"
-            rel="noreferrer"
-            className="mt-4 inline-flex max-w-full items-center gap-2 rounded-full border border-[#155eef] px-3 py-1.5 text-sm text-[#155eef] hover:bg-[#f4f8ff]"
-          >
-            <Globe2 size={14} />
-            <span className="truncate">{preview.source || preview.url}</span>
-            <ExternalLink size={13} />
-          </a>
+          <div className="mt-4 space-y-3">
+            {preview.relevance === 'weak' ? (
+              <p className="rounded-[10px] border border-[#f4d9a6] bg-[#fff8eb] p-3 text-xs leading-5 text-[#7a4b00]">
+                方法参考材料：{preview.relevanceReason || '未命中当前项目关键词，仅可作为方法、案例或行业表达参考。'}
+              </p>
+            ) : null}
+            <a
+              href={preview.url}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex max-w-full items-center gap-2 rounded-full border border-[#155eef] px-3 py-1.5 text-sm text-[#155eef] hover:bg-[#f4f8ff]"
+            >
+              <Globe2 size={14} />
+              <span className="truncate">{preview.source || preview.url}</span>
+              <ExternalLink size={13} />
+            </a>
+          </div>
         ) : null}
 
         {preview.kind === 'wiki' ? (

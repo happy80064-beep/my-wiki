@@ -13,6 +13,7 @@ import {
   applyCompileSuggestion,
   listPendingTasksByOwner,
   listRelationshipsForEntity,
+  mergeExactDuplicateCompatibleEntities,
   resetDatabase,
   upsertPendingCompileSuggestion,
 } from '@/lib/db';
@@ -137,6 +138,89 @@ describe('MyWiki data layer', () => {
     });
 
     await migrated.delete();
+  });
+
+  it('merges exact-title compatible duplicate wiki entities and rewires references', async () => {
+    const firstEntry = await createEntry({ content: 'project source', source: 'text' });
+    const secondEntry = await createEntry({ content: 'topic source', source: 'text' });
+    const primary = await createEntity({
+      type: 'project',
+      title: 'Wellness Real Estate',
+      tags: ['project'],
+      sourceEntries: [firstEntry.id],
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    const duplicate = await createEntity({
+      type: 'topic',
+      title: 'Wellness Real Estate',
+      tags: ['concept'],
+      sourceEntries: [secondEntry.id],
+      createdAt: 2,
+      updatedAt: 2,
+    });
+    const related = await createEntity({ type: 'topic', title: 'Health Park' });
+    const selfRelationship = await createRelationship({
+      from: duplicate.id,
+      to: primary.id,
+      type: 'about',
+      evidence: [secondEntry.id],
+    });
+    const relatedRelationship = await createRelationship({
+      from: duplicate.id,
+      to: related.id,
+      type: 'related-to',
+      evidence: [secondEntry.id],
+    });
+    const task = await createTask({
+      description: 'merge duplicate entity task',
+      owner: duplicate.id,
+      linkedTo: [primary.id],
+      source: secondEntry.id,
+    });
+    await db.entries.update(firstEntry.id, {
+      derivedEntities: [primary.id, duplicate.id],
+      derivedRelationships: [selfRelationship.id, relatedRelationship.id],
+    });
+    const suggestion = await upsertPendingCompileSuggestion({
+      entityId: duplicate.id,
+      entityTitle: duplicate.title,
+      propertyKey: 'openSourceStatus',
+      propertyLabel: 'Open source status',
+      propertyValue: 'unknown',
+      evidenceEntryId: secondEntry.id,
+      evidenceSnippet: 'topic source',
+      evidenceScope: 'entity-source',
+      confidence: 0.8,
+    });
+
+    const result = await mergeExactDuplicateCompatibleEntities();
+
+    expect(result.mergedEntities).toBe(1);
+    await expect(db.entities.get(duplicate.id)).resolves.toBeUndefined();
+    await expect(db.entities.get(primary.id)).resolves.toMatchObject({
+      id: primary.id,
+      title: 'Wellness Real Estate',
+      tags: expect.arrayContaining(['project', 'concept']),
+      sourceEntries: expect.arrayContaining([firstEntry.id, secondEntry.id]),
+    });
+    await expect(db.entries.get(firstEntry.id)).resolves.toMatchObject({
+      derivedEntities: [primary.id],
+      derivedRelationships: [relatedRelationship.id],
+    });
+    await expect(db.relationships.get(selfRelationship.id)).resolves.toBeUndefined();
+    await expect(db.relationships.get(relatedRelationship.id)).resolves.toMatchObject({
+      from: primary.id,
+      to: related.id,
+    });
+    await expect(db.tasks.get(task.id)).resolves.toMatchObject({
+      owner: primary.id,
+      linkedTo: [primary.id],
+    });
+    await expect(db.compileSuggestions.get(suggestion!.id)).resolves.toMatchObject({
+      entityId: primary.id,
+      entityTitle: primary.title,
+    });
   });
 
   it('keeps business-line scope when applying metric compile suggestions', async () => {

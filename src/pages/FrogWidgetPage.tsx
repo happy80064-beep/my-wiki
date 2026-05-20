@@ -336,6 +336,7 @@ export function FrogWidgetPage() {
     try {
       const result = await processRawAssetQueue({
         owner: 'frog',
+        compileWiki: true,
         onStatus: (snapshot) => {
           setProgress({
             percent: snapshot.percent,

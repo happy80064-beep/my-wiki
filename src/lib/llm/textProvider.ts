@@ -6,7 +6,10 @@ export type LlmTextRequestInput = {
   maxTokens: number;
   responseFormat?: 'json_object';
   structuredOutput?: LlmStructuredOutputSpec;
+  reasoningMode?: LlmReasoningMode;
 };
+
+export type LlmReasoningMode = 'disabled';
 
 export type LlmTextHttpRequest = {
   url: string;
@@ -47,6 +50,7 @@ export function anthropicCompatibleRequiresBearerAuth(url: string) {
 
 export function buildOpenAiTextRequest(config: LlmProviderConfig, input: LlmTextRequestInput): LlmTextHttpRequest {
   const maxTokens = resolveTextMaxTokens(config, input);
+  const reasoningBody = buildOpenAiReasoningBody(config, input.reasoningMode);
   const structuredTool = input.structuredOutput
     ? {
         type: 'function',
@@ -80,6 +84,7 @@ export function buildOpenAiTextRequest(config: LlmProviderConfig, input: LlmText
           }
         : {}),
       ...(input.responseFormat === 'json_object' ? { response_format: { type: 'json_object' } } : {}),
+      ...reasoningBody,
     },
   };
 }
@@ -87,6 +92,7 @@ export function buildOpenAiTextRequest(config: LlmProviderConfig, input: LlmText
 export function buildAnthropicTextRequest(config: LlmProviderConfig, input: LlmTextRequestInput): LlmTextHttpRequest {
   const url = buildAnthropicMessagesUrl(config.endpoint);
   const maxTokens = resolveTextMaxTokens(config, input);
+  const reasoningBody = buildAnthropicReasoningBody(config, input.reasoningMode);
   const headers: Record<string, string> = { 'Content-Type': jsonContentType };
   if (anthropicCompatibleRequiresBearerAuth(url)) {
     headers.Authorization = `Bearer ${config.apiKey.trim()}`;
@@ -118,6 +124,7 @@ export function buildAnthropicTextRequest(config: LlmProviderConfig, input: LlmT
             tool_choice: { type: 'tool', name: input.structuredOutput.name },
           }
         : {}),
+      ...reasoningBody,
     },
   };
 }
@@ -131,6 +138,7 @@ export function buildGeminiGenerateContentUrl(config: LlmProviderConfig) {
 
 export function buildGeminiTextRequest(config: LlmProviderConfig, input: LlmTextRequestInput): LlmTextHttpRequest {
   const maxTokens = resolveTextMaxTokens(config, input);
+  const thinkingConfig = buildGeminiThinkingConfig(config, input.reasoningMode);
   return {
     url: buildGeminiGenerateContentUrl(config),
     responseApiMode: 'gemini-native',
@@ -143,6 +151,7 @@ export function buildGeminiTextRequest(config: LlmProviderConfig, input: LlmText
         maxOutputTokens: maxTokens,
         ...(input.responseFormat === 'json_object' || input.structuredOutput ? { responseMimeType: 'application/json' } : {}),
         ...(input.structuredOutput ? { responseSchema: input.structuredOutput.schema } : {}),
+        ...thinkingConfig,
       },
     },
   };
@@ -164,4 +173,32 @@ function resolveTextMaxTokens(config: LlmProviderConfig, input: LlmTextRequestIn
 
 function isMiniMaxProvider(providerId: LlmProviderConfig['providerId']) {
   return providerId === 'minimax-cn' || providerId === 'minimax-global';
+}
+
+function buildOpenAiReasoningBody(config: LlmProviderConfig, reasoningMode: LlmReasoningMode | undefined) {
+  if (reasoningMode !== 'disabled') return {};
+  if (isMiniMaxProvider(config.providerId) || config.providerId === 'deepseek' || endpointLooksLike(config.endpoint, /(minimax|minimaxi|deepseek)/i)) {
+    return { thinking: { type: 'disabled' } };
+  }
+  if (config.providerId === 'ollama' || /qwen[-_]?3/i.test(config.model)) {
+    return { chat_template_kwargs: { enable_thinking: false } };
+  }
+  return {};
+}
+
+function buildAnthropicReasoningBody(config: LlmProviderConfig, reasoningMode: LlmReasoningMode | undefined) {
+  if (reasoningMode !== 'disabled') return {};
+  if (isMiniMaxProvider(config.providerId) || endpointLooksLike(config.endpoint, /(minimax|minimaxi)/i)) {
+    return { thinking: { type: 'disabled' } };
+  }
+  return {};
+}
+
+function buildGeminiThinkingConfig(config: LlmProviderConfig, reasoningMode: LlmReasoningMode | undefined) {
+  if (reasoningMode !== 'disabled') return {};
+  return /gemini-2\.5-flash/i.test(config.model) ? { thinkingConfig: { thinkingBudget: 0 } } : {};
+}
+
+function endpointLooksLike(endpoint: string, pattern: RegExp) {
+  return pattern.test(endpoint.trim());
 }

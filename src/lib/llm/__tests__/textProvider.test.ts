@@ -117,6 +117,57 @@ describe('text provider bridge', () => {
     expect(request.body.response_format).toEqual({ type: 'json_object' });
   });
 
+  it('can request reasoning disabled for query-only DeepSeek-style requests', () => {
+    const request = buildProviderTextRequest(
+      {
+        providerId: 'deepseek',
+        enabled: true,
+        apiMode: 'openai-compatible',
+        endpoint: 'https://api.deepseek.com',
+        apiKey: 'sk-deep',
+        model: 'deepseek-chat',
+        contextWindow: 200000,
+      },
+      { ...baseInput, reasoningMode: 'disabled' },
+    );
+
+    expect(request.body.thinking).toEqual({ type: 'disabled' });
+  });
+
+  it('can request reasoning disabled for MiniMax query roles without changing other roles', () => {
+    const request = buildProviderTextRequest(
+      {
+        providerId: 'minimax-cn',
+        enabled: true,
+        apiMode: 'anthropic-compatible',
+        endpoint: 'https://api.minimaxi.com/anthropic',
+        apiKey: 'sk-mini',
+        model: 'MiniMax-M2.7',
+        contextWindow: 200000,
+      },
+      { ...baseInput, reasoningMode: 'disabled' },
+    );
+
+    expect(request.body.thinking).toEqual({ type: 'disabled' });
+  });
+
+  it('leaves reasoning fields out when simple query is not requested', () => {
+    const request = buildProviderTextRequest(
+      {
+        providerId: 'minimax-cn',
+        enabled: true,
+        apiMode: 'anthropic-compatible',
+        endpoint: 'https://api.minimaxi.com/anthropic',
+        apiKey: 'sk-mini',
+        model: 'MiniMax-M2.7',
+        contextWindow: 200000,
+      },
+      baseInput,
+    );
+
+    expect(request.body.thinking).toBeUndefined();
+  });
+
   it('adds forced tool calls for OpenAI-compatible structured requests', () => {
     const request = buildProviderTextRequest(
       {

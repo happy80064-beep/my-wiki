@@ -131,6 +131,33 @@ describe('capture flow', () => {
     );
   });
 
+  it('reuses an exact-title wiki page across compatible entity types', async () => {
+    const existing = await createEntity({
+      type: 'project',
+      title: '康养地产',
+      tags: ['项目'],
+      sourceEntries: [],
+    });
+    const draft = createLocalCaptureDraft('康养地产是福瑞健康科技园三期项目的核心业态之一。');
+    draft.primaryEntity.type = 'topic';
+    draft.primaryEntity.title = '康养地产';
+    draft.primaryEntity.tags = ['概念', '地产'];
+    draft.relatedEntities = [];
+    draft.relationships = [];
+    draft.tasks = [];
+
+    const result = await persistCaptureDraft('康养地产是福瑞健康科技园三期项目的核心业态之一。', draft);
+    const allEntities = await db.entities.toArray();
+    const updated = await db.entities.get(existing.id);
+    const matchingTitleEntities = allEntities.filter((entity) => entity.title === '康养地产');
+
+    expect(matchingTitleEntities).toHaveLength(1);
+    expect(result.entities[0].id).toBe(existing.id);
+    expect(result.compilation.reusedEntities).toBe(1);
+    expect(updated?.sourceEntries).toContain(result.entry.id);
+    expect(updated?.tags).toEqual(expect.arrayContaining(['项目', '概念', '地产']));
+  });
+
   it('persists and merges hierarchical entity categories', async () => {
     const existing = await createEntity({
       type: 'project',

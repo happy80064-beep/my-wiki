@@ -5,12 +5,18 @@ type ProviderSlot = {
   cooldownUntil: number;
 };
 
+export type ProviderRequestSlotTiming = {
+  queueMs: number;
+  cooldownMs: number;
+};
+
 const providerSlots = new Map<string, ProviderSlot>();
 
 export async function withProviderRequestSlot<T>(
   config: LlmProviderConfig,
   signal: AbortSignal | undefined,
   task: () => Promise<T>,
+  onTiming?: (timing: ProviderRequestSlotTiming) => void,
 ): Promise<T> {
   const key = providerSlotKey(config);
   const slot = providerSlots.get(key) ?? { tail: Promise.resolve(), cooldownUntil: 0 };
@@ -24,9 +30,12 @@ export async function withProviderRequestSlot<T>(
   slot.tail = previous.catch(() => undefined).then(() => next);
 
   try {
+    const queueStart = Date.now();
     await previous.catch(() => undefined);
+    const queueMs = Date.now() - queueStart;
     throwIfAborted(signal);
     const waitMs = Math.max(0, slot.cooldownUntil - Date.now());
+    onTiming?.({ queueMs, cooldownMs: waitMs });
     if (waitMs > 0) await sleep(waitMs, signal);
     return await task();
   } finally {

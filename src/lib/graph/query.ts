@@ -60,6 +60,8 @@ import type { QueryComposePayload } from '@/lib/ai/queryComposer';
 import { planQueryWithAgent } from '@/lib/ai/queryPlannerClient';
 import type { QueryIndexEntity, QueryPlan } from '@/lib/ai/queryPlanner';
 import { db, materializeCompileSuggestions } from '@/lib/db';
+import type { RuntimeProviderTiming } from '@/lib/llm/runtimeProvider';
+import type { LlmReasoningMode } from '@/lib/llm/textProvider';
 import {
   buildWikiIndex,
   findCachedInsight,
@@ -76,6 +78,7 @@ export type RunStructuredQueryOptions = {
   planWithAgent?: boolean;
   maxContextChars?: number;
   useCache?: boolean;
+  reasoningMode?: LlmReasoningMode;
 };
 
 export async function runStructuredQuery(
@@ -674,7 +677,7 @@ async function resolveQueryPlan(
   }
 
   try {
-    const plan = await planQueryWithAgent(question, index);
+    const plan = await planQueryWithAgent(question, index, { reasoningMode: options.reasoningMode });
     const mergedPlan = correctQueryPlanAttribute(question, mergeQueryPlans(plan, fallback));
     return {
       plan: mergedPlan,
@@ -682,7 +685,7 @@ async function resolveQueryPlan(
         mergedPlan.selectedEntityIds.length > 0
           ? mergedPlan.selectedEntityIds.join('、')
           : mergedPlan.entityCandidates.join('、') || '未确定'
-      }；属性：${mergedPlan.attribute || '未指定'}；证据词：${mergedPlan.evidenceTerms.join('、') || '无'}。`,
+      }；属性：${mergedPlan.attribute || '未指定'}；证据词：${mergedPlan.evidenceTerms.join('、') || '无'}。${formatProviderTimingSuffix(plan.llmTiming)}`,
     };
   } catch (error) {
     return {
@@ -1643,7 +1646,7 @@ async function composeResultIfRequested(
   if (!options.composeWithLlm) return result;
 
   try {
-    const composed = await composeQueryAnswer(payload);
+    const composed = await composeQueryAnswer(payload, { reasoningMode: options.reasoningMode });
     const correction = isExplicitFastAnswerCorrection(composed.answer);
     if (!correction && composedContradictsConcreteDraft(payload.draftAnswer, composed.answer)) {
       return {
@@ -1873,6 +1876,23 @@ function uniqueStrings(values: string[]) {
     seen.add(key);
     return true;
   });
+}
+
+function formatProviderTimingSuffix(timing: RuntimeProviderTiming | undefined) {
+  if (!timing) return '';
+  const parts = [
+    `模型请求 ${formatDuration(timing.requestMs)}`,
+    timing.queueMs > 20 ? `排队 ${formatDuration(timing.queueMs)}` : '',
+    timing.cooldownMs > 0 ? `冷却 ${formatDuration(timing.cooldownMs)}` : '',
+    timing.retryDelayMs > 0 ? `重试等待 ${formatDuration(timing.retryDelayMs)}` : '',
+    timing.attempts > 1 ? `尝试 ${timing.attempts} 次` : '',
+  ].filter(Boolean);
+  return parts.length ? ` 耗时：${parts.join('；')}。` : '';
+}
+
+function formatDuration(ms: number) {
+  if (!Number.isFinite(ms) || ms <= 0) return '0ms';
+  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`;
 }
 
 function buildEntityAliases(entity: Entity) {

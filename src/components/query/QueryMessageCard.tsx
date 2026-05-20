@@ -133,32 +133,43 @@ export function QueryMessageCard({
     </div>
   );
 
+  const directReferences = message.references?.filter((reference) => !isWeakReference(reference)) ?? [];
+  const weakReferences = message.references?.filter(isWeakReference) ?? [];
+  const primaryReferenceCount = isResearch ? directReferences.length : (message.references?.length ?? 0);
+  const weakReferenceCount = isResearch ? weakReferences.length : 0;
+  const primaryReferenceLabel = isResearch ? `项目事实来源（${primaryReferenceCount}）` : `参考来源（${primaryReferenceCount}）`;
   const referencePanel =
     message.references && message.references.length > 0 ? (
       <details className="rounded-[14px] border border-[#e5e5e4] bg-white px-4 py-3" open>
         <summary className="cursor-pointer list-none text-sm font-semibold text-[#1f2937]">
-          {isResearch ? `网页来源（${message.references.length}）` : `参考来源（${message.references.length}）`}
+          {primaryReferenceLabel}
+          {weakReferenceCount > 0 ? <span className="ml-2 text-xs font-normal text-[#6b6b68]">另有 {weakReferenceCount} 条方法参考材料</span> : null}
         </summary>
         <div className="mt-3 space-y-2">
-          {message.references.slice(0, 10).map((reference, index) => (
-            <div key={reference.key} className="flex items-center gap-2 text-sm leading-6">
-              <span className="text-[#8a8f89]">[{index + 1}]</span>
-              <ReferenceIcon reference={reference} />
-              <button
-                type="button"
-                onClick={() => onReferenceSelect?.(reference)}
-                className={[
-                  'min-w-0 flex-1 truncate text-left text-[#155eef] hover:underline',
-                  selectedReferenceKey === reference.key ? 'font-semibold' : '',
-                ].join(' ')}
-                title={reference.title}
-              >
-                {reference.title}
-              </button>
+          <ReferenceList
+            references={isResearch ? directReferences : message.references}
+            selectedReferenceKey={selectedReferenceKey}
+            onReferenceSelect={onReferenceSelect}
+          />
+          {weakReferences.length > 0 ? (
+            <details className="rounded-[12px] border border-dashed border-[#d9d9d6] bg-[#fbfbfa] px-3 py-2">
+              <summary className="cursor-pointer list-none text-xs font-semibold text-[#626965]">
+                方法参考材料（{weakReferences.length}）
+                <span className="ml-2 font-normal">仅用于借鉴方法，不作为项目事实</span>
+              </summary>
+              <div className="mt-2 space-y-2">
+                <ReferenceList
+                  references={weakReferences}
+                  selectedReferenceKey={selectedReferenceKey}
+                  onReferenceSelect={onReferenceSelect}
+                />
+              </div>
+            </details>
+          ) : null}
+          {isResearch && directReferences.length === 0 ? (
+            <div className="rounded-[10px] border border-dashed border-[#d9d9d6] bg-[#fbfbfa] p-3 text-xs leading-5 text-[#626965]">
+              未检索到可直接补充项目事实的网页来源；当前网页仅作为方法参考材料。
             </div>
-          ))}
-          {message.references.length > 10 ? (
-            <div className="text-xs text-[#6b6b68]">还有 {message.references.length - 10} 条来源，后续可以继续展开查看。</div>
           ) : null}
         </div>
       </details>
@@ -359,6 +370,46 @@ function ReferenceIcon({ reference }: { reference: QueryChatReference }) {
       {pageType === 'overview' ? <Layers size={13} /> : <UserRound size={13} />}
     </span>
   );
+}
+
+function ReferenceList({
+  references,
+  selectedReferenceKey,
+  onReferenceSelect,
+}: {
+  references: QueryChatReference[];
+  selectedReferenceKey?: string;
+  onReferenceSelect?: (reference: QueryChatReference) => void;
+}) {
+  if (references.length === 0) return null;
+  return (
+    <>
+      {references.slice(0, 10).map((reference, index) => (
+        <div key={reference.key} className="flex items-center gap-2 text-sm leading-6">
+          <span className="text-[#8a8f89]">[{index + 1}]</span>
+          <ReferenceIcon reference={reference} />
+          <button
+            type="button"
+            onClick={() => onReferenceSelect?.(reference)}
+            className={[
+              'min-w-0 flex-1 truncate text-left text-[#155eef] hover:underline',
+              selectedReferenceKey === reference.key ? 'font-semibold' : '',
+            ].join(' ')}
+            title={reference.title}
+          >
+            {reference.title}
+          </button>
+        </div>
+      ))}
+      {references.length > 10 ? (
+        <div className="text-xs text-[#6b6b68]">还有 {references.length - 10} 条来源，后续可以继续展开查看。</div>
+      ) : null}
+    </>
+  );
+}
+
+function isWeakReference(reference: QueryChatReference) {
+  return reference.preview?.kind === 'web' && reference.preview.relevance === 'weak';
 }
 
 function isResearchMessage(message: QueryChatMessage) {

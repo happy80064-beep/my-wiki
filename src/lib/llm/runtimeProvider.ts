@@ -10,9 +10,17 @@ import { validateLlmProviderConfig, type LlmProviderConfig } from './providers';
 import { parseRuntimeJson, postJsonThroughRuntime } from '@/lib/runtime/httpJson';
 import { isProviderRetryableError, rememberProviderFailure, withProviderRequestSlot } from './requestScheduler';
 
+export type RuntimeProviderTiming = {
+  queueMs: number;
+  cooldownMs: number;
+  requestMs: number;
+  retryDelayMs: number;
+  attempts: number;
+};
+
 export type RuntimeProviderResult =
-  | { ok: true; text: string; providerName: string; model: string }
-  | { ok: false; error: string; providerName: string; model: string };
+  | { ok: true; text: string; providerName: string; model: string; timing?: RuntimeProviderTiming }
+  | { ok: false; error: string; providerName: string; model: string; timing?: RuntimeProviderTiming };
 
 export type RuntimeProviderRequestOptions = {
   signal?: AbortSignal;
@@ -33,25 +41,41 @@ export async function requestConfiguredProviderText(
   input: LlmTextRequestInput,
   options: RuntimeProviderRequestOptions = {},
 ): Promise<RuntimeProviderResult> {
-  return withProviderRequestSlot(config, options.signal, () => requestConfiguredProviderTextScheduled(config, input, options));
+  const timing = createProviderTiming();
+  const result = await withProviderRequestSlot(
+    config,
+    options.signal,
+    () => requestConfiguredProviderTextScheduled(config, input, options, timing),
+    (slotTiming) => {
+      timing.queueMs += slotTiming.queueMs;
+      timing.cooldownMs += slotTiming.cooldownMs;
+    },
+  );
+  return { ...result, timing };
 }
 
 async function requestConfiguredProviderTextScheduled(
   config: LlmProviderConfig,
   input: LlmTextRequestInput,
   options: RuntimeProviderRequestOptions,
+  timing: RuntimeProviderTiming,
 ): Promise<RuntimeProviderResult> {
   const providerName = config.providerId;
   let lastRetryableError = '';
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     throwIfAborted(options.signal);
+    timing.attempts = attempt;
+    const requestStart = Date.now();
     const result = await requestConfiguredProviderTextOnce(config, input, options);
+    timing.requestMs += Date.now() - requestStart;
     if (result.ok || !isProviderRetryableError(result.error) || attempt === 3) {
       if (!result.ok && isProviderRetryableError(result.error)) rememberProviderFailure(config, result.error);
       return result;
     }
     lastRetryableError = result.error;
-    await sleep(retryDelayMs(attempt), options.signal);
+    const delayMs = retryDelayMs(attempt);
+    timing.retryDelayMs += delayMs;
+    await sleep(delayMs, options.signal);
   }
 
   return { ok: false, error: lastRetryableError || `${providerName} request failed.`, providerName, model: config.model };
@@ -342,6 +366,16 @@ function formatUnknownError(error: unknown, fallback: string) {
 
 function retryDelayMs(attempt: number) {
   return 2000 * attempt * attempt;
+}
+
+function createProviderTiming(): RuntimeProviderTiming {
+  return {
+    queueMs: 0,
+    cooldownMs: 0,
+    requestMs: 0,
+    retryDelayMs: 0,
+    attempts: 0,
+  };
 }
 
 function sleep(ms: number, signal?: AbortSignal) {

@@ -1,7 +1,7 @@
 import { ArrowUpRight, Calendar, ChevronDown, ChevronRight, Download, Edit3, FileText, Layers, Loader2, RotateCcw, Save, Search, Sparkles, Tag, Trash2, Upload, UserRound, XCircle } from 'lucide-react';
 import { useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { db, deleteEntity } from '@/lib/db';
+import { db, deleteEntity, mergeExactDuplicateCompatibleEntities } from '@/lib/db';
 import {
   restoreMarkdownExportZip,
   restoreMarkdownImportRecords,
@@ -399,13 +399,19 @@ export function BrowserIndexedDbWikiPage() {
   useEffect(() => {
     if (!sortedEntities.length || repairRunningRef.current) return;
 
+    let cancelled = false;
     repairRunningRef.current = true;
     void (async () => {
       try {
+        const duplicateMerge = await mergeExactDuplicateCompatibleEntities();
+        if (cancelled) return;
+        if (duplicateMerge.mergedEntities > 0) return;
+
         const patches = sortedEntities
           .map((entity) => ({ entity, patch: buildBrowserEntityWikiRepairPatch(entity) }))
           .filter((item): item is { entity: Entity; patch: NonNullable<ReturnType<typeof buildBrowserEntityWikiRepairPatch>> } => Boolean(item.patch));
 
+        if (cancelled) return;
         if (!patches.length) return;
 
         await db.transaction('rw', db.entities, async () => {
@@ -413,10 +419,15 @@ export function BrowserIndexedDbWikiPage() {
             await db.entities.update(entity.id, patch);
           }
         });
+      } catch (error) {
+        if (!cancelled) console.warn('[wiki] knowledge repair failed', error);
       } finally {
         repairRunningRef.current = false;
       }
     })();
+    return () => {
+      cancelled = true;
+    };
   }, [sortedEntities]);
 
   async function handleExportMarkdown() {

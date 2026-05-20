@@ -1,3 +1,5 @@
+import type { RuntimeProviderTiming } from '@/lib/llm/runtimeProvider';
+
 export type QueryAnswerPageContext = {
   index: number;
   entityId: string;
@@ -31,6 +33,7 @@ export type QueryAnswerResponse = {
   provider: string;
   model: string;
   fallbackFrom?: string;
+  llmTiming?: RuntimeProviderTiming;
 };
 
 export type QueryConversationContextMessage = {

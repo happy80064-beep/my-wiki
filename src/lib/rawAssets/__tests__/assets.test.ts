@@ -31,6 +31,16 @@ vi.mock('@/lib/llm/providerSettings', () => ({
             model: 'vision-test',
             contextWindow: 8000,
           }
+        : role === 'wiki-compile'
+          ? {
+              providerId: 'custom-openai',
+              enabled: true,
+              apiMode: 'openai-compatible',
+              endpoint: 'https://example.test/v1',
+              apiKey: 'test-key',
+              model: 'wiki-test',
+              contextWindow: 16000,
+            }
         : null;
     return { config, source: config ? 'assigned' : 'none' };
   },
@@ -488,6 +498,99 @@ describe('raw assets', () => {
     expect(result).toMatchObject({ total: 1, processed: 1, failed: 0 });
     expect(asset?.status).toBe('compiled');
     expect(entity?.wikiMarkdown).toContain('source-backed detail');
+  });
+
+  it('runs the Frog queue through source wiki generation for markdown and screenshot assets without fallback', async () => {
+    const sourceBatchCalls: string[] = [];
+    const fallbackCalls: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url === '/api/import/extract') {
+        return new Response(JSON.stringify({ text: 'OCR text from Frog screenshot: launch metric 42.' }), { status: 200 });
+      }
+      if (url === '/api/vision/caption') {
+        return new Response(
+          JSON.stringify({
+            caption: 'The screenshot shows a project dashboard with launch metric 42 and a next action list.',
+            provider: 'vision-test',
+            model: 'vision-test',
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === '/api/capture/extract') {
+        const body = JSON.parse(String(init?.body ?? '{}')) as { content?: string };
+        const title = body.content?.includes('frog-screenshot.png')
+          ? 'Frog screenshot queue verification'
+          : 'Frog markdown queue verification';
+        return new Response(
+          JSON.stringify({
+            draft: {
+              primaryEntity: {
+                clientId: 'entity_primary',
+                type: 'topic',
+                title,
+                summary: `${title} summary from the captured source.`,
+                tags: ['work'],
+                scenes: ['work'],
+              },
+              relatedEntities: [],
+              relationships: [],
+              tasks: [],
+              compileSuggestions: [],
+            },
+            provider: 'minimax',
+            model: 'test',
+            mode: 'two-step',
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === '/api/wiki/recompile-source-batch') {
+        sourceBatchCalls.push(url);
+        const body = JSON.parse(String(init?.body ?? '{}')) as { entities?: Array<{ id: string; title: string }> };
+        return new Response(
+          JSON.stringify({
+            results: (body.entities ?? []).map((entity) => ({
+              entityId: entity.id,
+              markdown: buildUsefulWikiMarkdown(entity.title),
+              summary: `Compiled wiki for ${entity.title}.`,
+              tags: ['frog-test'],
+            })),
+            missingEntityIds: [],
+            warnings: [],
+            provider: 'minimax',
+            model: 'wiki-test',
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      if (url === '/api/wiki/recompile') {
+        fallbackCalls.push(url);
+        throw new Error(`Unexpected per-page fallback request: ${url}`);
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await createRawAssetFromFile(new File(['Frog markdown source for queue verification.'], 'frog-note.md', { type: 'text/markdown' }));
+    await createRawAssetFromFile(new File([new Uint8Array([137, 80, 78, 71, 10])], 'frog-screenshot.png', { type: 'image/png' }));
+
+    const result = await processRawAssetQueue({ owner: 'frog', compileWiki: true });
+    const assets = await db.rawAssets.toArray();
+    const entries = await db.entries.toArray();
+    const entities = await db.entities.toArray();
+
+    expect(result).toMatchObject({ total: 2, processed: 2, failed: 0 });
+    expect(assets.every((asset) => asset.status === 'compiled')).toBe(true);
+    expect(entries.every((entry) => entry.processed && entry.derivedEntities.length > 0)).toBe(true);
+    expect(entities).toHaveLength(2);
+    expect(entities.every((entity) => entity.wikiCompiledAt && entity.wikiMarkdown?.includes('source-backed detail'))).toBe(true);
+    expect(sourceBatchCalls).toHaveLength(2);
+    expect(fallbackCalls).toHaveLength(0);
+    expect(fetchMock.mock.calls.map((call) => (typeof call[0] === 'string' ? call[0] : call[0] instanceof URL ? call[0].toString() : call[0].url))).not.toContain(
+      '/api/wiki/recompile',
+    );
   });
 
   it('does not count short wiki markdown as a completed raw-to-wiki generation', async () => {

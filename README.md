@@ -2,26 +2,27 @@
 
 MyWiki 是一个本地优先的个人 AI 知识中枢。它把 PDF、Word、Excel、PPT、图片、网页、压缩包和文本等原始材料放入统一工作区，经过结构化入库和 Wiki 编译后，生成可阅读、可检索、可追溯、可持续编辑的 Markdown Wiki。
 
-当前仓库版本：`v0.1.5`
+当前仓库版本：`v0.1.6`
 
 最新安装包：<https://github.com/happy80064-beep/my-wiki/releases/latest>
 
 ## 当前状态
 
-`v0.1.5` 是内测 MVP 的稳定性与验收版本，重点提升长 PDF 入库、结构化编译、Wiki 批量生成、图谱筛选和人工审核流程。
+`v0.1.6` 是内测 MVP 的查询、深度研究、巡检和捕获体验修订版本，重点提升检索可信度、来源分组、可解释耗时、Lint 可操作性和桌面捕获体验。
 
-本版本相对 `v0.1.4` 的主要更新：
+本版本相对 `v0.1.5` 的主要更新：
 
-1. PDF 提取优先使用随桌面安装包分发的 PDFium，并通过全局锁串行 PDF 解析，降低长 PDF 和多文件并发解析时的崩溃、卡死和相互影响风险。
-2. 长文档结构化入库改为完整原文分块摘要和 SHA-256 digest 缓存，再进入结构化抽取，避免在进入模型前过早截断 149 页 PDF 这类长材料。
-3. LLM 请求增加同 provider/model 串行调度和失败冷却；Raw Inbox 队列在网络、限流、超时失败后会短暂停顿再处理下一个任务，减少长 PDF 失败拖累后续任务。
-4. Source Wiki 批量编译增加可重试请求，遇到缺失 FILE block、超时或限流时会按明确失败类型重试，不再把异常结果当成可用 Wiki。
-5. 知识树栏“批量生成/更新wiki页”会优先只处理状态为“未生成”的来源词条；当所有来源词条都已生成 Wiki 后，才进入全量更新并提示会覆盖旧 Markdown。
-6. Wiki 人工编辑保护增强：AI 重编译遇到人工修改会进入审核队列，采纳新版本时保留被替换内容的 superseded 记录，降低误覆盖风险。
-7. 查询保存回 Wiki 和 Wiki 检索继续收敛到页面优先、来源可追溯的结果，减少“问题描述”或污染 frontmatter 对页面内容的影响。
-8. 巡检页补充孤立页面、frontmatter 和引用问题处理能力，图谱页筛选项进一步对齐当前 Wiki page types 和社区视图，隐藏不匹配的旧标签入口。
-9. Wiki 页头部 description/摘要展示改为句子感知压缩，避免长 frontmatter 或正文摘要被截断在“2026年开”“1993年2月”这类半句话上。
-10. 保留 v0.1.4 已有的网页 URL 正文抓取、MarkItDown sidecar、项目工作区、Raw Inbox、图谱、查询、巡检、多模型角色配置和客户端更新检测能力。
+1. 查询页新增“简单查询”开关：开启后仅关闭“查询快速答案模型”和“查询深度表达模型”的 thinking/Reasoner 模式，不改变 Wiki 编译、图片/多模态、Embedding、Review/Lint 等其他职责的模型配置。
+2. Query trace 增加阶段耗时统计，可直接查看慢在本地 Wiki 扫描、结构化 Agent、最终回答、网络搜索、合成、排队、冷却还是重试。
+3. 深度研究加强问题对象约束：网络结果按项目关键词区分为“项目事实来源”和“方法参考材料”，不含项目关键词的搜索结果只能作为弱相关参考，不能作为强相关项目事实写入最终答案。
+4. 深度研究最终答案和 UI 参考列表增加来源分组；弱相关材料会单独折叠为“方法参考材料”，用于借鉴方法、打法或案例，不再和直接项目来源混在同一列表里。
+5. 已用真实 Tavily 搜索和 MiniMax-M2.7 对“福瑞科技园三期医疗业态引流策划”场景做验证：12 条搜索结果中 3 条 direct、9 条 weak，未把济南/山东等弱相关案例当作福瑞项目事实。
+6. Lint 巡检减少误报：改进同名页面、兼容实体和 Broken Link 识别规则，不能直接自动修复的问题从 Fix 改为 Guide。
+7. 点击 Guide 会在右侧 Wiki 页面/编辑区域临时高亮可能需要处理的位置，便于人工补链接、改名、改引用或重编译后再次运行 Lint。
+8. 捕获网页 HTML 和压缩包时，相关工具和终端命令改为后台/隐藏方式运行，减少桌面弹出黑色终端窗口对用户的打扰。
+9. 桌面 Frog 拖拽捕获区增加有效区域背景色提示；拖入原始材料后会进入 Raw Inbox 并触发 Wiki 编译流程。
+10. 兼容类型的同标题实体会复用/合并，降低项目、主题等页面重复生成后引发的查询、图谱和 Lint 噪声。
+11. 保留 v0.1.5 已有的长 PDF 稳定入库、PDFium 解析、结构化编译、Wiki 批量生成、人工编辑保护、图谱、查询、巡检、多模型角色配置和客户端更新检测能力。
 
 本地打包版验收记录：
 
@@ -32,9 +33,9 @@ MyWiki 是一个本地优先的个人 AI 知识中枢。它把 PDF、Word、Exce
 
 | 平台 | 文件 | 说明 |
 | --- | --- | --- |
-| Windows | `MyWiki_0.1.5_x64-setup.exe` | 推荐给普通 Windows 用户的安装包 |
-| Windows | `MyWiki_0.1.5_x64_en-US.msi` | Windows MSI 安装包 |
-| macOS | `MyWiki_0.1.5_aarch64.dmg` | Apple Silicon Mac 推荐安装包 |
+| Windows | `MyWiki_0.1.6_x64-setup.exe` | 推荐给普通 Windows 用户的安装包 |
+| Windows | `MyWiki_0.1.6_x64_en-US.msi` | Windows MSI 安装包 |
+| macOS | `MyWiki_0.1.6_aarch64.dmg` | Apple Silicon Mac 推荐安装包 |
 | macOS | `MyWiki_macos_ARM64.app.zip` | Apple Silicon Mac app 压缩包 |
 
 > 说明：当前 macOS 包是 ARM64 / Apple Silicon 版本。iOS 分发不是普通桌面安装包链路，需要后续单独规划 TestFlight、App Store 或企业签名分发。
@@ -103,7 +104,7 @@ pnpm desktop:build:macos
 
 1. 同步 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json`、`src-tauri/tauri.macos.conf.json` 的版本号。
 2. 合并并推送到 `main`。
-3. 创建并推送 tag，例如 `v0.1.5`。
+3. 创建并推送 tag，例如 `v0.1.6`。
 4. `Release Packages` workflow 构建 Windows/macOS 安装包。
 5. workflow 创建 GitHub Release，客户端通过 `/releases/latest` 检查更新。
 

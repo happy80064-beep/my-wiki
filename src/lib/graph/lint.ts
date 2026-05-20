@@ -177,7 +177,7 @@ function findDuplicateEntities(entities: Entity[]) {
   for (const entity of entities) {
     const normalized = normalizeTitle(entity.title);
     if (!normalized) continue;
-    const key = `${entity.type}:${normalized}`;
+    const key = entity.type === 'project' || entity.type === 'topic' ? `compatible:${normalized}` : `${entity.type}:${normalized}`;
     groups.set(key, [...(groups.get(key) ?? []), entity]);
   }
 

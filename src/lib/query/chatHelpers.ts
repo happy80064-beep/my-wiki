@@ -40,6 +40,8 @@ export type QueryChatReferencePreview =
       source?: string;
       snippet?: string;
       content?: string;
+      relevance?: 'direct' | 'weak';
+      relevanceReason?: string;
     };
 
 export function buildConversationTitle(question: string) {

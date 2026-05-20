@@ -578,6 +578,8 @@ export default defineConfig(({ mode }) => {
                 topic?: string;
                 webResults?: DevWebSearchResult[];
                 providerConfig?: LlmProviderConfig | null;
+                wikiContext?: DevResearchWikiContext[];
+                reasoningMode?: LlmTextRequestInput['reasoningMode'];
               };
               const topic = payload.topic?.trim();
               if (!topic) {
@@ -586,7 +588,8 @@ export default defineConfig(({ mode }) => {
               }
 
               const webResults = Array.isArray(payload.webResults) ? payload.webResults : [];
-              if (webResults.length === 0) {
+              const wikiContext = normalizeDevResearchWikiContext(payload.wikiContext);
+              if (webResults.length === 0 && wikiContext.length === 0) {
                 sendJson(res, 200, {
                   synthesis: buildNoWebResultsSynthesis(topic),
                   provider: '',
@@ -603,10 +606,11 @@ export default defineConfig(({ mode }) => {
 
               const providerResult = await requestConfiguredProviderText({
                 config: providerConfig,
-                prompt: buildDeepResearchPrompt(topic, webResults),
+                prompt: buildDeepResearchPrompt(topic, webResults, wikiContext),
                 systemPrompt:
                   'You are MyWiki Deep Research. Synthesize web search results into a concise, cited Chinese wiki research note. Do not reveal chain-of-thought.',
                 maxTokens: 3600,
+                reasoningMode: payload.reasoningMode,
               });
               if (!providerResult.ok) {
                 sendJson(res, 502, { error: `${providerResult.providerName} failed: ${providerResult.error}` });
@@ -614,7 +618,7 @@ export default defineConfig(({ mode }) => {
               }
 
               sendJson(res, 200, {
-                synthesis: stripThinking(providerResult.text),
+                synthesis: appendGroupedResearchSources(stripThinking(providerResult.text), webResults),
                 provider: providerResult.providerName,
                 model: providerResult.model,
               });
@@ -637,6 +641,8 @@ export default defineConfig(({ mode }) => {
                 searchQueries?: string[];
                 searchConfig?: { provider?: string; apiKey?: string; maxResults?: number };
                 providerConfig?: LlmProviderConfig | null;
+                wikiContext?: DevResearchWikiContext[];
+                reasoningMode?: LlmTextRequestInput['reasoningMode'];
               };
               const topic = payload.topic?.trim();
               if (!topic) {
@@ -661,7 +667,8 @@ export default defineConfig(({ mode }) => {
               ).slice(0, 4);
               const maxResults = Math.min(10, Math.max(1, Number(searchConfig.maxResults) || 5));
               const webResults = await runTavilySearches(queries, searchConfig.apiKey, maxResults);
-              if (webResults.length === 0) {
+              const wikiContext = normalizeDevResearchWikiContext(payload.wikiContext);
+              if (webResults.length === 0 && wikiContext.length === 0) {
                 sendJson(res, 200, {
                   webResults: [],
                   synthesis: `# ${topic}\n\n没有检索到可用的外部来源。建议换一个更具体的主题或检查 Tavily 配置。`,
@@ -671,13 +678,14 @@ export default defineConfig(({ mode }) => {
                 return;
               }
 
-              const prompt = buildDeepResearchPrompt(topic, webResults);
+              const prompt = buildDeepResearchPrompt(topic, webResults, wikiContext);
               const providerResult = await requestConfiguredProviderText({
                 config: providerConfig,
                 prompt,
                 systemPrompt:
                   'You are MyWiki Deep Research. Synthesize web search results into a concise, cited Chinese wiki research note. Do not reveal chain-of-thought.',
                 maxTokens: 3600,
+                reasoningMode: payload.reasoningMode,
               });
               if (!providerResult.ok) {
                 sendJson(res, 502, { error: `${providerResult.providerName} failed: ${providerResult.error}` });
@@ -686,7 +694,7 @@ export default defineConfig(({ mode }) => {
 
               sendJson(res, 200, {
                 webResults,
-                synthesis: stripThinking(providerResult.text),
+                synthesis: appendGroupedResearchSources(stripThinking(providerResult.text), webResults),
                 provider: providerResult.providerName,
                 model: providerResult.model,
               });
@@ -704,7 +712,9 @@ export default defineConfig(({ mode }) => {
             }
 
             try {
-              const payload = (await readJsonBody(req)) as QueryComposePayload;
+              const payload = (await readJsonBody(req)) as QueryComposePayload & {
+                reasoningMode?: LlmTextRequestInput['reasoningMode'];
+              };
               if (!payload.question?.trim() || !payload.draftAnswer?.trim()) {
                 sendJson(res, 400, { error: 'question and draftAnswer are required.' });
                 return;
@@ -717,10 +727,11 @@ export default defineConfig(({ mode }) => {
                     baseUrl: minimaxBaseUrl,
                     model: minimaxModel,
                     providerName: 'MiniMax',
-                    prompt,
-                    systemPrompt: '你是严谨的中文知识库查询表达助手。只输出最终回答正文。',
-                    maxTokens: 1200,
-                  })
+                  prompt,
+                  systemPrompt: '你是严谨的中文知识库查询表达助手。只输出最终回答正文。',
+                  maxTokens: 1200,
+                  extraBody: payload.reasoningMode === 'disabled' ? { thinking: { type: 'disabled' } } : undefined,
+                })
                 : { ok: false as const, error: 'MINIMAX_API_KEY is not configured.' };
 
               const minimaxFailure = minimaxResult.ok ? '' : minimaxResult.error;
@@ -744,6 +755,7 @@ export default defineConfig(({ mode }) => {
                   systemPrompt: '你是严谨的中文知识库查询表达助手。只输出最终回答正文。',
                   maxTokens: 1200,
                   extraBody: {
+                    ...(payload.reasoningMode === 'disabled' ? { thinking: { type: 'disabled' } } : {}),
                     thinking: { type: 'disabled' },
                   },
                 });
@@ -782,6 +794,7 @@ export default defineConfig(({ mode }) => {
             try {
               const payload = (await readJsonBody(req)) as QueryAnswerRequest & {
                 providerConfig?: LlmProviderConfig | null;
+                reasoningMode?: LlmTextRequestInput['reasoningMode'];
               };
               if (!payload.question?.trim() || !Array.isArray(payload.pages) || payload.pages.length === 0) {
                 sendJson(res, 400, { error: 'question and pages are required.' });
@@ -804,6 +817,7 @@ export default defineConfig(({ mode }) => {
                   prompt,
                   systemPrompt,
                   maxTokens: 3600,
+                  reasoningMode: payload.reasoningMode,
                 });
 
                 if (!providerResult.ok) {
@@ -831,6 +845,7 @@ export default defineConfig(({ mode }) => {
                 prompt,
                 systemPrompt,
                 maxTokens: 3600,
+                extraBody: payload.reasoningMode === 'disabled' ? { thinking: { type: 'disabled' } } : undefined,
               });
 
               if (!minimaxResult.ok) {
@@ -1100,6 +1115,7 @@ export default defineConfig(({ mode }) => {
                 return;
               }
 
+              const reasoningExtraBody = payload.reasoningMode === 'disabled' ? { thinking: { type: 'disabled' } } : {};
               const prompt = buildQueryPlanPrompt(payload);
               const minimaxResult = minimaxApiKey
                 ? await requestOpenAiCompatibleText({
@@ -1110,7 +1126,7 @@ export default defineConfig(({ mode }) => {
                     prompt,
                     systemPrompt: '你是 MyWiki Query Agent。只输出符合 schema 的 JSON 对象。',
                     maxTokens: STRUCTURED_JSON_MAX_TOKENS,
-                    extraBody: { response_format: { type: 'json_object' } },
+                    extraBody: { response_format: { type: 'json_object' }, ...reasoningExtraBody },
                   })
                 : { ok: false as const, error: 'MINIMAX_API_KEY is not configured.' };
 
@@ -1135,6 +1151,7 @@ export default defineConfig(({ mode }) => {
                   systemPrompt: '你是 MyWiki Query Agent。只输出符合 schema 的 JSON 对象。',
                   maxTokens: 1200,
                   extraBody: {
+                    ...reasoningExtraBody,
                     thinking: { type: 'disabled' },
                     response_format: { type: 'json_object' },
                   },
@@ -1836,6 +1853,18 @@ type DevWebSearchResult = {
   url: string;
   snippet: string;
   source: string;
+  relevance?: 'direct' | 'weak';
+  relevanceReason?: string;
+};
+
+type DevResearchWikiContext = {
+  title?: string;
+  path?: string;
+  summary?: string;
+  content?: string;
+  tags?: string[];
+  sources?: string[];
+  related?: string[];
 };
 
 async function runTavilySearches(queries: string[], apiKey: string, maxResults: number): Promise<DevWebSearchResult[]> {
@@ -1876,28 +1905,127 @@ async function runTavilySearches(queries: string[], apiKey: string, maxResults: 
   return merged.slice(0, Math.max(maxResults, 1) * Math.max(queries.length, 1));
 }
 
-function buildDeepResearchPrompt(topic: string, webResults: DevWebSearchResult[]) {
-  const sources = webResults
-    .map((result, index) => [`[${index + 1}] ${result.title}`, `URL: ${result.url}`, `摘要: ${result.snippet}`].join('\n'))
+function buildDeepResearchPrompt(topic: string, webResults: DevWebSearchResult[], wikiContext: DevResearchWikiContext[] = []) {
+  const directResults = webResults.filter((result) => result.relevance !== 'weak');
+  const weakResults = webResults.filter((result) => result.relevance === 'weak');
+  const directSources = directResults
+    .map((result, index) => formatResearchWebSource(result, index + 1))
     .join('\n\n');
+  const weakSources = weakResults
+    .map((result, index) => formatResearchWebSource(result, directResults.length + index + 1))
+    .join('\n\n');
+  const wikiContextBlock = wikiContext.length
+    ? wikiContext
+        .map((page, index) =>
+          [
+            `### Wiki ${index + 1}: ${page.title}`,
+            page.path ? `Path: ${page.path}` : '',
+            page.summary ? `Summary: ${page.summary}` : '',
+            page.tags?.length ? `Tags: ${page.tags.join('、')}` : '',
+            page.related?.length ? `Related: ${page.related.join('、')}` : '',
+            page.content ? page.content : '',
+          ]
+            .filter(Boolean)
+            .join('\n'),
+        )
+        .join('\n\n')
+    : '';
   return [
     `研究主题：${topic}`,
     '',
-    '请基于下面的网页搜索结果生成可写入 Wiki 的中文研究条目：',
+    wikiContextBlock
+      ? '请基于当前 Wiki 上下文和下面的网页搜索结果生成可写入 Wiki 的中文研究条目：'
+      : '请基于下面的网页搜索结果生成可写入 Wiki 的中文研究条目：',
     '- 先给出结论摘要',
     '- 分主题整理事实、数据、争议和未知项',
     '- 使用 [1]、[2] 这样的编号引用来源',
     '- 明确指出还需要补充验证的内容',
     '- 保持中性、可复用、适合进入知识库',
+    wikiContextBlock ? '- 当前 Wiki 上下文定义了研究对象边界；Direct Web Results 才能作为本项目外部事实补充。' : '',
+    wikiContextBlock ? '- Weak Reference Materials 只可借鉴方法、结构、案例打法或行业表达，不能写成当前项目已经具备的事实、地点、主体、政策或数据。' : '',
+    wikiContextBlock ? '- 如果使用 Weak Reference Materials 启发策略，请在“方法借鉴说明”中写清楚借鉴了什么；不要把弱相关来源混入事实层或项目现状。' : '',
+    wikiContextBlock ? '- 如果没有可靠外部网页直接对应当前 Wiki 对象，请明确说明“公开资料不足”，并只基于 Wiki 已有事实做谨慎策划建议。' : '',
     '',
-    '## Web Search Results',
+    wikiContextBlock ? '## Current Wiki Context' : '',
+    wikiContextBlock,
     '',
-    sources,
+    '## Direct Web Results',
+    '',
+    directSources || '(No directly matched web results)',
+    '',
+    weakSources ? '## Weak Reference Materials' : '',
+    weakSources,
   ].join('\n');
+}
+
+function formatResearchWebSource(result: DevWebSearchResult, index: number) {
+  return [
+    `[${index}] ${result.title}`,
+    `URL: ${result.url}`,
+    result.relevance === 'weak' ? `Relevance: weak reference${result.relevanceReason ? ` - ${result.relevanceReason}` : ''}` : '',
+    `摘要: ${result.snippet}`,
+  ]
+    .filter(Boolean)
+    .join('\n');
 }
 
 function buildNoWebResultsSynthesis(topic: string) {
   return `# ${topic}\n\n没有检索到可用的外部来源。建议换一个更具体的主题或检查 Tavily 配置。`;
+}
+
+function appendGroupedResearchSources(synthesis: string, webResults: DevWebSearchResult[]) {
+  const trimmed = synthesis.trim();
+  if (webResults.length === 0) return trimmed;
+  const directResults = webResults.filter((result) => result.relevance !== 'weak');
+  const weakResults = webResults.filter((result) => result.relevance === 'weak');
+  const directLines = directResults.map((result, index) => `${index + 1}. [${escapeMarkdown(result.title)}](${result.url}) - ${result.source}`);
+  const weakLines = weakResults.map(
+    (result, index) =>
+      `${index + 1}. [${escapeMarkdown(result.title)}](${result.url}) - ${result.source}${result.relevanceReason ? `（${result.relevanceReason}）` : '（仅作方法参考）'}`,
+  );
+  return [
+    trimmed,
+    '',
+    '## 来源分组',
+    '',
+    '### 项目事实来源',
+    '',
+    ...(directLines.length ? directLines : ['- 暂无直接命中当前项目关键词的外部网页。']),
+    '',
+    '### 方法参考材料',
+    '',
+    ...(weakLines.length ? weakLines : ['- 暂无弱相关方法参考材料。']),
+  ].join('\n');
+}
+
+function escapeMarkdown(value: string) {
+  return value.replace(/\[/g, '\\[').replace(/\]/g, '\\]');
+}
+
+function normalizeDevResearchWikiContext(context: DevResearchWikiContext[] | undefined) {
+  return (Array.isArray(context) ? context : [])
+    .map((page) => ({
+      ...page,
+      title: page.title?.trim() ?? '',
+      path: page.path?.trim(),
+      summary: page.summary?.trim(),
+      content: compactResearchContext(page.content ?? '', 7000),
+      tags: page.tags?.map((tag) => tag.trim()).filter(Boolean).slice(0, 12),
+      sources: page.sources?.map((source) => source.trim()).filter(Boolean).slice(0, 12),
+      related: page.related?.map((item) => item.trim()).filter(Boolean).slice(0, 12),
+    }))
+    .filter((page) => page.title)
+    .slice(0, 4);
+}
+
+function compactResearchContext(value: string, maxLength: number) {
+  const text = value
+    .replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, '')
+    .replace(/<think(?:ing)?>[\s\S]*$/gi, '')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength).trim()}\n\n[...wiki context truncated...]` : text;
 }
 
 async function requestConfiguredProviderVision({
@@ -2094,12 +2222,13 @@ async function requestConfiguredProviderText({
   maxTokens,
   responseFormat,
   structuredOutput,
+  reasoningMode,
 }: {
   config: LlmProviderConfig;
 } & LlmTextRequestInput): Promise<{ ok: true; text: string; providerName: string; model: string } | { ok: false; error: string; providerName: string; model: string }> {
   const providerName = config.providerId;
   try {
-    const request = buildProviderTextRequest(config, { prompt, systemPrompt, maxTokens, responseFormat, structuredOutput });
+    const request = buildProviderTextRequest(config, { prompt, systemPrompt, maxTokens, responseFormat, structuredOutput, reasoningMode });
     const response = await fetchWithTimeout(request.url, {
       method: 'POST',
       headers: request.headers,

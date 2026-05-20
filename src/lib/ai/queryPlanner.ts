@@ -1,3 +1,5 @@
+import type { RuntimeProviderTiming } from '@/lib/llm/runtimeProvider';
+
 export type QueryIndexEntity = {
   id: string;
   type: string;
@@ -30,11 +32,13 @@ export type QueryPlan = {
   answerType: 'direct' | 'yes_no_with_evidence' | 'list' | 'summary' | 'unknown';
   confidence: number;
   rationale?: string;
+  llmTiming?: RuntimeProviderTiming;
 };
 
 export type QueryPlanRequest = {
   question: string;
   index: QueryIndexEntity[];
+  reasoningMode?: 'disabled';
 };
 
 const intents: QueryPlanIntent[] = [

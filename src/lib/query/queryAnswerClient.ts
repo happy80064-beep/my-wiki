@@ -2,6 +2,7 @@ import { assertDevAiApiAvailable } from '@/lib/ai/devApiGuard';
 import { requestConfiguredProviderText } from '@/lib/llm/runtimeProvider';
 import { isTauriRuntime } from '@/lib/runtime/tauri';
 import type { LlmProviderConfig } from '@/lib/llm/providers';
+import type { LlmReasoningMode } from '@/lib/llm/textProvider';
 import {
   buildQueryAnswerPrompt,
   normalizeQueryAnswerResponse,
@@ -10,7 +11,7 @@ import {
 } from './queryAnswer';
 
 export async function answerQueryWithWikiPages(
-  payload: QueryAnswerRequest & { providerConfig?: LlmProviderConfig | null },
+  payload: QueryAnswerRequest & { providerConfig?: LlmProviderConfig | null; reasoningMode?: LlmReasoningMode },
 ): Promise<QueryAnswerResponse> {
   if (!import.meta.env.DEV && isTauriRuntime()) {
     return answerQueryWithRuntimeProvider(payload);
@@ -33,7 +34,7 @@ export async function answerQueryWithWikiPages(
 }
 
 async function answerQueryWithRuntimeProvider(
-  payload: QueryAnswerRequest & { providerConfig?: LlmProviderConfig | null },
+  payload: QueryAnswerRequest & { providerConfig?: LlmProviderConfig | null; reasoningMode?: LlmReasoningMode },
 ): Promise<QueryAnswerResponse> {
   if (!payload.providerConfig) {
     throw new Error('请先在设置里配置 Query/Deep Research 模型，安装版才能生成最终回答。');
@@ -44,6 +45,7 @@ async function answerQueryWithRuntimeProvider(
     systemPrompt:
       '你是 MyWiki Query 2.0 的中文 Wiki 对话分析助手。请基于给定的编号 Wiki 页面进行高质量 Markdown 回答，禁止输出 <think>、思考过程或 JSON。必须在末尾追加一个形如 <!-- cited: 1,2 --> 的 HTML 注释。',
     maxTokens: 3600,
+    reasoningMode: payload.reasoningMode,
   });
   if (!providerResult.ok) {
     throw new Error(`${providerResult.providerName} failed: ${providerResult.error}`);
@@ -57,5 +59,6 @@ async function answerQueryWithRuntimeProvider(
     ...normalized,
     provider: providerResult.providerName,
     model: providerResult.model,
+    llmTiming: providerResult.timing,
   };
 }
