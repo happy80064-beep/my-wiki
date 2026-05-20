@@ -162,7 +162,7 @@ describe('QueryMessageCard', () => {
         trace: [
           {
             layer: 'answer',
-            label: 'Query 2.0 回答',
+            label: 'Query 回答',
             detail: '基于 Wiki 页面生成了回答。',
           },
         ],

@@ -4,19 +4,22 @@ import { QueryConversationList } from '@/components/query/QueryConversationList'
 import { QueryInput } from '@/components/query/QueryInput';
 import { QueryMessageCard } from '@/components/query/QueryMessageCard';
 import { QueryReferencePanel } from '@/components/query/QueryReferencePanel';
-import { dedupeSources } from '@/lib/graph/answer';
-import { runStructuredQuery } from '@/lib/graph';
 import type { StructuredQueryResult } from '@/lib/graph/types';
 import { getProviderConfigForRole, loadProviderSettings } from '@/lib/llm/providerSettings';
 import type { RuntimeProviderTiming } from '@/lib/llm/runtimeProvider';
-import {
-  buildQueryReferences,
-  buildWikiPageReferences,
-  type QueryChatReference,
-} from '@/lib/query/chatHelpers';
+import { type QueryChatReference } from '@/lib/query/chatHelpers';
 import { type QueryChatMessage, useQueryChatStore } from '@/lib/query/chatStore';
+import { answerQueryChat } from '@/lib/query/chatAnswerClient';
+import { detectQueryChatIntent } from '@/lib/query/chatIntent';
+import {
+  applyWikiRagPageAnswer,
+  applyWikiRagPageAnswerFailure,
+  buildWikiRagBaseResult,
+  buildWikiRagNoContextResult,
+} from '@/lib/query/queryPipeline';
 import { answerQueryWithWikiPages } from '@/lib/query/queryAnswerClient';
 import type { QueryConversationContextMessage } from '@/lib/query/queryAnswer';
+import { buildLookupRetrievalText, understandQuery } from '@/lib/query/queryUnderstanding';
 import { retrieveQueryContext } from '@/lib/query/wikiRetrieval';
 import {
   searchConfiguredDeepResearch,
@@ -46,7 +49,6 @@ export function QueryPage() {
   const [selectedReference, setSelectedReference] = useState<QueryChatReference | null>(null);
   const [referencePanelOpen, setReferencePanelOpen] = useState(false);
   const [responseMode, setResponseMode] = useState<'wiki' | 'research-search' | 'research-synthesis' | null>(null);
-  const [simpleQuery, setSimpleQuery] = useState(() => loadSimpleQueryMode());
   const currentWorkspaceRoot = activeWorkspaceRoot || 'browser-indexeddb';
 
   const activeMessages = useMemo(
@@ -104,134 +106,131 @@ export function QueryPage() {
         userMessage?.id,
         trimmed,
       );
-      const retrievalQuestion = buildRetrievalQuestion(trimmed, conversationContext);
-      const retrievalUsedConversation = retrievalQuestion !== trimmed;
-      const reasoningMode = simpleQuery ? 'disabled' : undefined;
+      const chatIntent = detectQueryChatIntent(trimmed);
+      if (chatIntent.isChat) {
+        let chatMs = 0;
+        const answered = await measureAsync(
+          () =>
+            answerQueryChat({
+              question: trimmed,
+              intentLabel: chatIntent.label,
+              conversationContext,
+              providerConfig: queryProviderConfig,
+              reasoningMode: 'disabled',
+            }),
+          (elapsed) => {
+            chatMs = elapsed;
+          },
+        );
+        const result: StructuredQueryResult = {
+          answer: answered.answer,
+          sources: [],
+          suggestions: ['询问一个具体知识库问题', '切换到补充/深度研究前先说明研究对象'],
+          llm: {
+            provider: answered.provider,
+            model: answered.model,
+            fallbackFrom: answered.fallbackFrom,
+          },
+          trace: [
+            {
+              layer: 'chat',
+              label: '闲聊意图',
+              detail: `识别为${chatIntent.label}，置信度 ${Math.round(chatIntent.confidence * 100)}%。本轮跳过 Wiki 页面检索和结构化查询，直接调用 Query 模型回复。耗时：${formatDuration(chatMs)}。${formatProviderTimingDetail(answered.llmTiming)}`,
+            },
+          ],
+        };
+        addAssistantMessage(trimmed, result.answer, result, []);
+        return;
+      }
+
+      const queryUnderstanding = understandQuery(trimmed);
+      const contextualQuestion = buildRetrievalQuestion(trimmed, conversationContext);
+      const retrievalQuestion = buildLookupRetrievalText(contextualQuestion, queryUnderstanding);
+      const retrievalUsedConversation = contextualQuestion !== trimmed;
       let retrievalMs = 0;
-      let structuredMs = 0;
+      let answerMs = 0;
 
-      const [retrieved, structured] = await Promise.all([
-        measureAsync(
+      const retrieved = await measureAsync(
+        () =>
+          retrieveQueryContext(retrievalQuestion, {
+            limit: 10,
+            maxContextChars: queryProviderConfig?.contextWindow,
+          }),
+        (elapsed) => {
+          retrievalMs = elapsed;
+        },
+      );
+
+      if (retrieved.pages.length === 0) {
+        const noContext = buildWikiRagNoContextResult({
+          question: trimmed,
+          queryUnderstanding,
+          retrievalTrace: retrieved.trace,
+          retrievalUsedConversation,
+          timing: {
+            retrievalMs,
+          },
+          formatDuration,
+        });
+        addAssistantMessage(trimmed, noContext.result.answer, noContext.result, noContext.references);
+        return;
+      }
+
+      const initial = buildWikiRagBaseResult({
+        retrievedPages: retrieved.pages,
+        queryUnderstanding,
+        retrievalTrace: retrieved.trace,
+        retrievalUsedConversation,
+        timing: {
+          retrievalMs,
+        },
+        formatDuration,
+      });
+      let result: StructuredQueryResult = initial.result;
+      let finalReferences = initial.references;
+
+      try {
+        const answered = await measureAsync(
           () =>
-            retrieveQueryContext(retrievalQuestion, {
-              limit: 10,
-              maxContextChars: queryProviderConfig?.contextWindow,
-            }),
-          (elapsed) => {
-            retrievalMs = elapsed;
-          },
-        ),
-        measureAsync(
-          () =>
-            runStructuredQuery(retrievalQuestion, {
-              composeWithLlm: false,
-              planWithAgent: true,
-              useCache: false,
-              reasoningMode,
-            }),
-          (elapsed) => {
-            structuredMs = elapsed;
-          },
-        ),
-      ]);
-
-      let result: StructuredQueryResult = {
-        ...structured,
-        trace: [
-          {
-            layer: 'directory',
-            label: 'Wiki 页面检索',
-            detail: `${retrievalUsedConversation ? '已结合最近对话补全检索语义。' : ''}${retrieved.trace.join(' ')} 耗时：${formatDuration(retrievalMs)}。`,
-          },
-          ...(structured.trace ?? []),
-          {
-            layer: 'agent',
-            label: '结构化查询',
-            detail: `耗时：${formatDuration(structuredMs)}。${simpleQuery ? '简单查询已请求关闭 Query 模型 thinking/reasoning。' : ''}`,
-          },
-        ],
-      };
-      let finalReferences = buildQueryReferences(result);
-
-      if (retrieved.pages.length > 0) {
-        try {
-          let answerMs = 0;
-          const answered = await measureAsync(
-            () =>
-              answerQueryWithWikiPages({
-                question: trimmed,
-                indexSummary: retrieved.indexSummary,
-                pages: retrieved.pages.map((page) => ({
-                  index: page.index,
-                  entityId: page.entityId,
-                  type: page.type,
-                  title: page.title,
-                  href: page.href,
-                  path: page.path,
-                  summary: page.summary,
-                  content: page.content,
-                  score: page.score,
-                  tags: page.tags,
-                  sources: page.sources,
-                  related: page.related,
-                  updated: page.updated,
-                })),
-                structuredSupport: {
-                  draftAnswer: structured.answer,
-                  keyHints: [
-                    ...structured.sources.slice(0, 8).map((source) => `结构化来源：${source.title}`),
-                    ...(structured.trace ?? []).slice(0, 4).map((step) => `${step.label}：${step.detail}`),
-                  ],
-                },
-                conversationContext,
-                providerConfig: queryProviderConfig,
-                reasoningMode,
-              }),
-            (elapsed) => {
-              answerMs = elapsed;
-            },
-          );
-
-          finalReferences = buildWikiPageReferences(retrieved.pages, answered.citedIndices);
-          result = {
-            ...result,
-            answer: answered.answer,
-            sources: dedupeSources([
-              ...finalReferences.map((reference) => ({
-                type: reference.type,
-                id: reference.key.replace(/^entity:/, ''),
-                title: reference.title,
-                href: reference.href,
+            answerQueryWithWikiPages({
+              question: trimmed,
+              indexSummary: retrieved.indexSummary,
+              pages: retrieved.pages.map((page) => ({
+                index: page.index,
+                entityId: page.entityId,
+                type: page.type,
+                title: page.title,
+                href: page.href,
+                path: page.path,
+                summary: page.summary,
+                content: page.content,
+                score: page.score,
+                tags: page.tags,
+                sources: page.sources,
+                related: page.related,
+                updated: page.updated,
               })),
-              ...structured.sources,
-            ]),
-            llm: {
-              provider: answered.provider,
-              model: answered.model,
-              fallbackFrom: answered.fallbackFrom,
-            },
-            trace: [
-              ...(result.trace ?? []),
-              {
-                layer: 'answer',
-                label: 'Query 2.0 回答',
-                detail: `${answered.provider} / ${answered.model} 基于 ${finalReferences.length} 个 Wiki 页面生成了回答。耗时：${formatDuration(answerMs)}。${formatProviderTimingDetail(answered.llmTiming)}`,
-              },
-            ],
-          };
-        } catch (error) {
-          result = {
-            ...result,
-            trace: [
-              ...(result.trace ?? []),
-              {
-                layer: 'answer',
-                label: 'Query 2.0 回答',
-                detail: `页面级回答失败，已回退到结构化查询结果：${error instanceof Error ? error.message : '未知错误'}`,
-              },
-            ],
-          };
-        }
+              conversationContext,
+              providerConfig: queryProviderConfig,
+              reasoningMode: 'disabled',
+            }),
+          (elapsed) => {
+            answerMs = elapsed;
+          },
+        );
+
+        const answeredResult = applyWikiRagPageAnswer({
+          result,
+          retrievedPages: retrieved.pages,
+          answered,
+          answerMs,
+          formatDuration,
+          formatProviderTimingDetail,
+        });
+        result = answeredResult.result;
+        finalReferences = answeredResult.references;
+      } catch (error) {
+        result = applyWikiRagPageAnswerFailure(result, error);
       }
 
       addAssistantMessage(trimmed, result.answer, result, finalReferences);
@@ -256,7 +255,6 @@ export function QueryPage() {
     let weakWebResultCount = 0;
     const wikiContext = buildDeepResearchWikiContext(message);
     const searchQueries = buildDeepResearchSearchQueries(question, wikiContext);
-    const reasoningMode = simpleQuery ? 'disabled' : undefined;
 
     setIsResponding(true);
     setResponseMode('research-search');
@@ -291,7 +289,7 @@ export function QueryPage() {
         () =>
           synthesizeConfiguredDeepResearch(question, webResults, {
             wikiContext,
-            reasoningMode,
+            reasoningMode: 'disabled',
           }),
         (elapsed) => {
           synthesisMs = elapsed;
@@ -418,11 +416,6 @@ export function QueryPage() {
               key={draftSeed}
               initialValue={draftSeed}
               isSending={isResponding}
-              simpleQuery={simpleQuery}
-              onSimpleQueryChange={(next) => {
-                setSimpleQuery(next);
-                saveSimpleQueryMode(next);
-              }}
               onSend={async (question) => {
                 setDraftSeed('');
                 await runConversationTurn(question);
@@ -584,18 +577,6 @@ function formatProviderTimingDetail(timing: RuntimeProviderTiming | undefined) {
     timing.attempts > 1 ? `尝试 ${timing.attempts} 次` : '',
   ].filter(Boolean);
   return parts.length ? `明细：${parts.join('；')}。` : '';
-}
-
-const simpleQueryStorageKey = 'mywiki.query.v2.simpleQuery';
-
-function loadSimpleQueryMode() {
-  if (typeof window === 'undefined') return false;
-  return window.localStorage.getItem(simpleQueryStorageKey) === 'true';
-}
-
-function saveSimpleQueryMode(enabled: boolean) {
-  if (typeof window === 'undefined') return;
-  window.localStorage.setItem(simpleQueryStorageKey, enabled ? 'true' : 'false');
 }
 
 function buildPendingDeepResearchQueryResult(

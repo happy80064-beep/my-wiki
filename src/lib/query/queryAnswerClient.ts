@@ -1,4 +1,4 @@
-import { assertDevAiApiAvailable } from '@/lib/ai/devApiGuard';
+import { assertDevAiApiAvailable, buildDevApiUrl } from '@/lib/ai/devApiGuard';
 import { requestConfiguredProviderText } from '@/lib/llm/runtimeProvider';
 import { isTauriRuntime } from '@/lib/runtime/tauri';
 import type { LlmProviderConfig } from '@/lib/llm/providers';
@@ -19,7 +19,7 @@ export async function answerQueryWithWikiPages(
 
   assertDevAiApiAvailable('Query 2.0 页面回答');
 
-  const response = await fetch('/api/query/answer', {
+  const response = await fetch(buildDevApiUrl('/api/query/answer'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -44,7 +44,7 @@ async function answerQueryWithRuntimeProvider(
     prompt: buildQueryAnswerPrompt(payload),
     systemPrompt:
       '你是 MyWiki Query 2.0 的中文 Wiki 对话分析助手。请基于给定的编号 Wiki 页面进行高质量 Markdown 回答，禁止输出 <think>、思考过程或 JSON。必须在末尾追加一个形如 <!-- cited: 1,2 --> 的 HTML 注释。',
-    maxTokens: 3600,
+    maxTokens: 1800,
     reasoningMode: payload.reasoningMode,
   });
   if (!providerResult.ok) {

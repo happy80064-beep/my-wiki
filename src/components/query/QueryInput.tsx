@@ -1,16 +1,14 @@
-import { Loader2, SendHorizonal, Zap } from 'lucide-react';
+import { Loader2, SendHorizonal } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 
 type QueryInputProps = {
   disabled?: boolean;
   isSending?: boolean;
   initialValue?: string;
-  simpleQuery?: boolean;
-  onSimpleQueryChange?: (enabled: boolean) => void;
   onSend: (question: string) => Promise<void> | void;
 };
 
-export function QueryInput({ disabled, isSending, initialValue, simpleQuery = false, onSimpleQueryChange, onSend }: QueryInputProps) {
+export function QueryInput({ disabled, isSending, initialValue, onSend }: QueryInputProps) {
   const [value, setValue] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -57,24 +55,6 @@ export function QueryInput({ disabled, isSending, initialValue, simpleQuery = fa
       <div className="mt-2 flex items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-3">
           <p className="text-xs leading-5 text-[#6b6b68]">Shift + Enter 换行，Enter 发送。</p>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={simpleQuery}
-            onClick={() => onSimpleQueryChange?.(!simpleQuery)}
-            disabled={disabled || isSending}
-            className={[
-              'inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-60',
-              simpleQuery
-                ? 'border-[#155eef] bg-[#eef4ff] text-[#155eef]'
-                : 'border-[#d9d9d6] bg-white text-[#626965] hover:border-[#155eef] hover:text-[#155eef]',
-            ].join(' ')}
-            title="仅本页查询请求关闭 Query 快速/深度模型的 thinking 或 reasoning"
-          >
-            <Zap size={13} />
-            简单查询
-            <span className="text-[11px]">{simpleQuery ? '开' : '关'}</span>
-          </button>
         </div>
         <button
           type="button"

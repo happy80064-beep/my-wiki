@@ -355,9 +355,11 @@ function scoreWikiPage(page: SearchableWikiPage, tokens: string[], normalizedQue
     }
   }
 
-  score += Math.min(page.entity.sourceEntries.length, 8);
-  score += Math.min(page.entity.tags.length, 5);
-  score += Math.min(page.body.length / 1200, 10);
+  if (matchedTerms.size > 0) {
+    score += Math.min(page.entity.sourceEntries.length, 8);
+    score += Math.min(page.entity.tags.length, 5);
+    score += Math.min(page.body.length / 1200, 10);
+  }
 
   return {
     score,
@@ -459,9 +461,6 @@ function tokenizeQuery(query: string): string[] {
       const chars = [...token];
       for (let index = 0; index < chars.length - 1; index += 1) {
         tokens.push(chars[index] + chars[index + 1]);
-      }
-      for (const char of chars) {
-        if (!STOP_WORDS.has(char)) tokens.push(char);
       }
       tokens.push(token);
     } else {

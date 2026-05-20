@@ -3,7 +3,7 @@ import type { LlmReasoningMode } from '@/lib/llm/textProvider';
 import { requestConfiguredProviderText, stripThinking } from '@/lib/llm/runtimeProvider';
 import { isTauriRuntime } from '@/lib/runtime/tauri';
 import { buildQueryComposePrompt, type QueryComposePayload, type QueryComposeResult } from './queryComposer';
-import { assertDevAiApiAvailable } from './devApiGuard';
+import { assertDevAiApiAvailable, buildDevApiUrl } from './devApiGuard';
 
 export async function composeQueryAnswer(
   payload: QueryComposePayload,
@@ -35,7 +35,7 @@ export async function composeQueryAnswer(
 
   assertDevAiApiAvailable('查询表达优化');
 
-  const response = await fetch('/api/query/compose', {
+  const response = await fetch(buildDevApiUrl('/api/query/compose'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ ...payload, reasoningMode: options.reasoningMode }),

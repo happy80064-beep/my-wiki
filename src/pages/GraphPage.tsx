@@ -101,6 +101,7 @@ type ProjectedLink = {
   to: ProjectedNode;
   weight: number;
   sameCommunity: boolean;
+  crossCommunity: boolean;
   opacity: number;
 };
 
@@ -205,6 +206,14 @@ const insightTypeLabels = {
   'sparse-community': '低凝聚',
   'dense-hub': '高密',
 } as const;
+
+const insightReasonLabels: Record<GraphInsight['type'], string> = {
+  'bridge-node': '连接多个社群，适合作为追问入口',
+  'knowledge-gap': '来源或关系偏少，需要补证据',
+  'surprising-link': '跨类型或跨社群，适合核对上下文',
+  'sparse-community': '同一社群内部连接弱，建议补交叉引用',
+  'dense-hub': '连接密集，可作为主题索引',
+};
 
 const GRAPH_WIDTH = 1900;
 const GRAPH_HEIGHT = 1180;
@@ -315,6 +324,10 @@ export function GraphPage() {
   );
 
   useEffect(() => {
+    if (viewMode !== 'space') {
+      setFloatTime(0);
+      return undefined;
+    }
     let frame = 0;
     let mounted = true;
     let lastPaintedAt = 0;
@@ -334,7 +347,7 @@ export function GraphPage() {
       mounted = false;
       cancelAnimationFrame(frame);
     };
-  }, []);
+  }, [viewMode]);
 
   useEffect(() => {
     if (!isGraphFullscreen) return undefined;
@@ -684,20 +697,29 @@ export function GraphPage() {
                     <g key={link.relationship.id}>
                       <path
                         d={buildLinkPath(link)}
-                        className="mywiki-tech-link"
+                        className={link.crossCommunity ? 'mywiki-tech-link mywiki-tech-link-cross' : 'mywiki-tech-link'}
                         style={{
-                          opacity: focused ? Math.max(link.opacity, link.sameCommunity ? 0.38 : 0.16) : 0.14,
+                          opacity: focused
+                            ? Math.max(link.opacity, link.crossCommunity ? 0.38 : link.sameCommunity ? 0.34 : 0.18)
+                            : link.crossCommunity
+                              ? 0.24
+                              : 0.1,
                           stroke:
                             highlightedRelationshipIds.has(link.relationship.id)
                               ? '#16a34a'
                               : colorMode === 'community' && link.sameCommunity
                                 ? getCommunityColor(link.from.node.communityId)
-                                : undefined,
+                                : link.crossCommunity
+                                  ? '#64748b'
+                                  : undefined,
                           strokeWidth: highlightedRelationshipIds.has(link.relationship.id)
                             ? Math.max(2.8, 1.5 + link.weight * 0.3)
+                            : link.crossCommunity
+                              ? Math.max(1.55, 1.25 + link.weight * 0.12)
                             : link.sameCommunity
                               ? Math.max(1.2, 0.95 + link.weight * 0.08)
                               : 1.05,
+                          strokeDasharray: link.crossCommunity ? '7 7' : undefined,
                         }}
                       />
                       <title>
@@ -803,7 +825,10 @@ export function GraphPage() {
             <div className="flex items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <Radar size={17} className="text-[#155eef]" />
-                <h3 className="text-sm font-semibold text-[#1f2937]">图谱洞察</h3>
+                <div>
+                  <h3 className="text-sm font-semibold text-[#1f2937]">图谱诊断</h3>
+                  <p className="mt-0.5 text-[11px] leading-4 text-[#626965]">自动找出补来源、补关系和研究入口。</p>
+                </div>
               </div>
               <button
                 type="button"
@@ -821,7 +846,7 @@ export function GraphPage() {
               </div>
             ) : (
               <div className="mt-4 grid gap-3">
-                {visibleInsights.map((insight) => (
+                {visibleInsights.slice(0, 5).map((insight) => (
                   <article
                     key={insight.id}
                     className={[
@@ -841,6 +866,7 @@ export function GraphPage() {
                           </span>
                           <h4 className="text-sm font-semibold text-[#1f2937]">{insight.title}</h4>
                         </div>
+                        <p className="mt-1 text-[11px] leading-4 text-[#155eef]">{insightReasonLabels[insight.type]}</p>
                         <p className="mt-2 text-xs leading-5 text-[#626965]">{insight.detail}</p>
                         <div className="mt-2 flex flex-wrap gap-2">
                           {insight.entityIds.slice(0, 3).map((entityId) => {
@@ -886,6 +912,11 @@ export function GraphPage() {
                     </div>
                   </article>
                 ))}
+                {visibleInsights.length > 5 ? (
+                  <p className="rounded-[10px] border border-[#e5e5e4] bg-white px-3 py-2 text-xs text-[#626965]">
+                    还有 {visibleInsights.length - 5} 条诊断已收起，优先处理上方高优先级项目。
+                  </p>
+                ) : null}
               </div>
             )}
           </section>
@@ -2286,11 +2317,12 @@ function projectGraphScene(
         to,
         weight: link.weight,
         sameCommunity: link.sameCommunity,
+        crossCommunity: !link.sameCommunity,
         opacity: viewMode === 'space'
           ? clamp(0.36 + (from.scale + to.scale) * 0.17, 0.38, 0.78)
           : link.sameCommunity
-            ? clamp(0.26 + link.weight * 0.07 + Math.min(link.from.degree + link.to.degree, 12) * 0.012, 0.28, 0.58)
-            : clamp(0.045 + link.weight * 0.014, 0.05, 0.13),
+            ? clamp(0.22 + link.weight * 0.055 + Math.min(link.from.degree + link.to.degree, 12) * 0.01, 0.24, 0.48)
+            : clamp(0.26 + link.weight * 0.045, 0.28, 0.52),
       };
     })
     .filter((link): link is ProjectedLink => Boolean(link))
@@ -2359,7 +2391,7 @@ function projectNode(
 ): ProjectedNode {
   const width = GRAPH_WIDTH;
   const height = GRAPH_HEIGHT;
-  const floatStrength = viewMode === 'space' ? 1 : 0.32;
+  const floatStrength = viewMode === 'space' ? 1 : 0;
   const floatX = Math.sin(time * 0.75 + node.phase) * node.drift * floatStrength;
   const floatY = Math.cos(time * 0.64 + node.phase * 0.8) * node.drift * 0.72 * floatStrength;
   const floatZ = viewMode === 'space' ? Math.sin(time * 0.52 + node.phase * 1.4) * node.drift * 2.2 : 0;

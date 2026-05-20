@@ -25,6 +25,11 @@ import {
   type WikiMarkdownCompileInput,
 } from './src/lib/wiki/markdownCompiler';
 import {
+  buildQueryChatPrompt,
+  normalizeQueryChatResponse,
+  type QueryChatAnswerRequest,
+} from './src/lib/query/chatAnswer';
+import {
   buildQueryAnswerPrompt,
   normalizeQueryAnswerResponse,
   type QueryAnswerRequest,
@@ -816,7 +821,7 @@ export default defineConfig(({ mode }) => {
                   config: requestProviderConfig,
                   prompt,
                   systemPrompt,
-                  maxTokens: 3600,
+                  maxTokens: 1800,
                   reasoningMode: payload.reasoningMode,
                 });
 
@@ -844,7 +849,7 @@ export default defineConfig(({ mode }) => {
                 providerName: 'MiniMax',
                 prompt,
                 systemPrompt,
-                maxTokens: 3600,
+                maxTokens: 1800,
                 extraBody: payload.reasoningMode === 'disabled' ? { thinking: { type: 'disabled' } } : undefined,
               });
 
@@ -865,6 +870,82 @@ export default defineConfig(({ mode }) => {
             } catch (error) {
               sendJson(res, 500, {
                 error: error instanceof Error ? error.message : 'Query answer generation failed.',
+              });
+            }
+          });
+
+          server.middlewares.use('/api/query/chat', async (req, res) => {
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { error: 'Method not allowed' });
+              return;
+            }
+
+            try {
+              const payload = (await readJsonBody(req)) as QueryChatAnswerRequest & {
+                providerConfig?: LlmProviderConfig | null;
+                reasoningMode?: LlmTextRequestInput['reasoningMode'];
+              };
+              if (!payload.question?.trim()) {
+                sendJson(res, 400, { error: 'question is required.' });
+                return;
+              }
+
+              const requestProviderConfig = normalizeRequestProviderConfig(payload.providerConfig);
+              if (!requestProviderConfig && !minimaxApiKey) {
+                sendJson(res, 500, { error: 'MINIMAX_API_KEY is not configured.' });
+                return;
+              }
+
+              const prompt = buildQueryChatPrompt(payload);
+              const systemPrompt =
+                '你是 MyWiki 的中文对话助手。当前轮次是闲聊或助手能力说明，简短自然回复，不要声称检索了 Wiki。';
+
+              if (requestProviderConfig) {
+                const providerResult = await requestConfiguredProviderText({
+                  config: requestProviderConfig,
+                  prompt,
+                  systemPrompt,
+                  maxTokens: 800,
+                  reasoningMode: payload.reasoningMode,
+                });
+
+                if (!providerResult.ok) {
+                  sendJson(res, 502, { error: `${providerResult.providerName} failed: ${providerResult.error}` });
+                  return;
+                }
+
+                sendJson(res, 200, {
+                  answer: normalizeQueryChatResponse(providerResult.text) || '你好，我在。你可以直接问我知识库里的具体问题。',
+                  provider: providerResult.providerName,
+                  model: providerResult.model,
+                });
+                return;
+              }
+
+              const minimaxResult = await requestOpenAiCompatibleText({
+                apiKey: minimaxApiKey,
+                baseUrl: minimaxBaseUrl,
+                model: minimaxModel,
+                providerName: 'MiniMax',
+                prompt,
+                systemPrompt,
+                maxTokens: 800,
+                extraBody: payload.reasoningMode === 'disabled' ? { thinking: { type: 'disabled' } } : undefined,
+              });
+
+              if (!minimaxResult.ok) {
+                sendJson(res, 502, { error: `MiniMax failed: ${minimaxResult.error}` });
+                return;
+              }
+
+              sendJson(res, 200, {
+                answer: normalizeQueryChatResponse(minimaxResult.text) || '你好，我在。你可以直接问我知识库里的具体问题。',
+                provider: 'minimax',
+                model: minimaxModel,
+              });
+            } catch (error) {
+              sendJson(res, 500, {
+                error: error instanceof Error ? error.message : 'Query chat generation failed.',
               });
             }
           });

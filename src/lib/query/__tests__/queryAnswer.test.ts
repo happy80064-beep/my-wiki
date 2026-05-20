@@ -28,7 +28,9 @@ describe('query answer prompt helpers', () => {
     expect(prompt).toContain('## Selected Wiki Pages');
     expect(prompt).toContain('[1] 福瑞健康科技园三期项目');
     expect(prompt).toContain('Structured Support');
-    expect(prompt).toContain('风险矩阵');
+    expect(prompt).toContain('专业、严谨、内容精炼');
+    expect(prompt).toContain('不要补编页面没有明示的信息');
+    expect(prompt).toContain('开放性问题通常不超过 600 中文字');
   });
 
   it('can build a pure wiki-page prompt without structured-query draft contamination', () => {

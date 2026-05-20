@@ -51,6 +51,10 @@ const taskStatuses: TaskStatus[] = ['pending', 'done', 'overdue', 'cancelled'];
 
 type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 
+function sourceEntryHref(entryId: string) {
+  return `/wiki?source=${encodeURIComponent(entryId)}`;
+}
+
 export function EntityPage() {
   const { id } = useParams();
   const [graphDepth, setGraphDepth] = useState(1);
@@ -310,7 +314,7 @@ function TopicPanel({ entity }: { entity: Entity }) {
       />
       <div className="mt-3 flex flex-wrap gap-2">
         {props.autoCollectedSnippets.map((entryId, index) => (
-          <Link key={entryId} to={`/entries/${entryId}`} className="rounded-full border border-[#d9d9d6] px-3 py-1 text-xs text-[#155eef]">
+          <Link key={entryId} to={sourceEntryHref(entryId)} className="rounded-full border border-[#d9d9d6] px-3 py-1 text-xs text-[#155eef]">
             素材 {index + 1}
           </Link>
         ))}
@@ -351,7 +355,7 @@ function SourceEntries({ entity }: { entity: Entity }) {
         {entity.sourceEntries.map((entryId, index) => (
           <Link
             key={entryId}
-            to={`/entries/${entryId}`}
+            to={sourceEntryHref(entryId)}
             className="rounded-full border border-[#d9d9d6] px-3 py-1 text-xs text-[#155eef]"
           >
             原文 {index + 1}
@@ -443,7 +447,7 @@ function RelationshipEditor({ relationship, entities }: { relationship: Relation
           {relationship.evidence.map((entryId, index) => (
             <Link
               key={entryId}
-              to={`/entries/${entryId}`}
+              to={sourceEntryHref(entryId)}
               className="rounded-full border border-[#d9d9d6] px-2.5 py-1 text-xs text-[#155eef]"
             >
               证据 {index + 1}
@@ -564,7 +568,7 @@ function TaskEditor({
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[#626965]">
         <span>当前负责人：{entityTitleById.get(task.owner) ?? task.owner}</span>
-        <Link to={`/entries/${task.source}`} className="rounded-full border border-[#d9d9d6] px-2.5 py-1 text-[#155eef]">
+        <Link to={sourceEntryHref(task.source)} className="rounded-full border border-[#d9d9d6] px-2.5 py-1 text-[#155eef]">
           查看来源
         </Link>
         {saveState === 'saved' ? <span className="text-[#276749]">任务已保存。</span> : null}

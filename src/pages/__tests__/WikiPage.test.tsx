@@ -339,6 +339,7 @@ describe('BrowserIndexedDbWikiPage', () => {
 
     render(<BrowserIndexedDbWikiPage />);
 
+    await screen.findAllByText('未生成项目');
     fireEvent.click(await screen.findByRole('button', { name: '批量生成/更新wiki页' }));
 
     await waitFor(() => {
@@ -374,6 +375,8 @@ describe('BrowserIndexedDbWikiPage', () => {
 
     render(<BrowserIndexedDbWikiPage />);
 
+    await screen.findAllByText('已生成项目 A');
+    await screen.findAllByText('已生成概念 B');
     fireEvent.click(await screen.findByRole('button', { name: '批量生成/更新wiki页' }));
 
     await waitFor(() => {
@@ -528,6 +531,32 @@ describe('BrowserIndexedDbWikiPage', () => {
     await waitFor(() => {
       expect(within(rightPanel as HTMLElement).getAllByText(/Source entry body/i).length).toBeGreaterThan(0);
     });
+  });
+
+  it('opens source entries from /wiki source query params', async () => {
+    const sourceEntry = await createEntry({
+      content: 'Source body opened by query param',
+      source: 'file',
+      fileMetadata: {
+        filename: 'query-param-source.md',
+        mimeType: 'text/markdown',
+        url: 'file:///query-param-source.md',
+      },
+    });
+    try {
+      window.history.pushState(null, '', `/wiki?source=${encodeURIComponent(sourceEntry.id)}`);
+
+      render(<BrowserIndexedDbWikiPage />);
+
+      await screen.findByText('query-param-source.md');
+      const rightPanel = document.querySelectorAll('aside')[1];
+      expect(rightPanel).toBeTruthy();
+      await waitFor(() => {
+        expect(within(rightPanel as HTMLElement).getAllByText(/Source body opened by query param/i).length).toBeGreaterThan(0);
+      });
+    } finally {
+      window.history.pushState(null, '', '/');
+    }
   });
 
   it('opens related pages when frontmatter related values are wikilink paths', async () => {

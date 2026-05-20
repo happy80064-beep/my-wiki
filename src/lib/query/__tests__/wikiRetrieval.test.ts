@@ -88,6 +88,48 @@ describe('wiki retrieval', () => {
     expect(context.trace[1]).toContain('选入上下文');
   });
 
+  it('does not include unrelated pages just because they have tags, sources, or long content', () => {
+    const project = makeEntity({
+      id: 'project_1',
+      type: 'project',
+      title: '福瑞健康科技园三期项目',
+      summary: '围绕医疗、康养、文旅形成商业模式。',
+      sourceEntries: ['entry_1', 'entry_2'],
+      tags: ['福瑞科技园三期', '医康旅'],
+      wikiMarkdown: '# 福瑞健康科技园三期项目\n\n## 商业模式\n项目采用医康旅一体化商业模式。',
+    });
+    const unrelated = makeEntity({
+      id: 'project_2',
+      type: 'project',
+      title: '桌面数字生命体',
+      summary: '运行在 Windows 桌面的 AI 生命体原型。',
+      sourceEntries: ['entry_3'],
+      tags: ['桌面生命体', '数字生命体'],
+      wikiMarkdown: `# 桌面数字生命体\n\n${'这是一段较长但无关的桌面助手说明。'.repeat(80)}`,
+    });
+    const wikiIndex: WikiIndexEntry[] = [project, unrelated].map((entity) => ({
+      entityId: entity.id,
+      type: entity.type,
+      title: entity.title,
+      aliases: [entity.title, ...(entity.tags ?? [])],
+      shortSummary: entity.summary,
+      importance: 10,
+      sourceCount: entity.sourceEntries.length,
+      relationshipCount: 0,
+      updatedAt: entity.updatedAt,
+    }));
+
+    const context = retrieveQueryContextFromEntities(
+      '福瑞健康科技园三期项目的商业模式和关键风险是什么？',
+      [project, unrelated],
+      [],
+      wikiIndex,
+    );
+
+    expect(context.pages.map((page) => page.title)).toEqual(['福瑞健康科技园三期项目']);
+    expect(context.trace.join('\n')).not.toContain('桌面数字生命体');
+  });
+
   it('adds one-hop related pages as secondary context', () => {
     const project = makeEntity({
       id: 'project_1',

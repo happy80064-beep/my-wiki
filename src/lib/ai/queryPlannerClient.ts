@@ -3,7 +3,7 @@ import type { LlmReasoningMode } from '@/lib/llm/textProvider';
 import { requestConfiguredProviderText } from '@/lib/llm/runtimeProvider';
 import { isTauriRuntime } from '@/lib/runtime/tauri';
 import { buildQueryPlanPrompt, normalizeQueryPlan, type QueryIndexEntity, type QueryPlan } from './queryPlanner';
-import { assertDevAiApiAvailable } from './devApiGuard';
+import { assertDevAiApiAvailable, buildDevApiUrl } from './devApiGuard';
 
 export async function planQueryWithAgent(
   question: string,
@@ -33,7 +33,7 @@ export async function planQueryWithAgent(
 
   assertDevAiApiAvailable('Query Agent 规划');
 
-  const response = await fetch('/api/query/plan', {
+  const response = await fetch(buildDevApiUrl('/api/query/plan'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ question, index, reasoningMode: options.reasoningMode }),

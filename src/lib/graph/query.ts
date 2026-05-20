@@ -62,6 +62,7 @@ import type { QueryIndexEntity, QueryPlan } from '@/lib/ai/queryPlanner';
 import { db, materializeCompileSuggestions } from '@/lib/db';
 import type { RuntimeProviderTiming } from '@/lib/llm/runtimeProvider';
 import type { LlmReasoningMode } from '@/lib/llm/textProvider';
+import { understandQuery } from '@/lib/query/queryUnderstanding';
 import {
   buildWikiIndex,
   findCachedInsight,
@@ -569,7 +570,7 @@ async function answerWikiRead(
     });
   }
 
-  const draftAnswer = formatWikiReadAnswer(question, document);
+  const draftAnswer = formatWikiReadAnswer(question, document, plan);
   const result: StructuredQueryResult = {
     answer: draftAnswer,
     candidates: [entity],
@@ -718,19 +719,25 @@ async function resolveRelationshipQueryPlan(
 }
 
 function buildFallbackQueryPlan(question: string, entityName: string | undefined): QueryPlan {
+  const understanding = understandQuery(question);
   const attributeTerms = buildAttributeTerms(question);
   const metricTerms = buildMetricTerms(question);
   const cleanedQuestion = cleanupSearchText(question);
   const cleanedEntityName = cleanupSearchText(entityName ?? '');
-  const evidenceTerms = uniqueStrings([...attributeTerms, ...metricTerms]).slice(0, 12);
+  const evidenceTerms = uniqueStrings([...understanding.evidenceTerms, ...attributeTerms, ...metricTerms]).slice(0, 12);
+  const intent = understanding.intent === 'open_analysis'
+    ? 'evidence_search'
+    : (understanding.intent === 'metric_lookup' || understanding.intent === 'list_lookup'
+      ? 'attribute_lookup'
+      : understanding.intent);
   return {
-    intent: evidenceTerms.length > 0 ? 'attribute_lookup' : 'evidence_search',
+    intent,
     selectedEntityIds: [],
     entityCandidates: [cleanedEntityName, cleanedQuestion].filter((term) => term.length >= 2),
-    attribute: inferAttribute(question),
+    attribute: understanding.attribute === 'metric' ? inferAttribute(question) : understanding.attribute ?? inferAttribute(question),
     evidenceTerms,
     needsRawEvidence: evidenceTerms.length > 0,
-    needsGlobalSearch: true,
+    needsGlobalSearch: understanding.intent !== 'list_lookup',
     answerType: /(能否|是否|能不能|可不可以|可以吗)/.test(question) ? 'yes_no_with_evidence' : 'unknown',
     confidence: 0.45,
   };
@@ -748,6 +755,21 @@ function mergeQueryPlans(plan: QueryPlan, fallback: QueryPlan): QueryPlan {
 }
 
 function correctQueryPlanAttribute(question: string, plan: QueryPlan): QueryPlan {
+  const understanding = understandQuery(question);
+  if (understanding.attribute && understanding.attribute !== 'metric') {
+    return {
+      ...plan,
+      intent: understanding.intent === 'open_analysis'
+        ? plan.intent
+        : (understanding.intent === 'metric_lookup' || understanding.intent === 'list_lookup'
+          ? plan.intent
+          : understanding.intent),
+      attribute: understanding.attribute,
+      evidenceTerms: uniqueStrings([...understanding.evidenceTerms, ...plan.evidenceTerms]).slice(0, 12),
+      answerType: understanding.answerStyle === 'direct' ? 'direct' : plan.answerType,
+    };
+  }
+
   const inferredAttribute = inferAttribute(question);
   if (inferredAttribute === 'openSourceStatus' && plan.attribute === 'derivedFrom') {
     return {
@@ -1040,7 +1062,7 @@ function findEvidenceHitsInEntries(
     .sort((a, b) => b.score - a.score || b.entry.capturedAt - a.entry.capturedAt);
 }
 
-function formatWikiReadAnswer(question: string, document: EntityDocument) {
+function formatWikiReadAnswer(question: string, document: EntityDocument, plan?: QueryPlan) {
   const { entity, tasks, relationships, relatedEntities, entries, evidenceHits } = document;
   const lines: string[] = [];
   const profile = entity.compiledProfile;
@@ -1060,10 +1082,16 @@ function formatWikiReadAnswer(question: string, document: EntityDocument) {
     return lines.join('\n');
   }
 
-  const queriedPropertyKey = normalizePropertyKey(inferAttribute(question));
+  const timelineAnswer = findTimelineAnswer(question, document);
+  if (timelineAnswer) {
+    return timelineAnswer;
+  }
+
+  const queriedPropertyKey = normalizePropertyKey(plan?.attribute ?? inferAttribute(question));
   const compiledPropertyValue = queriedPropertyKey ? getEntityPropertyDisplayValue(entity, queriedPropertyKey) : undefined;
   const evidencePropertyValue = queriedPropertyKey ? extractEvidencePropertyValue(queriedPropertyKey, evidenceHits) : undefined;
-  const propertyValue = compiledPropertyValue ?? evidencePropertyValue;
+  const entryPropertyValue = queriedPropertyKey ? extractEntryPropertyValue(queriedPropertyKey, entries) : undefined;
+  const propertyValue = compiledPropertyValue ?? evidencePropertyValue ?? entryPropertyValue;
   const unknownMetricDimension = !propertyValue ? findUnknownMetricDimension(question, document) : undefined;
   if (unknownMetricDimension) {
     return formatUnknownMetricDimensionFastAnswer(entity, question, unknownMetricDimension);
@@ -1089,7 +1117,7 @@ function formatWikiReadAnswer(question: string, document: EntityDocument) {
   if (isListDetailQuestion(question)) {
     const drillDown = drillDownEntityCategory(entity, question);
     if (drillDown) {
-      return formatCategoryDrillDownAnswer(entity, drillDown);
+      return formatCategoryDrillDownAnswer(entity, drillDown, question, evidenceHits);
     }
     if (evidenceHits.length > 0) {
       return formatListDetailFastAnswer(question, document);
@@ -1132,6 +1160,141 @@ function formatWikiReadAnswer(question: string, document: EntityDocument) {
   }
 
   return lines.join('\n\n');
+}
+
+function findTimelineAnswer(question: string, document: EntityDocument) {
+  const target = inferTimelineTarget(question);
+  if (!target) return undefined;
+
+  const text = buildTimelineEvidenceText(document);
+  const exact = findTimelineFact(text, timelineTerms[target]);
+  if (exact) {
+    return `${document.entity.title}${timelineLabels[target]}：${exact.date}。${exact.sentence ? `依据：${exact.sentence}` : ''}`.trim();
+  }
+
+  if (target === 'completion') {
+    const operation = findTimelineFact(text, timelineTerms.operation);
+    if (operation) {
+      return [
+        `${document.entity.title}在当前 Wiki 中没有明确写出“完工/竣工”日期。`,
+        `最接近的时间节点是：${operation.date}投入运营。`,
+      ].join('\n');
+    }
+  }
+
+  const anyTimeline = findTimelineFact(text, [...timelineTerms.completion, ...timelineTerms.operation, ...timelineTerms.start]);
+  if (anyTimeline) {
+    return [
+      `${document.entity.title}在当前 Wiki 中没有找到与“${timelineQuestionLabel(target)}”直接对应的日期。`,
+      `已找到的相关时间节点是：${anyTimeline.date}（${anyTimeline.sentence}）。`,
+    ].join('\n');
+  }
+
+  return undefined;
+}
+
+const timelineTerms = {
+  completion: ['完工', '竣工', '建成', '完成'],
+  operation: ['投入运营', '投运', '运营'],
+  start: ['开工', '启动', '开建', '动工'],
+} as const;
+
+const timelineLabels = {
+  completion: '的完工/竣工时间',
+  operation: '的投入运营时间',
+  start: '的开工时间',
+} as const;
+
+type TimelineTarget = keyof typeof timelineTerms;
+
+function inferTimelineTarget(question: string): TimelineTarget | undefined {
+  if (/(什么时候|何时|哪年|几月|日期|时间|多久|多长时间|完工|竣工|建成|完成|投入运营|投运|开工|启动|开建|动工)/.test(question)) {
+    if (/(完工|竣工|建成|完成)/.test(question)) return 'completion';
+    if (/(投入运营|投运|运营)/.test(question)) return 'operation';
+    if (/(开工|启动|开建|动工)/.test(question)) return 'start';
+  }
+  return undefined;
+}
+
+function timelineQuestionLabel(target: TimelineTarget) {
+  if (target === 'completion') return '完工/竣工';
+  if (target === 'operation') return '投入运营';
+  return '开工';
+}
+
+function buildTimelineEvidenceText(document: EntityDocument) {
+  return [
+    document.entity.wikiMarkdown,
+    document.entity.compiledProfile?.overview,
+    ...(document.entity.compiledProfile?.keyFacts ?? []),
+    document.entity.summary,
+    ...document.entries.map((entry) => entry.content),
+    ...document.evidenceHits.map((hit) => hit.snippet),
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+function findTimelineFact(text: string, terms: readonly string[]) {
+  const sentences = splitTimelineSentences(text);
+  const candidates = sentences
+    .map((sentence) => {
+      if (!terms.some((term) => sentence.includes(term))) return undefined;
+      const date = findNearestDate(sentence, terms);
+      return date ? { date, sentence: compactTimelineSentence(sentence), score: scoreTimelineSentence(sentence, terms) } : undefined;
+    })
+    .filter((item): item is { date: string; sentence: string; score: number } => Boolean(item))
+    .sort((left, right) => right.score - left.score);
+  return candidates[0];
+}
+
+function splitTimelineSentences(text: string) {
+  return text
+    .replace(/\r\n/g, '\n')
+    .split(/(?<=[。！？!?；;])|\n+/)
+    .map((sentence) => sentence.replace(/\s+/g, ' ').trim())
+    .filter((sentence) => sentence.length >= 4 && /\d{4}/.test(sentence))
+    .slice(0, 200);
+}
+
+function findNearestDate(sentence: string, terms: readonly string[]) {
+  const dates = [...sentence.matchAll(/\d{4}\s*年(?:\s*\d{1,2}\s*月(?:\s*\d{1,2}\s*日?)?)?|\d{4}[-/.]\d{1,2}(?:[-/.]\d{1,2})?/g)]
+    .map((match) => ({ value: match[0].replace(/\s+/g, ''), index: match.index ?? 0 }));
+  if (dates.length === 0) return undefined;
+
+  const termIndexes = terms.flatMap((term) => {
+    const indexes: number[] = [];
+    let start = sentence.indexOf(term);
+    while (start >= 0) {
+      indexes.push(start);
+      start = sentence.indexOf(term, start + term.length);
+    }
+    return indexes;
+  });
+  if (termIndexes.length === 0) return dates[0]?.value;
+
+  return dates
+    .sort((left, right) => nearestDistance(left.index, termIndexes) - nearestDistance(right.index, termIndexes))[0]
+    ?.value;
+}
+
+function nearestDistance(index: number, targets: number[]) {
+  return Math.min(...targets.map((target) => Math.abs(index - target)));
+}
+
+function scoreTimelineSentence(sentence: string, terms: readonly string[]) {
+  const termScore = terms.reduce((score, term) => score + (sentence.includes(term) ? 10 : 0), 0);
+  const expectationScore = /(预计|计划|预期|将于|拟于|预计于)/.test(sentence) ? 5 : 0;
+  return termScore + expectationScore - Math.min(sentence.length / 200, 3);
+}
+
+function compactTimelineSentence(sentence: string) {
+  const cleaned = sentence
+    .replace(/^#+\s*/, '')
+    .replace(/^[-*]\s*/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned.length > 140 ? `${cleaned.slice(0, 139)}...` : cleaned;
 }
 
 function buildWikiReadSources(document: EntityDocument, answer: string, question: string): QuerySource[] {
@@ -1271,6 +1434,14 @@ function extractEvidencePropertyValue(propertyKey: string, evidenceHits: Evidenc
   return undefined;
 }
 
+function extractEntryPropertyValue(propertyKey: string, entries: Entry[]) {
+  for (const entry of entries) {
+    const value = extractPropertyValue(propertyKey, entry.content, []);
+    if (value) return value;
+  }
+  return undefined;
+}
+
 function buildComposeEntries(document: EntityDocument, budget: QueryContextBudget): QueryComposePayload['entries'] {
   const used = new Set<string>();
   let usedChars = 0;
@@ -1330,6 +1501,7 @@ function formatEntityIndicatorsForComposer(entity: Entity) {
 }
 
 function buildCompileSuggestions(document: EntityDocument, plan: QueryPlan, question?: string): CompileSuggestionDraft[] {
+  if (plan.attribute && ['completionDate', 'operationDate', 'startDate'].includes(plan.attribute)) return [];
   const propertyKey = normalizePropertyKey(plan.attribute ?? inferAttribute(plan.evidenceTerms.join(' ')));
   if (question && findUnknownMetricDimension(question, document)) return [];
   if (question && (findIndicatorGroupAnswer(question, document.entity) || findIndicatorAnswer(question, document.entity))) return [];
@@ -2411,9 +2583,31 @@ function drillDownEntityCategory(entity: Entity, question: string) {
 function formatCategoryDrillDownAnswer(
   entity: Entity,
   drillDown: NonNullable<ReturnType<typeof drillDownEntityCategory>>,
+  question?: string,
+  evidenceHits: EvidenceHit[] = [],
 ) {
   if (drillDown.items.length === 0) {
     return `我找到了「${drillDown.focus}」这个层级，但其中还没有可用项目清单。建议补充或重新编译该业态下的项目。`;
+  }
+
+  const sourceItems = question ? extractListItemsFromEvidence(question, evidenceHits) : [];
+  const mergedItems = mergeStructuredAndSourceListItems(drillDown.items, sourceItems);
+  const supplementalItems = mergedItems.filter((item) => item.source === 'evidence');
+
+  if (supplementalItems.length > 0) {
+    return [
+      `${entity.title}的「${drillDown.focus}」相关项目包括：`,
+      mergedItems.map((item, index) => {
+        const suffix = item.summary ? `：${item.summary}` : '';
+        return `${index + 1}. ${item.title}${suffix}`;
+      }).join('\n'),
+      '',
+      [
+        `提示：其中 ${drillDown.items.length} 项来自 Wiki 已结构化层级；`,
+        `${supplementalItems.length} 项来自命中的来源材料补充：${supplementalItems.map((item) => item.title).join('、')}。`,
+        '建议确认后将补充项编译回 Wiki，避免结构化清单长期不完整。',
+      ].join(''),
+    ].join('\n');
   }
 
   return [
@@ -2425,6 +2619,33 @@ function formatCategoryDrillDownAnswer(
     '',
     '提示：该结果来自 Wiki 已编译的层级结构。后续如果某个业态被频繁深入查询，可以再把它升级为独立实体页。',
   ].join('\n');
+}
+
+function mergeStructuredAndSourceListItems(
+  structuredItems: NonNullable<ReturnType<typeof drillDownEntityCategory>>['items'],
+  sourceItems: string[],
+) {
+  const merged: Array<{ title: string; summary?: string; source: 'structured' | 'evidence' }> = [];
+  const seen = new Set<string>();
+  for (const item of structuredItems) {
+    const key = normalizeListItemKey(item.title);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    merged.push({ title: item.title, summary: item.summary, source: 'structured' });
+  }
+  for (const title of sourceItems) {
+    const key = normalizeListItemKey(title);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    merged.push({ title, source: 'evidence' });
+  }
+  return merged;
+}
+
+function normalizeListItemKey(value: string) {
+  return normalize(value)
+    .replace(/^(?:项目|服务|机构|方法|疗法|中心)/, '')
+    .replace(/(?:项目|服务|机构|方法|疗法)$/g, '');
 }
 
 function isListDetailQuestion(question: string) {

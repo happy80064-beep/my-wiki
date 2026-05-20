@@ -804,6 +804,90 @@ describe('structured query', () => {
     expect(result.sources.some((source) => source.id === project.id)).toBe(true);
   });
 
+  it('merges source evidence supplements when compiled category lists are incomplete', async () => {
+    const entry = await createEntry({
+      content:
+        '福瑞科技园三期医疗业态规划：医疗项目包括社区门诊、中蒙特色康复理疗、抗衰专病门诊、细胞治疗服务中心、中医康复中心。',
+      source: 'text',
+    });
+    await createEntity({
+      type: 'project',
+      title: '福瑞科技园三期',
+      summary: '福瑞科技园三期包含医疗、康养、住宅、研发、文旅等业态。',
+      tags: ['福瑞科技园', '三期', '医疗业态'],
+      sourceEntries: [entry.id],
+      categories: [
+        {
+          name: '医疗业态',
+          aliases: ['医疗', '医疗板块'],
+          items: [
+            { title: '社区门诊', kind: 'service' },
+            { title: '中蒙特色康复理疗', kind: 'service' },
+          ],
+          evidence: '医疗业态包含社区门诊、中蒙特色康复理疗。',
+          updatedAt: Date.now(),
+        },
+      ],
+    });
+
+    const result = await runStructuredQuery('福瑞科技园三期医疗业态有哪些项目', {
+      planWithAgent: false,
+      useCache: false,
+    });
+
+    expect(result.answer).toContain('社区门诊');
+    expect(result.answer).toContain('中蒙特色康复理疗');
+    expect(result.answer).toContain('抗衰专病门诊');
+    expect(result.answer).toContain('细胞治疗服务中心');
+    expect(result.answer).toContain('中医康复中心');
+    expect(result.answer).toContain('来自 Wiki 已结构化层级');
+    expect(result.answer).toContain('来自命中的来源材料补充');
+    expect(result.answer).toContain('建议确认后将补充项编译回 Wiki');
+  });
+
+  it('keeps list supplements scoped to linked sources when linked evidence exists', async () => {
+    const linkedEntry = await createEntry({
+      content:
+        '福瑞科技园三期医疗业态规划：医疗项目包括社区门诊、中蒙特色康复理疗、抗衰专病门诊、细胞治疗服务中心、中医康复中心。',
+      source: 'text',
+    });
+    await createEntry({
+      content:
+        '其他园区医疗业态规划：医疗项目包括口腔门诊、眼科中心、皮肤管理中心。',
+      source: 'text',
+    });
+    await createEntity({
+      type: 'project',
+      title: '福瑞科技园三期',
+      summary: '福瑞科技园三期包含医疗、康养、住宅、研发、文旅等业态。',
+      tags: ['福瑞科技园', '三期', '医疗业态'],
+      sourceEntries: [linkedEntry.id],
+      categories: [
+        {
+          name: '医疗业态',
+          aliases: ['医疗', '医疗板块'],
+          items: [
+            { title: '社区门诊', kind: 'service' },
+            { title: '中蒙特色康复理疗', kind: 'service' },
+          ],
+          updatedAt: Date.now(),
+        },
+      ],
+    });
+
+    const result = await runStructuredQuery('福瑞科技园三期医疗业态有哪些项目', {
+      planWithAgent: false,
+      useCache: false,
+    });
+
+    expect(result.answer).toContain('抗衰专病门诊');
+    expect(result.answer).toContain('细胞治疗服务中心');
+    expect(result.answer).toContain('中医康复中心');
+    expect(result.answer).not.toContain('口腔门诊');
+    expect(result.answer).not.toContain('眼科中心');
+    expect(result.answer).not.toContain('皮肤管理中心');
+  });
+
   it('does not turn PDF table-of-contents noise into sub-list answers', async () => {
     const noisyEntry = await createEntry({
       content:
@@ -1548,5 +1632,50 @@ describe('structured query', () => {
 
     expect(result.answer).toContain('没有找到');
     expect(result.sources).toEqual([]);
+  });
+
+  it('answers completion date questions without treating operation date as completion', async () => {
+    const entry = await createEntry({
+      content: '福瑞科技园三期计划 2026 年开工，预计 2029 年投入运营。',
+      source: 'text',
+    });
+    await createEntity({
+      type: 'project',
+      title: '福瑞科技园三期',
+      summary: '福瑞科技园三期是园区项目。',
+      sourceEntries: [entry.id],
+    });
+
+    const result = await runStructuredQuery('福瑞科技园三期什么时候完工', {
+      planWithAgent: false,
+      useCache: false,
+    });
+
+    expect(result.answer).toContain('没有明确写出“完工/竣工”日期');
+    expect(result.answer).toContain('2029年');
+    expect(result.answer).toContain('投入运营');
+    expect(result.answer).not.toContain('摘要');
+  });
+
+  it('answers exact completion date questions directly when the milestone exists', async () => {
+    const entry = await createEntry({
+      content: '福瑞科技园三期预计 2028 年 12 月竣工，并在后续阶段投入运营。',
+      source: 'text',
+    });
+    await createEntity({
+      type: 'project',
+      title: '福瑞科技园三期',
+      summary: '福瑞科技园三期是园区项目。',
+      sourceEntries: [entry.id],
+    });
+
+    const result = await runStructuredQuery('福瑞科技园三期什么时候完工', {
+      planWithAgent: false,
+      useCache: false,
+    });
+
+    expect(result.answer).toContain('完工/竣工时间');
+    expect(result.answer).toContain('2028年12月');
+    expect(result.answer).not.toContain('没有明确写出');
   });
 });

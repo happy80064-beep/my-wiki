@@ -97,6 +97,11 @@ body {
   opacity: 0.82;
 }
 
+.mywiki-tech-link-cross {
+  stroke: #64748b;
+  stroke-linecap: round;
+}
+
 .mywiki-tech-community {
   pointer-events: none;
 }
