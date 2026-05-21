@@ -11,7 +11,7 @@ const rawAssetMocks = vi.hoisted(() => ({
 
 vi.mock('@/lib/rawAssets', () => rawAssetMocks);
 
-vi.mock('dexie-react-hooks', () => ({
+vi.mock('@/lib/db/liveQuery', () => ({
   useLiveQuery: (_query: unknown, _deps: unknown, defaultResult: unknown) => defaultResult,
 }));
 

@@ -47,6 +47,14 @@ type QueryChatState = {
     result: StructuredQueryResult,
     references: QueryChatReference[],
   ) => QueryChatMessage | null;
+  updateAssistantMessage: (
+    messageId: string,
+    input: {
+      content?: string;
+      result?: StructuredQueryResult;
+      references?: QueryChatReference[];
+    },
+  ) => void;
   removeLastAssistantMessage: (conversationId: string) => void;
   updateMessageResult: (messageId: string, result: StructuredQueryResult) => void;
   setIsResponding: (responding: boolean) => void;
@@ -191,6 +199,19 @@ export const useQueryChatStore = create<QueryChatState>()(
         }));
         return message;
       },
+      updateAssistantMessage: (messageId, input) =>
+        set((state) => ({
+          messages: state.messages.map((message) =>
+            message.id === messageId
+              ? {
+                  ...message,
+                  content: input.content ?? message.content,
+                  result: input.result ?? message.result,
+                  references: input.references ?? message.references,
+                }
+              : message,
+          ),
+        })),
       removeLastAssistantMessage: (conversationId) =>
         set((state) => {
           const activeMessages = state.messages.filter((message) => message.conversationId === conversationId);

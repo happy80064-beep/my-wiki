@@ -12,6 +12,7 @@ import {
   processRawAsset,
   processRawAssetQueue,
   resetInvalidCompiledVisionAssets,
+  resetSourceOnlyCompiledRawAssets,
   resetStaleRawAssets,
   shouldCapturePdfPageScreenshots,
 } from '@/lib/rawAssets';
@@ -166,6 +167,208 @@ describe('raw assets', () => {
     expect((await db.entries.get(compiled!.entryId!))?.processed).toBe(true);
   });
 
+  it('fails imported markdown when structured capture only creates a source page', async () => {
+    const file = new File(
+      [[
+        '# 福瑞股份肝病专科管理式医疗+价值医疗双模式落地执行框架',
+        '',
+        '围绕患者覆盖、费用控制、价值医疗闭环和执行指标展开。',
+      ].join('\n')],
+      '管理式医疗.md',
+      { type: 'text/markdown' },
+    );
+    const { asset } = await createRawAssetFromFile(file);
+
+    const compiled = await processRawAsset(asset.id, async () => ({
+      draft: {
+        primaryEntity: {
+          clientId: 'entity_source',
+          type: 'topic',
+          title: '管理式医疗.md',
+          summary: '管理式医疗.md 的来源摘要。',
+          tags: ['source', '来源', '导入材料'],
+          scenes: ['work'],
+        },
+        relatedEntities: [],
+        relationships: [],
+        tasks: [],
+        compileSuggestions: [],
+      },
+    }));
+    const entry = compiled?.entryId ? await db.entries.get(compiled.entryId) : undefined;
+    const entities = await db.entities.toArray();
+    const job = await db.ingestJobs.get(compiled!.ingestJobId!);
+
+    expect(compiled?.status).toBe('failed');
+    expect(compiled?.error).toContain('只生成了来源页');
+    expect(entry?.processed).toBe(false);
+    expect(entry?.derivedEntities).toEqual([entities[0]?.id]);
+    expect(entities).toHaveLength(1);
+    expect(entities[0]?.tags).toEqual(expect.arrayContaining(['source', '来源']));
+    expect(job?.status).toBe('failed');
+    expect(await db.ingestCache.count()).toBe(0);
+  });
+
+  it('accepts imported markdown when capture creates a source page and a substantive knowledge page', async () => {
+    const file = new File(
+      [[
+        '# 福瑞股份肝病专科管理式医疗+价值医疗双模式落地执行框架',
+        '',
+        '围绕患者覆盖、费用控制、价值医疗闭环和执行指标展开。',
+      ].join('\n')],
+      '管理式医疗.md',
+      { type: 'text/markdown' },
+    );
+    const { asset } = await createRawAssetFromFile(file);
+
+    const compiled = await processRawAsset(asset.id, async () => ({
+      draft: {
+        primaryEntity: {
+          clientId: 'entity_source',
+          type: 'topic',
+          title: '管理式医疗.md',
+          summary: '管理式医疗.md 的来源摘要。',
+          tags: ['source', '来源', '导入材料'],
+          scenes: ['work'],
+        },
+        relatedEntities: [
+          {
+            clientId: 'entity_project',
+            type: 'project',
+            title: '福瑞股份肝病专科管理式医疗项目',
+            summary: '围绕肝病专科患者覆盖、费用控制和价值医疗闭环推进的项目。',
+            tags: ['project', '项目', '管理式医疗'],
+            scenes: ['work'],
+          },
+        ],
+        relationships: [
+          {
+            clientId: 'rel_source_project',
+            fromClientId: 'entity_source',
+            toClientId: 'entity_project',
+            type: 'about',
+          },
+        ],
+        tasks: [],
+        compileSuggestions: [],
+      },
+    }));
+    const entry = compiled?.entryId ? await db.entries.get(compiled.entryId) : undefined;
+    const entities = await db.entities.toArray();
+
+    expect(compiled?.status).toBe('compiled');
+    expect(entry?.processed).toBe(true);
+    expect(entities.some((entity) => entity.title === '管理式医疗.md' && entity.tags.includes('source'))).toBe(true);
+    expect(entities.some((entity) => entity.title === '福瑞股份肝病专科管理式医疗项目')).toBe(true);
+  });
+
+  it('recovers old compiled raw assets that only produced a source page', async () => {
+    const file = new File(['# 管理式医疗\n\n来源材料。'], 'source-only-old.md', { type: 'text/markdown' });
+    const { asset } = await createRawAssetFromFile(file);
+
+    const compiled = await processRawAsset(asset.id, async () => ({
+      draft: {
+        primaryEntity: {
+          clientId: 'entity_project',
+          type: 'project',
+          title: '管理式医疗项目',
+          summary: '管理式医疗项目。',
+          tags: ['project', '项目'],
+          scenes: ['work'],
+        },
+        relatedEntities: [],
+        relationships: [],
+        tasks: [],
+        compileSuggestions: [],
+      },
+    }));
+    const entryId = compiled!.entryId!;
+    const sourceEntity = await createEntity({
+      type: 'topic',
+      title: 'source-only-old',
+      summary: 'source-only-old.md 的来源摘要。',
+      tags: ['source', '来源', '导入材料'],
+      scenes: ['work'],
+      sourceEntries: [entryId],
+    });
+    await db.entries.update(entryId, {
+      processed: true,
+      derivedEntities: [sourceEntity.id],
+    });
+    await db.rawAssets.update(asset.id, {
+      status: 'compiled',
+      error: undefined,
+    });
+
+    const recovered = await resetSourceOnlyCompiledRawAssets();
+    const updatedAsset = await db.rawAssets.get(asset.id);
+    const updatedEntry = await db.entries.get(entryId);
+
+    expect(recovered).toBe(1);
+    expect(updatedAsset?.status).toBe('failed');
+    expect(updatedAsset?.error).toContain('只生成了来源页');
+    expect(updatedEntry?.processed).toBe(false);
+  });
+
+  it('recovers old source-only compiled raw assets identified by source frontmatter', async () => {
+    const file = new File(['# 管理式医疗\n\n来源材料。'], 'source-frontmatter-old.md', { type: 'text/markdown' });
+    const { asset } = await createRawAssetFromFile(file);
+    const compiled = await processRawAsset(asset.id, async () => ({
+      draft: {
+        primaryEntity: {
+          clientId: 'entity_project',
+          type: 'project',
+          title: '管理式医疗项目',
+          summary: '管理式医疗项目。',
+          tags: ['project', '项目'],
+          scenes: ['work'],
+        },
+        relatedEntities: [],
+        relationships: [],
+        tasks: [],
+        compileSuggestions: [],
+      },
+    }));
+    const entryId = compiled!.entryId!;
+    const sourceEntity = await createEntity({
+      type: 'topic',
+      title: '管理式医疗.md',
+      summary: '来源摘要。',
+      tags: ['来源文档'],
+      scenes: ['work'],
+      sourceEntries: [entryId],
+    });
+    await db.entities.update(sourceEntity.id, {
+      wikiMarkdown: [
+        '---',
+        'type: source',
+        'title: 管理式医疗',
+        '---',
+        '',
+        '# 管理式医疗',
+        '',
+        '旧来源页。',
+      ].join('\n'),
+      wikiCompiledAt: Date.now(),
+    });
+    await db.entries.update(entryId, {
+      processed: true,
+      derivedEntities: [sourceEntity.id],
+    });
+    await db.rawAssets.update(asset.id, {
+      status: 'compiled',
+      error: undefined,
+    });
+
+    const recovered = await resetSourceOnlyCompiledRawAssets();
+    const updatedAsset = await db.rawAssets.get(asset.id);
+    const updatedSource = await db.entities.get(sourceEntity.id);
+
+    expect(recovered).toBe(1);
+    expect(updatedAsset?.status).toBe('failed');
+    expect(updatedSource?.wikiMarkdown).toContain('mywiki:superseded');
+  });
+
   it('fails imported files instead of creating a fake source summary when AI JSON is malformed', async () => {
     vi.stubGlobal(
       'fetch',
@@ -282,7 +485,7 @@ describe('raw assets', () => {
     expect(entry?.source).toBe('image');
   });
 
-  it('keeps OCR text as usable image content when the vision provider is temporarily busy', async () => {
+  it('fails standalone image compilation when the vision provider is temporarily busy instead of compiling OCR noise', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
@@ -299,12 +502,10 @@ describe('raw assets', () => {
     const compiled = await processRawAsset(asset.id, async (content) => ({
       draft: createLocalCaptureDraft(content),
     }));
-    const entry = compiled?.entryId ? await db.entries.get(compiled.entryId) : undefined;
 
-    expect(compiled?.status).toBe('compiled');
-    expect(entry?.content).toContain('## OCR 文本');
-    expect(entry?.content).toContain('福瑞健康科技园三期项目总投资');
-    expect(entry?.content).toContain('## 视觉描述待重试');
+    expect(compiled?.status).toBe('failed');
+    expect(compiled?.error).toContain('图片/多模态模型没有返回有效描述');
+    expect(await db.entities.count()).toBe(0);
   });
 
   it('adds multimodal captions for embedded presentation images before compilation', async () => {
@@ -381,19 +582,34 @@ describe('raw assets', () => {
       status: 'compiled',
       extractedText: '抱歉，我目前无法直接访问或查看此图片。',
     });
+    const noisy = await createEntity({
+      type: 'topic',
+      title: '图片OCR识别碎片化',
+      summary: '旧版错误生成的图片 OCR 噪声概念。',
+      tags: ['OCR', '识别失败'],
+      scenes: ['work'],
+      sourceEntries: [asset.entryId!],
+    });
+    await db.entities.update(noisy.id, {
+      wikiMarkdown: '# 图片OCR识别碎片化\n\n旧版错误生成内容。',
+      wikiCompiledAt: Date.now(),
+    });
     await db.entries.update(asset.entryId!, {
       processed: true,
       content: '# 图片内容捕获\n\n抱歉，我目前无法直接访问或查看此图片。',
+      derivedEntities: [noisy.id],
     });
 
     const recovered = await resetInvalidCompiledVisionAssets();
     const updated = await db.rawAssets.get(asset.id);
     const entry = await db.entries.get(asset.entryId!);
+    const updatedNoisy = await db.entities.get(noisy.id);
 
     expect(recovered).toBe(1);
     expect(updated?.status).toBe('failed');
     expect(updated?.error).toContain('无效');
     expect(entry?.processed).toBe(false);
+    expect(updatedNoisy?.wikiMarkdown).toContain('mywiki:superseded');
   });
 
   it('recovers old compiled image entries whose caption asks for a separate upload', async () => {
@@ -415,6 +631,51 @@ describe('raw assets', () => {
     expect(recovered).toBe(1);
     expect(updated?.status).toBe('failed');
     expect(entry?.processed).toBe(false);
+  });
+
+  it('recovers old compiled image entries whose vision step was rate limited', async () => {
+    const file = new File([new Uint8Array([137, 80, 78, 71, 6])], 'old-rate-limited.png', { type: 'image/png' });
+    const { asset } = await createRawAssetFromFile(file);
+    await db.rawAssets.update(asset.id, {
+      status: 'compiled',
+      extractedText: [
+        '# 图片内容捕获：old-rate-limited.png',
+        '',
+        '## OCR 文本',
+        '碎片化 OCR 噪声',
+        '',
+        '## 视觉描述待重试',
+        '图片/多模态模型本次没有返回有效描述：zhipu failed: 该模型当前访问量过大，请您稍后再试',
+      ].join('\n'),
+    });
+    const noisy = await createEntity({
+      type: 'topic',
+      title: '多模态模型视觉描述',
+      summary: '旧版错误生成的模型限流概念。',
+      tags: ['多模态', '模型限流'],
+      scenes: ['work'],
+      sourceEntries: [asset.entryId!],
+    });
+    await db.entities.update(noisy.id, {
+      wikiMarkdown: '# 多模态模型视觉描述\n\n模型限流导致待重试。',
+      wikiCompiledAt: Date.now(),
+    });
+    await db.entries.update(asset.entryId!, {
+      processed: true,
+      content: '当前多模态模型视觉描述服务因限流暂时无法提供可靠描述，需等待服务恢复后重新尝试。',
+      derivedEntities: [noisy.id],
+    });
+
+    const recovered = await resetInvalidCompiledVisionAssets();
+    const updated = await db.rawAssets.get(asset.id);
+    const entry = await db.entries.get(asset.entryId!);
+    const updatedNoisy = await db.entities.get(noisy.id);
+
+    expect(recovered).toBe(1);
+    expect(updated?.status).toBe('failed');
+    expect(updated?.error).toContain('无效');
+    expect(entry?.processed).toBe(false);
+    expect(updatedNoisy?.wikiMarkdown).toContain('mywiki:superseded');
   });
 
   it('recovers stale compiling raw assets so they can be retried', async () => {

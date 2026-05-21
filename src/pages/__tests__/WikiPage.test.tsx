@@ -3,9 +3,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createEntity, createEntry, db, resetDatabase } from '@/lib/db';
 import { publishWikiBatchCompileStatus } from '@/lib/wiki/batchCompileStatus';
 import { getBrowserWikiBatchRecompilePromise } from '@/lib/wiki/batchRecompileQueue';
-import { BrowserIndexedDbWikiPage } from '../WikiPage';
+import { RuntimeWikiPage } from '../WikiPage';
 
-describe('BrowserIndexedDbWikiPage', () => {
+describe('RuntimeWikiPage', () => {
   beforeEach(async () => {
     await getBrowserWikiBatchRecompilePromise()?.catch(() => undefined);
     window.localStorage.clear();
@@ -42,7 +42,7 @@ describe('BrowserIndexedDbWikiPage', () => {
       wikiCompileModel: 'minimax-cn:MiniMax-M2.7',
     });
 
-    render(<BrowserIndexedDbWikiPage />);
+    render(<RuntimeWikiPage />);
 
     await waitFor(() => {
       expect(screen.getAllByText('旧标题').length).toBeGreaterThan(0);
@@ -93,7 +93,7 @@ describe('BrowserIndexedDbWikiPage', () => {
       tags: ['项目', '待编译'],
     });
 
-    render(<BrowserIndexedDbWikiPage />);
+    render(<RuntimeWikiPage />);
 
     await waitFor(() => {
       expect(screen.getAllByText('未编译项目页').length).toBeGreaterThan(0);
@@ -135,7 +135,7 @@ describe('BrowserIndexedDbWikiPage', () => {
       ].join('\n'),
     });
 
-    render(<BrowserIndexedDbWikiPage />);
+    render(<RuntimeWikiPage />);
 
     await waitFor(() => {
       expect(screen.getAllByText('查询洞察：卡兹克是谁？').length).toBeGreaterThan(0);
@@ -200,7 +200,7 @@ describe('BrowserIndexedDbWikiPage', () => {
       ].join('\n'),
     });
 
-    render(<BrowserIndexedDbWikiPage />);
+    render(<RuntimeWikiPage />);
 
     await waitFor(() => {
       expect(screen.getAllByText('查询洞察：前面的问题').length).toBeGreaterThan(0);
@@ -240,7 +240,7 @@ describe('BrowserIndexedDbWikiPage', () => {
       tags: ['alpha'],
     });
 
-    render(<BrowserIndexedDbWikiPage />);
+    render(<RuntimeWikiPage />);
 
     await screen.findAllByText('Alpha Topic');
     const entityButton = screen.getAllByRole('button').find((button) => button.textContent?.includes('Alpha Topic'));
@@ -264,7 +264,7 @@ describe('BrowserIndexedDbWikiPage', () => {
       tags: ['concept'],
     });
 
-    render(<BrowserIndexedDbWikiPage />);
+    render(<RuntimeWikiPage />);
 
     await screen.findAllByText('本地优先存储');
     const leftTree = screen.getByText('知识树').closest('main');
@@ -297,7 +297,7 @@ describe('BrowserIndexedDbWikiPage', () => {
       ].join('\n'),
     });
 
-    render(<BrowserIndexedDbWikiPage />);
+    render(<RuntimeWikiPage />);
 
     await screen.findAllByText('出版业');
     const leftTree = screen.getByText('知识树').closest('main');
@@ -337,7 +337,7 @@ describe('BrowserIndexedDbWikiPage', () => {
       summary: '没有来源，不应参与批量生成。',
     });
 
-    render(<BrowserIndexedDbWikiPage />);
+    render(<RuntimeWikiPage />);
 
     await screen.findAllByText('未生成项目');
     fireEvent.click(await screen.findByRole('button', { name: '批量生成/更新wiki页' }));
@@ -373,7 +373,7 @@ describe('BrowserIndexedDbWikiPage', () => {
     await db.entities.update(first.id, compiledPatch);
     await db.entities.update(second.id, compiledPatch);
 
-    render(<BrowserIndexedDbWikiPage />);
+    render(<RuntimeWikiPage />);
 
     await screen.findAllByText('已生成项目 A');
     await screen.findAllByText('已生成概念 B');
@@ -393,7 +393,7 @@ describe('BrowserIndexedDbWikiPage', () => {
       tags: ['concept'],
     });
 
-    render(<BrowserIndexedDbWikiPage />);
+    render(<RuntimeWikiPage />);
 
     await screen.findAllByText('可删除知识页');
     fireEvent.click(screen.getByLabelText('删除知识页 可删除知识页'));
@@ -417,7 +417,7 @@ describe('BrowserIndexedDbWikiPage', () => {
       tags: ['concept'],
     });
 
-    render(<BrowserIndexedDbWikiPage />);
+    render(<RuntimeWikiPage />);
 
     await screen.findByText('概念页 A');
     fireEvent.click(screen.getByLabelText('删除 概念 分组知识页'));
@@ -446,7 +446,7 @@ describe('BrowserIndexedDbWikiPage', () => {
       sourceEntries: [entry.id],
     });
 
-    render(<BrowserIndexedDbWikiPage />);
+    render(<RuntimeWikiPage />);
 
     await screen.findByText('source-note.md');
     fireEvent.click(screen.getByLabelText('删除原始材料 source-note.md'));
@@ -459,7 +459,7 @@ describe('BrowserIndexedDbWikiPage', () => {
   });
 
   it('imports a single raw file from the wiki source column without using backup restore', async () => {
-    render(<BrowserIndexedDbWikiPage />);
+    render(<RuntimeWikiPage />);
 
     const file = new File(['# 单文件导入\n\n这是一份原始材料。'], 'single-import.md', { type: 'text/markdown' });
     fireEvent.change(screen.getByTestId('raw-file-import-input'), { target: { files: [file] } });
@@ -514,7 +514,7 @@ describe('BrowserIndexedDbWikiPage', () => {
       ].join('\n'),
     });
 
-    render(<BrowserIndexedDbWikiPage />);
+    render(<RuntimeWikiPage />);
 
     fireEvent.click(await screen.findByText('Primary Topic'));
 
@@ -546,7 +546,7 @@ describe('BrowserIndexedDbWikiPage', () => {
     try {
       window.history.pushState(null, '', `/wiki?source=${encodeURIComponent(sourceEntry.id)}`);
 
-      render(<BrowserIndexedDbWikiPage />);
+      render(<RuntimeWikiPage />);
 
       await screen.findByText('query-param-source.md');
       const rightPanel = document.querySelectorAll('aside')[1];
@@ -591,7 +591,7 @@ describe('BrowserIndexedDbWikiPage', () => {
       ].join('\n'),
     });
 
-    render(<BrowserIndexedDbWikiPage />);
+    render(<RuntimeWikiPage />);
 
     fireEvent.click(await screen.findByText('李俊杰'));
     const rightPanel = document.querySelectorAll('aside')[1];
@@ -636,7 +636,7 @@ describe('BrowserIndexedDbWikiPage', () => {
       });
     });
 
-    render(<BrowserIndexedDbWikiPage />);
+    render(<RuntimeWikiPage />);
 
     const knowledgePanel = (await screen.findByText('知识树')).closest('main');
     expect(knowledgePanel).toBeTruthy();
@@ -677,7 +677,7 @@ describe('BrowserIndexedDbWikiPage', () => {
       updatedAt: now,
     });
 
-    render(<BrowserIndexedDbWikiPage />);
+    render(<RuntimeWikiPage />);
 
     const batchButton = await screen.findByRole('button', { name: /批量生成\/更新中 41%|批量生成\/更新wiki页/ });
     await waitFor(() => {

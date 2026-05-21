@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createLocalCaptureDraft } from '@/lib/capture';
 import type { db as dbType, resetDatabase as resetDatabaseType } from '@/lib/db';
 import type { RawAsset } from '@/types';
 
 const workspaceFiles = new Map<string, string>();
+let workspaceBinaryWriteError: Error | null = null;
+let workspaceTextWriteError: Error | null = null;
 
 type DbModule = {
   db: typeof dbType;
@@ -24,6 +27,8 @@ describe('raw asset queue reconciliation', () => {
   beforeEach(async () => {
     vi.resetModules();
     workspaceFiles.clear();
+    workspaceBinaryWriteError = null;
+    workspaceTextWriteError = null;
     window.localStorage.clear();
 
     vi.doMock('@/lib/workspace', async () => {
@@ -36,9 +41,13 @@ describe('raw asset queue reconciliation', () => {
           exists: async (path: string) => workspaceFiles.has(path),
           readTextFile: async (path: string) => workspaceFiles.get(path) ?? '',
           writeTextFile: async (path: string, content: string) => {
+            if (workspaceTextWriteError) throw workspaceTextWriteError;
             workspaceFiles.set(path, content);
           },
-          writeBinaryFile: async () => undefined,
+          writeBinaryFile: async (path: string, content: string) => {
+            if (workspaceBinaryWriteError) throw workspaceBinaryWriteError;
+            workspaceFiles.set(path, content);
+          },
           listFiles: async () => [],
           listMarkdownFiles: async () => [],
           deletePath: async () => undefined,
@@ -143,6 +152,30 @@ describe('raw asset queue reconciliation', () => {
     expect(capturedSignal?.aborted).toBe(true);
     expect(stored?.status).toBe('cancelled');
     expect(queue?.tasks.find((task) => task.rawAssetId === asset.id)).toMatchObject({ status: 'cancelled' });
+  });
+
+  it('fails raw file import visibly when the workspace source copy cannot be written', async () => {
+    workspaceBinaryWriteError = new Error('disk is read-only');
+
+    await expect(createRawAssetFromFile(new File(['cannot persist'], 'readonly.md', { type: 'text/markdown' }))).rejects.toThrow(
+      '原文件写入工作区失败',
+    );
+
+    expect(await db.rawAssets.count()).toBe(0);
+    expect(await db.entries.count()).toBe(0);
+  });
+
+  it('fails queue processing visibly when the persisted workspace queue cannot be updated', async () => {
+    const { asset } = await createRawAssetFromFile(new File(['queue write failure'], 'queue-failure.md', { type: 'text/markdown' }));
+    workspaceTextWriteError = new Error('queue file is locked');
+
+    await expect(
+      processRawAssetQueue({
+        extractor: async (content) => ({ draft: createLocalCaptureDraft(content) }),
+      }),
+    ).rejects.toThrow('queue file is locked');
+
+    expect((await db.rawAssets.get(asset.id))?.status).toBe('raw');
   });
 });
 

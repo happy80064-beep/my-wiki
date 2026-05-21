@@ -7,10 +7,11 @@ use std::{
 };
 mod import_extract;
 use base64::{engine::general_purpose, Engine as _};
+use futures_util::StreamExt;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, WebviewWindow,
+    Emitter, Manager, WebviewWindow,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -46,6 +47,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             http_post_json,
+            http_post_json_stream,
             open_external_url,
             import_extract::import_extract_text,
             import_extract::import_extract_url,
@@ -77,6 +79,17 @@ struct HttpJsonResponse {
     body: String,
 }
 
+#[derive(serde::Serialize, Clone)]
+#[serde(tag = "type")]
+enum HttpJsonStreamEvent {
+    #[serde(rename = "chunk")]
+    Chunk { text: String },
+    #[serde(rename = "done")]
+    Done { status: u16, ok: bool, body: String },
+    #[serde(rename = "error")]
+    Error { error: String },
+}
+
 #[tauri::command]
 async fn http_post_json(request: HttpJsonRequest) -> Result<HttpJsonResponse, String> {
     let url = request.url.trim();
@@ -103,6 +116,71 @@ async fn http_post_json(request: HttpJsonRequest) -> Result<HttpJsonResponse, St
         ok: status.is_success(),
         body,
     })
+}
+
+#[tauri::command]
+async fn http_post_json_stream(
+    app: tauri::AppHandle,
+    stream_id: String,
+    request: HttpJsonRequest,
+) -> Result<HttpJsonResponse, String> {
+    let url = request.url.trim();
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("Only HTTP(S) URLs are supported.".to_string());
+    }
+
+    let event_name = format!("http-post-json-stream://{}", stream_id);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(600))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let mut builder = client.post(url).json(&request.body);
+
+    for (key, value) in request.headers.unwrap_or_default() {
+        builder = builder.header(key, value);
+    }
+
+    let response = match builder.send().await {
+        Ok(response) => response,
+        Err(error) => {
+            let message = error.to_string();
+            let _ = app.emit(&event_name, HttpJsonStreamEvent::Error { error: message.clone() });
+            return Err(message);
+        }
+    };
+    let status = response.status();
+    let mut body = String::new();
+    let mut stream = response.bytes_stream();
+
+    while let Some(next) = stream.next().await {
+        match next {
+            Ok(bytes) => {
+                let text = String::from_utf8_lossy(&bytes).to_string();
+                body.push_str(&text);
+                let _ = app.emit(&event_name, HttpJsonStreamEvent::Chunk { text });
+            }
+            Err(error) => {
+                let message = error.to_string();
+                let _ = app.emit(&event_name, HttpJsonStreamEvent::Error { error: message.clone() });
+                return Err(message);
+            }
+        }
+    }
+
+    let result = HttpJsonResponse {
+        status: status.as_u16(),
+        ok: status.is_success(),
+        body,
+    };
+    let _ = app.emit(
+        &event_name,
+        HttpJsonStreamEvent::Done {
+            status: result.status,
+            ok: result.ok,
+            body: result.body.clone(),
+        },
+    );
+    Ok(result)
 }
 
 #[tauri::command]

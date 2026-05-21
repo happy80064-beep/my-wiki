@@ -4,6 +4,7 @@ import {
   buildWikiPageReferences,
 } from './chatHelpers';
 import { buildWikiRagEvidenceTrace } from './evidenceReport';
+import { describeQueryMode, type QueryMode } from './queryMode';
 import { queryUnderstandingForPrompt, type QueryUnderstanding } from './queryUnderstanding';
 import type { RetrievedWikiPage } from './wikiRetrieval';
 import type { QueryAnswerResponse } from './queryAnswer';
@@ -16,7 +17,9 @@ export type QueryPipelineTiming = {
 export function buildWikiRagBaseResult(input: {
   retrievedPages: RetrievedWikiPage[];
   queryUnderstanding: QueryUnderstanding;
+  queryMode?: QueryMode;
   retrievalTrace: string[];
+  workspaceTrace?: string[];
   retrievalUsedConversation: boolean;
   timing: QueryPipelineTiming;
   formatDuration: (ms: number) => string;
@@ -36,6 +39,24 @@ export function buildWikiRagBaseResult(input: {
         label: 'Wiki 页面检索',
         detail: `${input.retrievalUsedConversation ? '已结合最近对话补全检索语义。' : ''}${input.retrievalTrace.join(' ')} 耗时：${input.formatDuration(input.timing.retrievalMs)}。`,
       },
+      ...(input.queryMode
+        ? [
+            {
+              layer: 'intent' as const,
+              label: '查询模式',
+              detail: describeQueryMode(input.queryMode),
+            },
+          ]
+        : []),
+      ...(input.workspaceTrace?.length
+        ? [
+            {
+              layer: 'context' as const,
+              label: '工作区上下文',
+              detail: input.workspaceTrace.join(' '),
+            },
+          ]
+        : []),
       {
         layer: 'intent',
         label: '查询理解',
@@ -56,7 +77,9 @@ export function buildWikiRagBaseResult(input: {
 export function buildWikiRagNoContextResult(input: {
   question: string;
   queryUnderstanding: QueryUnderstanding;
+  queryMode?: QueryMode;
   retrievalTrace: string[];
+  workspaceTrace?: string[];
   retrievalUsedConversation: boolean;
   timing: Pick<QueryPipelineTiming, 'retrievalMs'>;
   formatDuration: (ms: number) => string;
@@ -75,6 +98,24 @@ export function buildWikiRagNoContextResult(input: {
         label: 'Wiki 页面检索',
         detail: `${input.retrievalUsedConversation ? '已结合最近对话补全检索语义。' : ''}${input.retrievalTrace.join(' ')} 耗时：${input.formatDuration(input.timing.retrievalMs)}。`,
       },
+      ...(input.queryMode
+        ? [
+            {
+              layer: 'intent' as const,
+              label: '查询模式',
+              detail: describeQueryMode(input.queryMode),
+            },
+          ]
+        : []),
+      ...(input.workspaceTrace?.length
+        ? [
+            {
+              layer: 'context' as const,
+              label: '工作区上下文',
+              detail: input.workspaceTrace.join(' '),
+            },
+          ]
+        : []),
       {
         layer: 'intent',
         label: '查询理解',

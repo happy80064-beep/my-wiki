@@ -180,6 +180,69 @@ describe('wiki retrieval', () => {
 
     expect(context.pages.map((page) => page.title)).toContain('集宁区中蒙医院');
   });
+
+  it('adds secondary graph expansion by shared sources and wiki link affinity', () => {
+    const project = makeEntity({
+      id: 'project_1',
+      type: 'project',
+      title: '福瑞健康科技园三期项目',
+      summary: '福瑞健康科技园三期医康旅项目。',
+      wikiMarkdown: [
+        '---',
+        'type: project',
+        'title: 福瑞健康科技园三期项目',
+        'sources: [可研报告]',
+        'related: [集宁区中蒙医院]',
+        '---',
+        '# 福瑞健康科技园三期项目',
+        '福瑞健康科技园三期包含医疗和康养板块。',
+      ].join('\n'),
+    });
+    const sourceSibling = makeEntity({
+      id: 'project_2',
+      type: 'project',
+      title: '前序园区',
+      summary: '前序项目。',
+      wikiMarkdown: [
+        '---',
+        'type: project',
+        'title: 前序园区',
+        'sources: [可研报告]',
+        '---',
+        '# 前序园区',
+        '一二期项目是前序基础。',
+      ].join('\n'),
+    });
+    const hospital = makeEntity({
+      id: 'entity_1',
+      type: 'person',
+      title: '集宁区中蒙医院',
+      summary: '合作医院。',
+      wikiMarkdown: '# 集宁区中蒙医院\n\n参与合作服务。',
+    });
+    const wikiIndex: WikiIndexEntry[] = [project, sourceSibling, hospital].map((entity) => ({
+      entityId: entity.id,
+      type: entity.type,
+      title: entity.title,
+      aliases: [entity.title],
+      shortSummary: entity.summary,
+      importance: 10,
+      sourceCount: 1,
+      relationshipCount: 0,
+      updatedAt: entity.updatedAt,
+    }));
+
+    const context = retrieveQueryContextFromEntities('福瑞健康科技园三期医疗业态', [project, sourceSibling, hospital], [], wikiIndex, {
+      limit: 3,
+      enableGraphExpansion: true,
+    });
+
+    expect(context.pages.map((page) => page.title)).toContain('前序园区');
+    expect(context.pages.map((page) => page.title)).toContain('集宁区中蒙医院');
+    expect(context.pages.flatMap((page) => page.matchedTerms)).toEqual(
+      expect.arrayContaining(['图谱扩展:来源重叠', '图谱扩展:Wiki链接']),
+    );
+  });
   it('ignores superseded wiki content when retrieving query context', () => {
     const project = makeEntity({
       id: 'project_superseded',
@@ -217,5 +280,46 @@ describe('wiki retrieval', () => {
     expect(oldContext.pages[0]?.content ?? '').not.toContain('12 万平方米');
     expect(newContext.pages[0]?.content).toContain('14.2 万平方米');
     expect(newContext.pages[0]?.content).not.toContain('12 万平方米');
+  });
+
+  it('does not revive a fully superseded page through structured facts', () => {
+    const noisy = makeEntity({
+      id: 'topic_old_vision_noise',
+      type: 'topic',
+      title: '多模态模型视觉描述',
+      summary: '模型限流导致待重试。',
+      tags: ['多模态', '模型限流'],
+      wikiMarkdown: [
+        '<!-- mywiki:superseded reason="invalid-vision-compile" supersededAt="2026-05-21T00:00:00.000Z" -->',
+        '# 多模态模型视觉描述',
+        '~~模型限流导致待重试。~~',
+        '<!-- /mywiki:superseded -->',
+      ].join('\n'),
+      compiledProfile: {
+        overview: '模型限流导致待重试。',
+        keyFacts: ['图片 OCR 碎片化。'],
+        openTasks: [],
+        relationshipSummary: [],
+        sourceSummary: '旧版错误图片编译结果。',
+        updatedAt: Date.now(),
+      },
+    });
+    const wikiIndex: WikiIndexEntry[] = [
+      {
+        entityId: noisy.id,
+        type: noisy.type,
+        title: noisy.title,
+        aliases: [noisy.title],
+        shortSummary: noisy.summary,
+        importance: 10,
+        sourceCount: 1,
+        relationshipCount: 0,
+        updatedAt: noisy.updatedAt,
+      },
+    ];
+
+    const context = retrieveQueryContextFromEntities('模型限流 OCR 碎片化', [noisy], [], wikiIndex);
+
+    expect(context.pages).toHaveLength(0);
   });
 });

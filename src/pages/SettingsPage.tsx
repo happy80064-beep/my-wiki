@@ -20,6 +20,7 @@ import {
   type LlmApiMode,
   type LlmProviderConfig,
   type LlmProviderId,
+  type LlmReasoningMode,
   type ModelCapability,
   type ModelRoleId,
 } from '@/lib/llm/providers';
@@ -444,6 +445,62 @@ function roleSupportGrid(config: LlmProviderConfig) {
   );
 }
 
+const reasoningModes: Array<{ value: LlmReasoningMode; label: string }> = [
+  { value: 'auto', label: '自动' },
+  { value: 'disabled', label: '关闭' },
+  { value: 'low', label: '低' },
+  { value: 'medium', label: '中' },
+  { value: 'high', label: '高' },
+  { value: 'max', label: '最高' },
+  { value: 'custom', label: '自定义' },
+];
+
+function renderReasoningControls(
+  config: LlmProviderConfig,
+  providerLabel: string,
+  onChange: (patch: Partial<LlmProviderConfig>) => void,
+) {
+  const mode = config.reasoningMode ?? 'auto';
+  return (
+    <div className="grid gap-2">
+      <div className="flex flex-wrap gap-2">
+        {reasoningModes.map((item) => (
+          <button
+            key={item.value}
+            type="button"
+            aria-label={`${providerLabel} Thinking / Reasoning ${item.label}`}
+            className={[
+              'rounded-full border px-3 py-1.5 text-xs font-medium',
+              mode === item.value ? 'border-[#155eef] bg-[#155eef] text-white' : 'border-[#d9d9d6] text-[#626965]',
+            ].join(' ')}
+            onClick={() => onChange({ reasoningMode: item.value })}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+      {mode === 'custom' ? (
+        <input
+          className="h-10 w-full max-w-[180px] rounded-[8px] border border-[#d9d9d6] px-3 text-sm outline-none focus:border-[#155eef]"
+          aria-label="自定义 thinking token 预算"
+          type="number"
+          min={0}
+          step={512}
+          value={config.reasoningBudgetTokens ?? ''}
+          onChange={(event) => {
+            const value = Number(event.target.value);
+            onChange({ reasoningBudgetTokens: Number.isFinite(value) ? Math.max(0, value) : undefined });
+          }}
+          placeholder="2048"
+        />
+      ) : null}
+      <p className="text-xs leading-5 text-[#626965]">
+        自动：沿用模型默认；关闭：结构化入库、Wiki 编译、Lint 会优先使用，避免只返回 thinking 没有正文；高/最高适合开放查询。
+      </p>
+    </div>
+  );
+}
+
 function renderModelOptionButton(config: LlmProviderConfig, modelId: string, onChange: (patch: Partial<LlmProviderConfig>) => void) {
   return (
     <button
@@ -624,6 +681,10 @@ function ProviderCard({
               value={config.contextWindow}
               onChange={(event) => onChange({ contextWindow: Number(event.target.value) })}
             />
+          </ConfigField>
+
+          <ConfigField label="Thinking / Reasoning">
+            {renderReasoningControls(config, preset.label, onChange)}
           </ConfigField>
         </div>
       ) : null}

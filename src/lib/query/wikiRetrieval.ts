@@ -119,6 +119,7 @@ export async function retrieveQueryContext(
   options: {
     limit?: number;
     maxContextChars?: number;
+    enableGraphExpansion?: boolean;
   } = {},
 ): Promise<RetrievedQueryContext> {
   const [entities, relationships, wikiIndex] = await Promise.all([
@@ -138,6 +139,7 @@ export function retrieveQueryContextFromEntities(
   options: {
     limit?: number;
     maxContextChars?: number;
+    enableGraphExpansion?: boolean;
   } = {},
 ): RetrievedQueryContext {
   const tokens = tokenizeQuery(question);
@@ -145,7 +147,8 @@ export function retrieveQueryContextFromEntities(
   const budget = computeContextBudget(options.maxContextChars);
   const searchablePages = entities
     .filter((entity) => !(entity.type === 'topic' && entity.tags.includes('query-insight')))
-    .map((entity) => buildSearchableWikiPage(entity));
+    .map((entity) => buildSearchableWikiPage(entity))
+    .filter((page) => page.markdown || page.body);
 
   const scoredPages = searchablePages
     .map((page) => {
@@ -158,7 +161,8 @@ export function retrieveQueryContextFromEntities(
   const pageLimit = options.limit ?? DEFAULT_PAGE_LIMIT;
   const primary = scoredPages.slice(0, Math.max(PRIMARY_CANDIDATE_LIMIT, pageLimit + 4));
   const relationshipMap = buildRelationshipMap(relationships);
-  const expanded = expandRetrievedPages(primary, searchablePages, relationshipMap);
+  const enableGraphExpansion = options.enableGraphExpansion ?? true;
+  const expanded = enableGraphExpansion ? expandRetrievedPages(primary, searchablePages, relationshipMap) : [];
   const merged = mergeRetrievedPages(primary, expanded);
 
   const selectedPages: RetrievedWikiPage[] = [];
@@ -202,6 +206,9 @@ export function retrieveQueryContextFromEntities(
     trace: [
       `问题分词：${tokens.join('、') || '（无）'}`,
       `Wiki 候选页：${scoredPages.length} 个，实际选入上下文 ${selectedPages.length} 个。`,
+      enableGraphExpansion
+        ? `图谱扩展：已从主候选的一跳关系补充 ${expanded.length} 个候选。`
+        : '图谱扩展：本轮为精准事实查询，未启用一跳关系扩展。',
       selectedPages.length > 0
         ? `上下文页面：${selectedPages.map((page) => `[${page.index}] ${page.title}`).join('；')}`
         : '没有选中可用的 Wiki 页面。',
@@ -218,7 +225,7 @@ function buildSearchableWikiPage(entity: Entity): SearchableWikiPage {
   const type = normalizePageType(metadata.type) ?? fallbackTarget.type;
   const target = inferWikiTargetSpec(entity, { preferredType: type });
   const summary = metadata.description || entity.compiledProfile?.overview || entity.summary || extractLead(metadata.body);
-  const body = [metadata.body.trim() || markdown, buildStructuredFactBlock(entity)].filter(Boolean).join('\n\n');
+  const body = [metadata.body.trim() || markdown, markdown ? buildStructuredFactBlock(entity) : ''].filter(Boolean).join('\n\n');
   const aliases = Array.from(
     new Set(
       [
@@ -373,25 +380,103 @@ function expandRetrievedPages(
   relationshipMap: Map<string, string[]>,
 ) {
   const pageById = new Map(allPages.map((page) => [page.entity.id, page]));
-  const expansions: SearchableWikiPage[] = [];
-  const seen = new Set(primary.map((page) => page.entity.id));
+  const expansions = new Map<string, SearchableWikiPage>();
+  const primaryIds = new Set(primary.map((page) => page.entity.id));
 
   primary.slice(0, 4).forEach((page, index) => {
     const relatedIds = relationshipMap.get(page.entity.id) ?? [];
     relatedIds.slice(0, 5).forEach((relatedId, relatedIndex) => {
-      if (seen.has(relatedId)) return;
+      if (primaryIds.has(relatedId)) return;
       const relatedPage = pageById.get(relatedId);
       if (!relatedPage) return;
-      seen.add(relatedId);
-      expansions.push({
-        ...relatedPage,
+      upsertExpansion(expansions, relatedPage, {
         score: page.score * 0.35 - index * 3 - relatedIndex,
-        matchedTerms: page.matchedTerms,
+        matchedTerms: [...page.matchedTerms, '图谱扩展:一跳关系'],
+      });
+    });
+
+    allPages.forEach((candidate, candidateIndex) => {
+      if (primaryIds.has(candidate.entity.id) || candidate.entity.id === page.entity.id) return;
+      const expansion = scoreSecondaryGraphExpansion(page, candidate, relationshipMap);
+      if (expansion.score <= 0) return;
+      upsertExpansion(expansions, candidate, {
+        score: page.score * expansion.weight - index * 3 - Math.min(candidateIndex, 20) * 0.1 + expansion.score,
+        matchedTerms: [...page.matchedTerms, ...expansion.reasons.map((reason) => `图谱扩展:${reason}`)],
       });
     });
   });
 
-  return expansions.sort((left, right) => right.score - left.score);
+  return [...expansions.values()].sort((left, right) => right.score - left.score);
+}
+
+function upsertExpansion(
+  expansions: Map<string, SearchableWikiPage>,
+  page: SearchableWikiPage,
+  input: { score: number; matchedTerms: string[] },
+) {
+  const existing = expansions.get(page.entity.id);
+  if (existing && existing.score >= input.score) return;
+  expansions.set(page.entity.id, {
+    ...page,
+    score: input.score,
+    matchedTerms: input.matchedTerms,
+  });
+}
+
+function scoreSecondaryGraphExpansion(
+  primary: SearchableWikiPage,
+  candidate: SearchableWikiPage,
+  relationshipMap: Map<string, string[]>,
+) {
+  const reasons: string[] = [];
+  let score = 0;
+  let weight = 0;
+
+  const sharedSources = intersectCount(primary.sources, candidate.sources);
+  if (sharedSources > 0) {
+    reasons.push('来源重叠');
+    score += sharedSources * 8;
+    weight = Math.max(weight, 0.24);
+  }
+
+  if (hasWikiLinkAffinity(primary, candidate)) {
+    reasons.push('Wiki链接');
+    score += 12;
+    weight = Math.max(weight, 0.28);
+  }
+
+  const commonNeighbors = intersectCount(
+    relationshipMap.get(primary.entity.id) ?? [],
+    relationshipMap.get(candidate.entity.id) ?? [],
+  );
+  if (commonNeighbors > 0) {
+    reasons.push('共同邻居');
+    score += commonNeighbors * 5;
+    weight = Math.max(weight, 0.18);
+  }
+
+  const sharedTags = intersectCount(primary.tags, candidate.tags);
+  const sharedRelated = intersectCount(primary.related, candidate.related);
+  if (primary.type === candidate.type && sharedTags + sharedRelated > 0) {
+    reasons.push('类型亲和');
+    score += (sharedTags + sharedRelated) * 4;
+    weight = Math.max(weight, 0.12);
+  }
+
+  return { score, weight, reasons };
+}
+
+function hasWikiLinkAffinity(left: SearchableWikiPage, right: SearchableWikiPage) {
+  const leftRefs = new Set([...left.related, ...left.aliases].map(normalizeText).filter(Boolean));
+  const rightRefs = new Set([...right.related, ...right.aliases].map(normalizeText).filter(Boolean));
+  const leftTitle = normalizeText(left.title);
+  const rightTitle = normalizeText(right.title);
+  return leftRefs.has(rightTitle) || rightRefs.has(leftTitle);
+}
+
+function intersectCount(left: string[], right: string[]) {
+  const rightSet = new Set(right.map(normalizeText).filter(Boolean));
+  return left.map(normalizeText).filter((value) => value && rightSet.has(value)).length;
 }
 
 function mergeRetrievedPages(primary: SearchableWikiPage[], expanded: SearchableWikiPage[]) {

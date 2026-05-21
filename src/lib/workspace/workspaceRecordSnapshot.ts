@@ -14,9 +14,9 @@ import type {
   WikiReviewRecord,
 } from '@/types';
 
-export const workspaceIndexedDbSnapshotFileName = 'indexeddb-snapshot.json';
+export const workspaceRecordSnapshotFileName = 'records-snapshot.json';
 
-export type WorkspaceIndexedDbSnapshot = {
+export type WorkspaceRecordSnapshot = {
   version: 1;
   createdAt: number;
   records: {
@@ -39,7 +39,7 @@ type RawAssetSnapshot = Omit<RawAsset, 'blob'> & {
   blobBase64?: string;
 };
 
-export async function buildIndexedDbSnapshot(): Promise<WorkspaceIndexedDbSnapshot> {
+export async function buildWorkspaceRecordSnapshot(): Promise<WorkspaceRecordSnapshot> {
   const [
     entries,
     entities,
@@ -88,7 +88,7 @@ export async function buildIndexedDbSnapshot(): Promise<WorkspaceIndexedDbSnapsh
   };
 }
 
-export async function restoreIndexedDbSnapshot(snapshot: WorkspaceIndexedDbSnapshot) {
+export async function restoreWorkspaceRecordSnapshot(snapshot: WorkspaceRecordSnapshot) {
   if (snapshot.version !== 1) {
     throw new Error(`不支持的知识库快照版本：${snapshot.version}`);
   }
@@ -147,7 +147,7 @@ export async function restoreIndexedDbSnapshot(snapshot: WorkspaceIndexedDbSnaps
   );
 }
 
-export function countIndexedDbSnapshotRecords(snapshot: WorkspaceIndexedDbSnapshot) {
+export function countWorkspaceRecordSnapshotRecords(snapshot: WorkspaceRecordSnapshot) {
   return {
     entries: snapshot.records.entries.length,
     entities: snapshot.records.entities.length,
@@ -161,11 +161,11 @@ export function countIndexedDbSnapshotRecords(snapshot: WorkspaceIndexedDbSnapsh
   };
 }
 
-function assertWorkspaceIndexedDbSnapshot(value: unknown): WorkspaceIndexedDbSnapshot {
+function assertWorkspaceRecordSnapshot(value: unknown): WorkspaceRecordSnapshot {
   if (!value || typeof value !== 'object') {
     throw new Error('知识库快照格式无效。');
   }
-  const snapshot = value as WorkspaceIndexedDbSnapshot;
+  const snapshot = value as WorkspaceRecordSnapshot;
   if (snapshot.version !== 1 || !snapshot.records || typeof snapshot.records !== 'object') {
     throw new Error('知识库快照格式无效。');
   }
@@ -189,8 +189,8 @@ function assertWorkspaceIndexedDbSnapshot(value: unknown): WorkspaceIndexedDbSna
   };
 }
 
-export function parseWorkspaceIndexedDbSnapshotJson(json: string) {
-  return assertWorkspaceIndexedDbSnapshot(JSON.parse(json));
+export function parseWorkspaceRecordSnapshotJson(json: string) {
+  return assertWorkspaceRecordSnapshot(JSON.parse(json));
 }
 
 function asArray<T>(value: unknown): T[] {

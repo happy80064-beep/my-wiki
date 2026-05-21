@@ -60,11 +60,12 @@ export async function runTopicAutoAggregation(
     db.relationships.toArray(),
   ]);
   const seeds = seedEntities.filter((entity): entity is Entity => Boolean(entity));
-  if (seeds.length === 0) {
+  const knowledgeSeeds = seeds.filter((entity) => !isSourceOnlyEntity(entity));
+  if (knowledgeSeeds.length === 0) {
     return { topicIds: [], createdTopics: 0, updatedTopics: 0, linkedRelationships: [] };
   }
 
-  const candidates = rankTopicCandidates(seeds);
+  const candidates = rankTopicCandidates(knowledgeSeeds);
   const topics: Entity[] = allEntities.filter((entity) => entity.type === 'topic');
   const relationships = [...allRelationships];
   const result: TopicAutoAggregationResult = {
@@ -86,7 +87,7 @@ export async function runTopicAutoAggregation(
     }
     result.topicIds.push(topic.id);
 
-    const sourceEntity = seeds.find((entity) => entity.id === candidate.sourceEntityId);
+    const sourceEntity = knowledgeSeeds.find((entity) => entity.id === candidate.sourceEntityId);
     if (!sourceEntity || sourceEntity.id === topic.id) continue;
     const relationship = await upsertTopicRelationship(topic.id, sourceEntity.id, entryId, relationships);
     relationships.push(relationship);
@@ -212,6 +213,21 @@ function normalizeTopicTerm(value: string) {
     .toLowerCase()
     .replace(/[^\u4e00-\u9fa5a-z0-9]/g, '')
     .trim();
+}
+
+function isSourceOnlyEntity(entity: Pick<Entity, 'tags' | 'wikiMarkdown'>) {
+  if (/^---[\s\S]*?\btype:\s*["']?source["']?\b/im.test(entity.wikiMarkdown ?? '')) return true;
+  return entity.tags.some((tag) => {
+    const normalized = tag.trim().toLowerCase();
+    return (
+      normalized === 'source' ||
+      normalized === '来源' ||
+      normalized === '源文件' ||
+      normalized === '导入材料' ||
+      normalized === '来源文档' ||
+      normalized === 'source document'
+    );
+  });
 }
 
 function unique<T>(items: T[]) {

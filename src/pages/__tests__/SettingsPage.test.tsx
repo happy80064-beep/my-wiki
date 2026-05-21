@@ -59,4 +59,16 @@ describe('SettingsPage', () => {
     fireEvent.click(screen.getByText('Anthropic 兼容'));
     expect(endpointInput).toHaveProperty('value', 'https://proxy.example.com/minimax');
   });
+
+  it('persists provider thinking controls', () => {
+    render(<SettingsPage />);
+
+    fireEvent.click(screen.getByLabelText('展开 DeepSeek'));
+    fireEvent.click(screen.getByLabelText('DeepSeek Thinking / Reasoning 关闭'));
+
+    const saved = JSON.parse(window.localStorage.getItem('mywiki.v2.llmProviderSettings') ?? '{}');
+    expect(saved.configs.find((config: { providerId: string }) => config.providerId === 'deepseek')?.reasoningMode).toBe(
+      'disabled',
+    );
+  });
 });

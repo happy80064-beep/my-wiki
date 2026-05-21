@@ -117,6 +117,25 @@ describe('text provider bridge', () => {
     expect(request.body.response_format).toEqual({ type: 'json_object' });
   });
 
+  it('maps strict OpenAI reasoning models to max_completion_tokens and omits temperature', () => {
+    const request = buildProviderTextRequest(
+      {
+        providerId: 'openai',
+        enabled: true,
+        apiMode: 'openai-compatible',
+        endpoint: 'https://api.openai.com/v1',
+        apiKey: 'sk-openai',
+        model: 'o3-mini',
+        contextWindow: 200000,
+      },
+      baseInput,
+    );
+
+    expect(request.body.max_completion_tokens).toBe(baseInput.maxTokens);
+    expect(request.body.max_tokens).toBeUndefined();
+    expect(request.body.temperature).toBeUndefined();
+  });
+
   it('can request reasoning disabled for query-only DeepSeek-style requests', () => {
     const request = buildProviderTextRequest(
       {
@@ -166,6 +185,83 @@ describe('text provider bridge', () => {
     );
 
     expect(request.body.thinking).toBeUndefined();
+  });
+
+  it('uses provider-level reasoning mode when the caller does not override it', () => {
+    const request = buildProviderTextRequest(
+      {
+        providerId: 'deepseek',
+        enabled: true,
+        apiMode: 'openai-compatible',
+        endpoint: 'https://api.deepseek.com',
+        apiKey: 'sk-deep',
+        model: 'deepseek-v4-pro',
+        contextWindow: 200000,
+        reasoningMode: 'disabled',
+      },
+      baseInput,
+    );
+
+    expect(request.body.thinking).toEqual({ type: 'disabled' });
+  });
+
+  it('maps DeepSeek high reasoning without undocumented token-budget fields', () => {
+    const request = buildProviderTextRequest(
+      {
+        providerId: 'deepseek',
+        enabled: true,
+        apiMode: 'openai-compatible',
+        endpoint: 'https://api.deepseek.com',
+        apiKey: 'sk-deep',
+        model: 'deepseek-reasoner',
+        contextWindow: 200000,
+        reasoningMode: 'auto',
+      },
+      { ...baseInput, reasoningMode: 'high' },
+    );
+
+    expect(request.body.thinking).toEqual({ type: 'enabled' });
+    expect(request.body.reasoning_effort).toBe('high');
+    expect(request.body.max_reasoning_tokens).toBeUndefined();
+  });
+
+  it('maps Anthropic reasoning budget to extended thinking and removes temperature', () => {
+    const request = buildProviderTextRequest(
+      {
+        providerId: 'anthropic',
+        enabled: true,
+        apiMode: 'anthropic-compatible',
+        endpoint: 'https://api.anthropic.com',
+        apiKey: 'sk-anthropic',
+        model: 'claude-sonnet-4.6',
+        contextWindow: 200000,
+        reasoningMode: 'custom',
+        reasoningBudgetTokens: 2048,
+      },
+      baseInput,
+    );
+
+    expect(request.body.thinking).toEqual({ type: 'enabled', budget_tokens: 2048 });
+    expect(request.body.max_tokens).toBeGreaterThan(2048);
+    expect(request.body.temperature).toBeUndefined();
+  });
+
+  it('maps Gemini reasoning off to thinkingBudget 0', () => {
+    const request = buildProviderTextRequest(
+      {
+        providerId: 'gemini',
+        enabled: true,
+        apiMode: 'gemini-native',
+        endpoint: 'https://generativelanguage.googleapis.com',
+        apiKey: 'gem-key',
+        model: 'gemini-2.5-pro',
+        contextWindow: 200000,
+        reasoningMode: 'auto',
+      },
+      { ...baseInput, reasoningMode: 'disabled' },
+    );
+
+    expect((request.body.generationConfig as Record<string, unknown>).thinkingConfig).toEqual({ thinkingBudget: 0 });
   });
 
   it('adds forced tool calls for OpenAI-compatible structured requests', () => {

@@ -1,4 +1,5 @@
 import type { RuntimeProviderTiming } from '@/lib/llm/runtimeProvider';
+import { classifyQueryMode, queryModeForPrompt, type QueryMode } from './queryMode';
 import { queryUnderstandingForPrompt, understandQuery } from './queryUnderstanding';
 
 export type QueryAnswerPageContext = {
@@ -21,6 +22,8 @@ export type QueryAnswerRequest = {
   question: string;
   indexSummary: string;
   pages: QueryAnswerPageContext[];
+  queryMode?: QueryMode;
+  workspaceContext?: QueryWorkspaceContext;
   structuredSupport?: {
     draftAnswer?: string;
     keyHints?: string[];
@@ -41,6 +44,19 @@ export type QueryConversationContextMessage = {
   role: 'user' | 'assistant';
   content: string;
   references?: Array<{ title: string; href?: string }>;
+};
+
+export type QueryWorkspaceContext = {
+  purpose?: string;
+  index?: string;
+  files?: Array<{
+    path: string;
+    title: string;
+    kind: 'wiki' | 'source';
+    excerpt: string;
+    score: number;
+  }>;
+  trace?: string[];
 };
 
 const citedPattern = /<!--\s*cited:\s*([\d,\s，、]+)\s*-->/gi;
@@ -75,31 +91,28 @@ export function buildQueryAnswerPrompt(payload: QueryAnswerRequest) {
     : '';
   const conversationContext = buildConversationContextBlock(payload.conversationContext);
   const queryUnderstanding = queryUnderstandingForPrompt(understandQuery(payload.question));
+  const effectiveQueryMode = payload.queryMode ?? classifyQueryMode(payload.question);
+  const queryMode = queryModeForPrompt(effectiveQueryMode);
+  const workspaceContext = buildWorkspaceContextBlock(payload.workspaceContext);
+  const answerRules = buildAnswerRules(effectiveQueryMode);
 
   return [
-    '你是 MyWiki Query 2.0 的中文 Wiki 对话分析助手。',
+    '你是 MyWiki Query 3.0 的中文 Wiki 对话分析助手。',
     '',
     '你的任务：严格基于提供的编号 Wiki 页面回答用户问题。回答要像一个读过资料、能综合判断的研究助手，而不是把页面内容机械拼接出来。',
     '',
     '## 回答规则',
-    '1. 事实依据只能来自“Selected Wiki Pages / Wiki Page Context”中的编号页面；Conversation Context 只用于解析“这个项目/它/上述”等指代，不能作为事实证据。',
-    '2. 必须先直接回答问题：第一段用“**结论：** ...”给出核心判断；简单事实问题用 1-3 句话，不要扩写成背景介绍。',
-    '3. 回答风格要专业、严谨、内容精炼；避免寒暄、套话、空泛建议、重复背景和“根据资料显示”等无信息量表述。',
-    '4. 每个关键事实、数字、判断后尽量用 [1] [2] 这种页码引用。不要引用没有实际使用的页面。',
-    '5. 不要补编页面没有明示的信息。不得自行添加目标客群、坪效、价格、运营策略、市场判断、建议动作等新事实；除非用户明确要求推断，且必须标注为“谨慎推断”。',
-    '6. 用清晰的 Markdown：短段落、编号列表；只有当信息确实需要比较或矩阵时才使用表格，避免为了形式而拉长答案。',
-    '7. 对“商业模式”类问题，优先覆盖：一句话模式、核心业务模块、收入/利润来源、协同机制、关键指标、待验证事项；页面没有的信息用“当前 Wiki 不能确认”。',
-    '8. 对“风险/注意事项/未来运营”类问题，优先覆盖：风险类别、风险点、影响、紧迫性、建议动作；页面没有的信息不要扩写。',
-    '9. 明确区分“页面中已有事实”和“基于事实的谨慎推断”。不确定时说“当前 Wiki 页面还不能确认”，并指出缺少哪类信息。',
-    '10. 长度控制：查询型问题不超过 120 中文字；开放性问题通常不超过 600 中文字，除非用户要求详细报告。',
-    '11. 不输出 <think>、思考过程、JSON、代码围栏或额外说明。',
-    '12. 结尾必须追加一个 HTML 注释，格式固定为 <!-- cited: 1,2 -->，只列出真正用到的页面编号。',
+    ...answerRules,
     '',
     `## User Question\n${payload.question.trim()}`,
+    '',
+    queryMode,
     '',
     queryUnderstanding,
     '',
     conversationContext,
+    '',
+    workspaceContext,
     '',
     payload.indexSummary.trim() ? `## Relevant Index Snapshot\n${payload.indexSummary.trim()}` : '',
     '',
@@ -112,6 +125,71 @@ export function buildQueryAnswerPrompt(payload: QueryAnswerRequest) {
   ]
     .filter(Boolean)
     .join('\n');
+}
+
+function buildAnswerRules(mode: QueryMode | undefined) {
+  const common = [
+    '1. 事实依据只能来自“Selected Wiki Pages / Wiki Page Context”中的编号页面；Workspace Context 只能帮助理解知识库范围和补充候选，不能替代编号页引用。',
+    '2. Conversation Context 只用于解析“这个项目/它/上述”等指代，不能作为事实证据。',
+    '3. 每个关键事实、数字、判断后尽量用 [1] [2] 这种页码引用。不要引用没有实际使用的页面。',
+    '4. 不要补编页面没有明示的信息；需要推断时必须标注为“谨慎推断”，并说明它基于哪些已引用事实。',
+    '5. 不输出 <think>、思考过程、JSON、代码围栏或额外说明。',
+    '6. 结尾必须追加一个 HTML 注释，格式固定为 <!-- cited: 1,2 -->，只列出真正用到的页面编号。',
+    '7. 回答风格要专业、严谨、内容精炼；避免寒暄、套话、空泛建议、重复背景和“根据资料显示”等无信息量表述。',
+  ];
+
+  if (!mode || mode.kind === 'lookup') {
+    const shapeRule =
+      mode?.answerShape === 'list'
+        ? '8. 本轮是事实清单查询：用短列表回答，只列和问题直接相关的项目；不要展开成背景介绍。'
+        : mode?.answerShape === 'compact_table'
+          ? '8. 本轮是指标/对比类事实查询：优先用紧凑表格回答，列名要短；缺失值写“当前 Wiki 不能确认”。'
+          : '8. 本轮是单点事实查询：先给 1 句直接答案，必要时再补 1-2 句限定条件。';
+    return [
+      ...common,
+      shapeRule,
+      '9. 风格必须简练、直接、可核查；除非用户要求，不给建议、不做延展分析。',
+      '10. 长度控制：直接短答通常不超过 120 中文字；清单/表格只保留必要行列。',
+    ];
+  }
+
+  return [
+    ...common,
+    '8. 本轮是开放分析或混合查询：先用“**结论：** ...”给出判断，再分层说明证据、风险/机会、建议或待确认事项。',
+    '9. 可以使用结构化段落、编号列表或表格；优先提高信息密度和可执行性，不机械压缩成短答。',
+    '10. 对“商业模式”类问题，优先覆盖：一句话模式、核心业务模块、收入/利润来源、协同机制、关键指标、待验证事项；页面没有的信息用“当前 Wiki 不能确认”。',
+    '11. 对“风险/注意事项/未来运营”类问题，优先覆盖：风险类别、风险点、影响、紧迫性、建议动作；页面没有的信息不要扩写成确定事实。',
+    '12. 明确区分“页面中已有事实”和“基于事实的谨慎推断”。不确定时指出缺少哪类信息。',
+    '13. 长度控制：通常 600-1200 中文字；用户要求详细报告时可以更长，但仍要紧凑。',
+  ];
+}
+
+function buildWorkspaceContextBlock(context: QueryWorkspaceContext | undefined) {
+  if (!context) return '';
+  const sections = [
+    context.purpose?.trim() ? `### purpose.md\n${compactContextText(context.purpose, 1800)}` : '',
+    context.index?.trim() ? `### wiki/index.md\n${compactContextText(context.index, 2200)}` : '',
+    context.files?.length
+      ? [
+          '### Retrieved Workspace Markdown Candidates',
+          ...context.files.slice(0, 8).map((file, index) =>
+            [
+              `#### W${index + 1}. ${file.title}`,
+              `Path: ${file.path}`,
+              `Kind: ${file.kind}`,
+              `Score: ${Math.round(file.score)}`,
+              file.excerpt,
+            ].join('\n'),
+          ),
+        ].join('\n\n')
+      : '',
+  ].filter(Boolean);
+  if (sections.length === 0) return '';
+  return [
+    '## Workspace Context (scope and candidate material only)',
+    'Use this block to understand project scope and possible source candidates. If a fact is not present in a numbered Wiki page, do not cite it as a confirmed answer fact.',
+    ...sections,
+  ].join('\n\n');
 }
 
 export function normalizeQueryAnswerResponse(

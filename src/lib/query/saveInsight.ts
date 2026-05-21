@@ -23,7 +23,7 @@ export async function saveQueryInsight(question: string, result: StructuredQuery
     throw new Error('answer is required.');
   }
 
-  const saved = await db.transaction('rw', [db.entries, db.entities, db.relationships], async () => {
+  const saved = await db.transaction<SavedQueryInsight>('rw', [db.entries, db.entities, db.relationships], async () => {
     const now = Date.now();
     const relatedEntityIds = getRelatedEntityIds(result);
     const title = buildInsightTitle(trimmedQuestion);

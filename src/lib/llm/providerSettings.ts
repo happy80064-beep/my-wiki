@@ -45,6 +45,9 @@ export function normalizeProviderSettings(input: unknown): LlmProviderSettings {
       endpoint: typeof incoming.endpoint === 'string' ? incoming.endpoint : defaultConfig.endpoint,
       model: typeof incoming.model === 'string' ? incoming.model : defaultConfig.model,
       contextWindow: typeof incoming.contextWindow === 'number' ? incoming.contextWindow : defaultConfig.contextWindow,
+      reasoningMode: normalizeReasoningMode(incoming.reasoningMode, defaultConfig.reasoningMode),
+      reasoningBudgetTokens:
+        typeof incoming.reasoningBudgetTokens === 'number' ? incoming.reasoningBudgetTokens : defaultConfig.reasoningBudgetTokens,
     };
   });
 
@@ -217,6 +220,18 @@ function isInstalledTauriRuntime() {
 
 function providerExists(value: unknown): value is LlmProviderId {
   return typeof value === 'string' && LLM_PROVIDER_PRESETS.some((preset) => preset.id === value);
+}
+
+function normalizeReasoningMode(value: unknown, fallback: LlmProviderConfig['reasoningMode']) {
+  return value === 'auto' ||
+    value === 'disabled' ||
+    value === 'low' ||
+    value === 'medium' ||
+    value === 'high' ||
+    value === 'max' ||
+    value === 'custom'
+    ? value
+    : fallback;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

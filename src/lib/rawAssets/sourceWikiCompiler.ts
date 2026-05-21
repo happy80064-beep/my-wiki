@@ -120,6 +120,7 @@ async function requestSourceWikiBatchCompile(
         systemPrompt:
           '你是 MyWiki v2 的文件级 Wiki 编译 Agent。完整回复必须且只能是多个 ---FILE: wiki/...--- 到 ---END FILE--- 的 FILE blocks。第一字符必须是 -。严禁输出 <think>、思考过程、分析过程、任务复述或任何 FILE block 外说明。',
         maxTokens: 9000,
+        reasoningMode: 'disabled',
       },
       { signal: options.signal },
     );

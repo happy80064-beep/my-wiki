@@ -1,6 +1,6 @@
 import { ArrowUpRight, Calendar, ChevronDown, ChevronRight, Download, Edit3, FileText, Layers, Loader2, RotateCcw, Save, Search, Sparkles, Tag, Trash2, Upload, UserRound, XCircle } from 'lucide-react';
 import { useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { useLiveQuery } from 'dexie-react-hooks';
+import { useLiveQuery } from '@/lib/db/liveQuery';
 import { db, deleteEntity, mergeExactDuplicateCompatibleEntities } from '@/lib/db';
 import {
   restoreMarkdownExportZip,
@@ -33,7 +33,7 @@ import {
   initializeWorkspace,
   joinWorkspacePath,
   resolveActiveWorkspaceSchemaContext,
-  syncIndexedDbKnowledgeToDefaultWorkspace,
+  syncWorkspaceRecordsToDefaultWorkspace,
   useWorkspaceRuntimeStore,
 } from '@/lib/workspace';
 import { resizeTriPaneLayout, type TriPaneLayout } from '@/lib/ui/triPaneLayout';
@@ -102,10 +102,11 @@ const defaultBrowserPaneLayout: TriPaneLayout = { left: 22, center: 30, right: 4
 export function WikiPage() {
   if (canUseWorkspaceStorage()) return <DesktopWikiPage />;
 
-  return <BrowserIndexedDbWikiPage />;
+  return <RuntimeWikiPage />;
 }
 
 function DesktopWikiPage() {
+  const [syncError, setSyncError] = useState('');
   const stats = useLiveQuery(
     async () => {
       const [entities, entries, rawAssets] = await Promise.all([db.entities.count(), db.entries.count(), db.rawAssets.count()]);
@@ -118,13 +119,17 @@ function DesktopWikiPage() {
 
   useEffect(() => {
     if (!hasCapturedKnowledge) return;
-    void syncIndexedDbKnowledgeToDefaultWorkspace().catch(() => undefined);
+    void syncWorkspaceRecordsToDefaultWorkspace()
+      .then(() => setSyncError(''))
+      .catch((error) => {
+        setSyncError(error instanceof Error ? error.message : '工作区记录同步失败。');
+      });
   }, [hasCapturedKnowledge]);
 
-  return <BrowserIndexedDbWikiPage />;
+  return <RuntimeWikiPage syncError={syncError} />;
 }
 
-export function BrowserIndexedDbWikiPage() {
+export function RuntimeWikiPage({ syncError = '' }: { syncError?: string } = {}) {
   const rawImportInputRef = useRef<HTMLInputElement | null>(null);
   const backupImportInputRef = useRef<HTMLInputElement | null>(null);
   const repairRunningRef = useRef(false);
@@ -142,7 +147,7 @@ export function BrowserIndexedDbWikiPage() {
   const [workspaceQueuePath, setWorkspaceQueuePath] = useState('');
   const [workspaceQueueActionStatus, setWorkspaceQueueActionStatus] = useState('');
   const [wikiBatchStatus, setWikiBatchStatus] = useState<WikiBatchCompileSnapshot | null>(null);
-  const [dbOpenError, setDbOpenError] = useState('');
+  const [runtimeOpenError, setRuntimeOpenError] = useState('');
   const [activeWorkspaceSchema, setActiveWorkspaceSchema] = useState('');
   const activeWorkspaceRoot = useWorkspaceRuntimeStore((state) => state.activeRoot);
   const activeWorkspaceSnapshotRoot = useWorkspaceRuntimeStore((state) => state.snapshot?.layout.root);
@@ -164,7 +169,7 @@ export function BrowserIndexedDbWikiPage() {
   });
   const entitiesLive = useLiveQuery(() => db.entities.toArray(), []);
   const entriesLive = useLiveQuery(() => db.entries.orderBy('capturedAt').reverse().toArray(), []);
-  const rawAssetCountLive = useLiveQuery(() => db.rawAssets.count().catch(() => 0), []);
+  const rawAssetCountLive = useLiveQuery(() => db.rawAssets.count(), []);
   const rawAssetsLive = useLiveQuery(() => db.rawAssets.orderBy('createdAt').reverse().toArray(), []);
   const tasksLive = useLiveQuery(() => db.tasks.toArray(), []);
   const relationshipsLive = useLiveQuery(() => db.relationships.toArray(), []);
@@ -203,11 +208,11 @@ export function BrowserIndexedDbWikiPage() {
   const selectedEntry = selected?.kind === 'entry' ? entries.find((entry) => entry.id === selected.id) ?? null : null;
   const sourceItems = useMemo(() => buildBrowserSourceItems(entries, rawAssets, entities), [entries, rawAssets, entities]);
   const browserRuntimeOrigin = typeof window === 'undefined' ? '' : window.location.origin;
-  const emptyBrowserCompat = !isTauriRuntime() && entities.length === 0 && entries.length === 0 && rawAssetCount === 0;
+  const emptyRuntimeStore = !isTauriRuntime() && entities.length === 0 && entries.length === 0 && rawAssetCount === 0;
   const compatibilityNote = isTauriRuntime()
-    ? '当前显示 Frog 和捕获页写入的本地知识库；编译成功后也会同步一份 Markdown 到文件工作区。'
-    : '当前是浏览器 IndexedDB 兼容模式。v2 桌面版会读取统一 Markdown 工作区。';
-  const showEmptyBrowserNotice = knowledgeDataLoaded && emptyBrowserCompat && !dbOpenError;
+    ? '当前显示 Frog 和捕获页写入的本地知识库；编译成功后会同步到统一文件工作区。'
+    : '当前是开发预览的临时运行记录；桌面版会读取统一文件工作区。';
+  const showEmptyBrowserNotice = knowledgeDataLoaded && emptyRuntimeStore && !runtimeOpenError;
   const queueRunning = queueStatus?.stage === 'running';
   const wikiBatchRunning = isWikiBatchCompileRunning(wikiBatchStatus);
   const hasRecoverableWikiBatchJob = Boolean(recoverableWikiBatchJob && !wikiBatchRunning);
@@ -241,7 +246,7 @@ export function BrowserIndexedDbWikiPage() {
       void getLatestRecoverableWikiBatchJob().then((job) => {
         if (!job || job.status !== 'paused' || !job.error?.includes('网络')) return;
         void resumeBrowserWikiBatchRecompile(job.id)
-          .then(() => syncIndexedDbKnowledgeToDefaultWorkspace().catch(() => undefined))
+          .then(() => syncWorkspaceRecordsToDefaultWorkspace())
           .catch((error) => {
             setCompileStatus(error instanceof Error ? error.message : 'Wiki 页面批量生成/更新恢复失败。');
           });
@@ -292,11 +297,11 @@ export function BrowserIndexedDbWikiPage() {
     void db
       .open()
       .then(() => {
-        if (!cancelled) setDbOpenError('');
+        if (!cancelled) setRuntimeOpenError('');
       })
       .catch((error) => {
         if (cancelled) return;
-        setDbOpenError(error instanceof Error ? error.message : 'IndexedDB open failed.');
+        setRuntimeOpenError(error instanceof Error ? error.message : '工作区记录打开失败。');
       });
     return () => {
       cancelled = true;
@@ -359,17 +364,18 @@ export function BrowserIndexedDbWikiPage() {
   useEffect(() => {
     let cancelled = false;
     void reconcileInterruptedRawAssetQueueRun()
-      .catch(() => 0)
       .then(() => loadRawAssetWorkspaceQueue())
       .then((snapshot) => {
         if (cancelled) return;
         setWorkspaceQueueTasks(snapshot?.tasks ?? []);
         setWorkspaceQueuePath(snapshot?.path ?? '');
+        setWorkspaceQueueActionStatus('');
       })
-      .catch(() => {
+      .catch((error) => {
         if (cancelled) return;
         setWorkspaceQueueTasks([]);
         setWorkspaceQueuePath('');
+        setWorkspaceQueueActionStatus(error instanceof Error ? error.message : '工作区队列恢复失败。');
       });
     return () => {
       cancelled = true;
@@ -487,7 +493,7 @@ export function BrowserIndexedDbWikiPage() {
           ? `原始材料已存在：${file.name}。可点击“原文件结构化入库”继续处理。`
           : `已导入原始材料：${file.name}。可点击“原文件结构化入库”生成知识树。`,
       );
-      await syncIndexedDbKnowledgeToDefaultWorkspace().catch(() => undefined);
+      await syncWorkspaceRecordsToDefaultWorkspace();
     } catch (error) {
       setImportStatus(error instanceof Error ? error.message : `导入原文件失败：${file.name}`);
     } finally {
@@ -510,9 +516,9 @@ export function BrowserIndexedDbWikiPage() {
     const patch = buildBrowserEntityMarkdownPatch(entity, draftMarkdown);
     await db.entities.update(entity.id, patch);
     const updatedEntity = (await db.entities.get(entity.id)) ?? ({ ...entity, ...patch } as Entity);
-    await syncIndexedDbKnowledgeToDefaultWorkspace().catch(() => undefined);
+    await syncWorkspaceRecordsToDefaultWorkspace();
     const nextPath = resolveBrowserEntityWikiTarget(updatedEntity, activeWorkspaceSchema).path;
-    await Promise.all(previousPaths.map((previousPath) => deleteMovedWorkspaceWikiFile(previousPath, nextPath).catch(() => undefined)));
+    await Promise.all(previousPaths.map((previousPath) => deleteMovedWorkspaceWikiFile(previousPath, nextPath)));
     setEditing(false);
     setSaveStatus('已保存页面。');
   }
@@ -533,7 +539,7 @@ export function BrowserIndexedDbWikiPage() {
     setCompilingEntityId(entity.id);
     try {
       const result = await recompileBrowserEntityWikiPage(entity.id);
-      await syncIndexedDbKnowledgeToDefaultWorkspace().catch(() => undefined);
+      await syncWorkspaceRecordsToDefaultWorkspace();
       if (result.reviewQueued) {
         setCompileStatus(`AI 已生成「${entity.title}」的新版本，但检测到人工编辑差异，已进入审核队列。`);
         return;
@@ -559,7 +565,7 @@ export function BrowserIndexedDbWikiPage() {
     if (recoverableWikiBatchJob) {
       setCompileStatus(`正在继续未完成的 Wiki 批量任务：已处理 ${recoverableWikiBatchJob.processed}/${recoverableWikiBatchJob.total}。`);
       void resumeBrowserWikiBatchRecompile(recoverableWikiBatchJob.id)
-        .then(() => syncIndexedDbKnowledgeToDefaultWorkspace().catch(() => undefined))
+        .then(() => syncWorkspaceRecordsToDefaultWorkspace())
         .catch((error) => {
           setCompileStatus(error instanceof Error ? error.message : 'Wiki 页面批量生成/更新恢复失败。');
         });
@@ -579,7 +585,7 @@ export function BrowserIndexedDbWikiPage() {
     if (legacyJob && legacyJob.status === 'paused') {
       setCompileStatus(`已恢复刷新前的批量任务：已处理 ${legacyJob.processed}/${legacyJob.total}，正在继续。`);
       void resumeBrowserWikiBatchRecompile(legacyJob.id)
-        .then(() => syncIndexedDbKnowledgeToDefaultWorkspace().catch(() => undefined))
+        .then(() => syncWorkspaceRecordsToDefaultWorkspace())
         .catch((error) => {
           setCompileStatus(error instanceof Error ? error.message : 'Wiki 页面批量生成/更新恢复失败。');
         });
@@ -607,7 +613,7 @@ export function BrowserIndexedDbWikiPage() {
       candidates.map((entity) => ({ id: entity.id, title: entity.title })),
       { owner: 'wiki' },
     )
-      .then(() => syncIndexedDbKnowledgeToDefaultWorkspace().catch(() => undefined))
+      .then(() => syncWorkspaceRecordsToDefaultWorkspace())
       .catch((error) => {
         setCompileStatus(error instanceof Error ? error.message : 'Wiki 页面批量生成/更新启动失败。');
       });
@@ -633,7 +639,7 @@ export function BrowserIndexedDbWikiPage() {
       } else {
         setCompileStatus(`原文件入库并生成 Wiki 完成：成功处理 ${result.processed}/${result.total} 个材料。`);
       }
-      await syncIndexedDbKnowledgeToDefaultWorkspace().catch(() => undefined);
+      await syncWorkspaceRecordsToDefaultWorkspace();
     } catch (error) {
       setCompileStatus(error instanceof Error ? error.message : '原文件入库并生成 Wiki 失败。');
     }
@@ -731,7 +737,7 @@ export function BrowserIndexedDbWikiPage() {
       setDraftMarkdown('');
     }
     setSaveStatus(`已删除知识页：${entity.title}`);
-    await syncIndexedDbKnowledgeToDefaultWorkspace().catch(() => undefined);
+    await syncWorkspaceRecordsToDefaultWorkspace();
   }
 
   async function handleDeleteEntityTypeGroup(label: string, pages: BrowserWikiTreePage[]) {
@@ -748,7 +754,7 @@ export function BrowserIndexedDbWikiPage() {
       setDraftMarkdown('');
     }
     setSaveStatus(`已删除“${label}”下的 ${ids.length} 个知识页。`);
-    await syncIndexedDbKnowledgeToDefaultWorkspace().catch(() => undefined);
+    await syncWorkspaceRecordsToDefaultWorkspace();
   }
 
   async function handleDeleteSourceItem(source: BrowserSourceItem) {
@@ -787,7 +793,7 @@ export function BrowserIndexedDbWikiPage() {
       setEditing(false);
     }
     setSaveStatus(`已删除原始材料：${source.title}`);
-    await syncIndexedDbKnowledgeToDefaultWorkspace().catch(() => undefined);
+    await syncWorkspaceRecordsToDefaultWorkspace();
   }
 
   function toggleExpandedType(type: string) {
@@ -875,8 +881,9 @@ export function BrowserIndexedDbWikiPage() {
     [workspaceQueueTasks],
   );
   const showWorkspaceQueueTasks =
-    visibleWorkspaceQueueTasks.length > 0 &&
-    (workspaceQueueSummary.pending + workspaceQueueSummary.processing + workspaceQueueSummary.failed + workspaceQueueSummary.cancelled > 0 || queueRunning);
+    Boolean(workspaceQueueActionStatus) ||
+    (visibleWorkspaceQueueTasks.length > 0 &&
+      (workspaceQueueSummary.pending + workspaceQueueSummary.processing + workspaceQueueSummary.failed + workspaceQueueSummary.cancelled > 0 || queueRunning));
   const workspaceQueueHasActive = workspaceQueueSummary.pending + workspaceQueueSummary.processing > 0;
   const workspaceQueueHasClearable = workspaceQueueSummary.done + workspaceQueueSummary.cancelled > 0;
   const workspaceQueueSummaryLabel = formatRawWorkspaceQueueSummary(workspaceQueueSummary);
@@ -897,21 +904,21 @@ export function BrowserIndexedDbWikiPage() {
 
   return (
     <section className="mx-auto max-w-[1440px] px-5 py-8">
-      {dbOpenError ? (
+      {runtimeOpenError ? (
         <div className="mb-4 rounded-[14px] border border-[#f0b7b7] bg-[#fff6f6] px-4 py-3 text-sm leading-6 text-[#9f1c1c]">
-          当前浏览器知识库没有正常打开，页面显示为空更可能是本地 IndexedDB 迁移或恢复失败，而不是内容真的没了。当前
-          origin：<code>{browserRuntimeOrigin || 'unknown'}</code>；数据库错误：<code>{dbOpenError}</code>
+          当前工作区记录没有正常打开，页面显示为空更可能是本地记录迁移或恢复失败，而不是内容真的没了。当前
+          origin：<code>{browserRuntimeOrigin || 'unknown'}</code>；记录错误：<code>{runtimeOpenError}</code>
         </div>
       ) : null}
       {showEmptyBrowserNotice ? (
         <div className="mb-4 rounded-[14px] border border-[#f2d6a2] bg-[#fffaf0] px-4 py-3 text-sm leading-6 text-[#7c5a11]">
-          当前浏览器模式下本地知识库是空的。若你之前在这里看过资料，更像是本地 IndexedDB 被重建了，或者历史库还没恢复回来。当前
+          当前开发预览的运行记录是空的。若你之前在这里看过资料，更像是工作区记录还没恢复回来。当前
           origin：<code>{browserRuntimeOrigin || 'unknown'}</code>
         </div>
       ) : null}
-      {!knowledgeDataLoaded && !dbOpenError ? (
+      {!knowledgeDataLoaded && !runtimeOpenError ? (
         <div className="mb-4 rounded-[14px] border border-[#dbe7ff] bg-[#f5f8ff] px-4 py-3 text-sm leading-6 text-[#315078]">
-          正在读取本地 IndexedDB 知识库...
+          正在读取本地工作区记录...
         </div>
       ) : null}
       <div className="mb-5 flex gap-3 overflow-x-auto pb-1">

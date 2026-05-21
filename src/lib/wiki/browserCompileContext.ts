@@ -71,7 +71,7 @@ function buildBrowserRuntimeOverview(entities: Entity[], entries: Entry[], relat
   return [
     '# Runtime Overview',
     '',
-    `The current IndexedDB wiki has ${entities.length} pages, ${entries.length} source entries, and ${relationships.length} relationships.`,
+    `The current workspace wiki has ${entities.length} pages, ${entries.length} source entries, and ${relationships.length} relationships.`,
     typeSummary ? `Page type distribution: ${typeSummary}.` : '',
     '',
     '## Recently Updated Pages',

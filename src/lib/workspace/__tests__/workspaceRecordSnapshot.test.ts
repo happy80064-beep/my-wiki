@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createEntity, createEntry, db, resetDatabase } from '@/lib/db';
-import { buildIndexedDbSnapshot, restoreIndexedDbSnapshot } from '@/lib/workspace/indexedDbSnapshot';
+import { buildWorkspaceRecordSnapshot, restoreWorkspaceRecordSnapshot } from '@/lib/workspace/workspaceRecordSnapshot';
 
-describe('workspace IndexedDB snapshot', () => {
+describe('workspace record snapshot', () => {
   beforeEach(async () => {
     await resetDatabase();
   });
@@ -15,11 +15,11 @@ describe('workspace IndexedDB snapshot', () => {
       sourceEntries: [entry.id],
     });
 
-    const snapshot = await buildIndexedDbSnapshot();
+    const snapshot = await buildWorkspaceRecordSnapshot();
     await resetDatabase();
     expect(await db.entities.count()).toBe(0);
 
-    await restoreIndexedDbSnapshot(snapshot);
+    await restoreWorkspaceRecordSnapshot(snapshot);
 
     expect(await db.entries.count()).toBe(1);
     expect(await db.entities.count()).toBe(1);

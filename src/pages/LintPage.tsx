@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useLiveQuery } from 'dexie-react-hooks';
+import { useLiveQuery } from '@/lib/db/liveQuery';
 import {
   AlertTriangle,
   ArrowUpRight,
@@ -25,7 +25,7 @@ import {
   createTauriWorkspaceStorage,
   getDefaultWorkspaceRoot,
   initializeAndScanWorkspace,
-  syncIndexedDbKnowledgeToDefaultWorkspace,
+  syncWorkspaceRecordsToDefaultWorkspace,
   useWorkspaceRuntimeStore,
 } from '@/lib/workspace';
 import { parseMarkdownFrontmatter, stringifyMarkdownFrontmatter } from '@/lib/wiki/frontmatter';
@@ -343,7 +343,7 @@ export function LintPage() {
     const entity = entities.find((item) => item.id === page.id);
     if (!entity) throw new Error('没有找到对应的浏览器 Wiki 实体。');
     await updateEntity(entity.id, buildBrowserEntityMarkdownPatch(entity, markdown));
-    await syncIndexedDbKnowledgeToDefaultWorkspace().catch(() => undefined);
+    await syncWorkspaceRecordsToDefaultWorkspace();
     setActivity({ title: 'Wiki page saved', status: 'done', detail: `Saved ${page.title}.` });
     setFixStatus('已保存右侧 Wiki 页面。再次运行 Lint 可以刷新问题列表。');
     setGuideHighlight(null);

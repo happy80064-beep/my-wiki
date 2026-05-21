@@ -10,7 +10,9 @@ export type WorkspaceLayout = {
   wikiOverview: string;
   wikiLog: string;
   state: string;
-  sqlite: string;
+  recordsState: string;
+  migrationState: string;
+  vectorIndex: string;
   ingestQueue: string;
   ingestCache: string;
   reviewState: string;
@@ -101,7 +103,9 @@ export function buildWorkspaceLayout(root: string): WorkspaceLayout {
     wikiOverview: joinWorkspacePath(wiki, 'overview.md'),
     wikiLog: joinWorkspacePath(wiki, 'log.md'),
     state,
-    sqlite: joinWorkspacePath(state, 'mywiki.sqlite'),
+    recordsState: joinWorkspacePath(state, 'records.json'),
+    migrationState: joinWorkspacePath(state, 'migration-state.json'),
+    vectorIndex: joinWorkspacePath(state, 'lancedb'),
     ingestQueue: joinWorkspacePath(state, 'ingest-queue.json'),
     ingestCache: joinWorkspacePath(state, 'ingest-cache.json'),
     reviewState: joinWorkspacePath(state, 'review.json'),

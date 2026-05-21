@@ -39,6 +39,7 @@ export async function runSemanticWikiLint(
       systemPrompt:
         'You are MyWiki Wiki Lint. Return only strict ---LINT--- blocks. Do not include markdown fences, JSON, or chain-of-thought.',
       maxTokens: 2600,
+      reasoningMode: 'disabled',
     });
     if (!providerResult.ok) {
       throw new Error(`${providerResult.providerName} failed: ${providerResult.error}`);

@@ -9,18 +9,19 @@ import { getProviderConfigForRole, loadProviderSettings } from '@/lib/llm/provid
 import type { RuntimeProviderTiming } from '@/lib/llm/runtimeProvider';
 import { type QueryChatReference } from '@/lib/query/chatHelpers';
 import { type QueryChatMessage, useQueryChatStore } from '@/lib/query/chatStore';
-import { answerQueryChat } from '@/lib/query/chatAnswerClient';
-import { detectQueryChatIntent } from '@/lib/query/chatIntent';
+import { streamAnswerQueryChat } from '@/lib/query/chatAnswerClient';
+import { classifyQueryMode } from '@/lib/query/queryMode';
 import {
   applyWikiRagPageAnswer,
   applyWikiRagPageAnswerFailure,
   buildWikiRagBaseResult,
   buildWikiRagNoContextResult,
 } from '@/lib/query/queryPipeline';
-import { answerQueryWithWikiPages } from '@/lib/query/queryAnswerClient';
+import { streamAnswerQueryWithWikiPages } from '@/lib/query/queryAnswerClient';
 import type { QueryConversationContextMessage } from '@/lib/query/queryAnswer';
 import { buildLookupRetrievalText, understandQuery } from '@/lib/query/queryUnderstanding';
 import { retrieveQueryContext } from '@/lib/query/wikiRetrieval';
+import { loadQueryWorkspaceContext } from '@/lib/query/workspaceContext';
 import {
   searchConfiguredDeepResearch,
   synthesizeConfiguredDeepResearch,
@@ -42,6 +43,7 @@ export function QueryPage() {
   const addAssistantMessage = useQueryChatStore((state) => state.addAssistantMessage);
   const addAssistantMessageToConversation = useQueryChatStore((state) => state.addAssistantMessageToConversation);
   const removeLastAssistantMessage = useQueryChatStore((state) => state.removeLastAssistantMessage);
+  const updateAssistantMessage = useQueryChatStore((state) => state.updateAssistantMessage);
   const updateMessageResult = useQueryChatStore((state) => state.updateMessageResult);
   const setIsResponding = useQueryChatStore((state) => state.setIsResponding);
   const isResponding = useQueryChatStore((state) => state.isResponding);
@@ -106,17 +108,42 @@ export function QueryPage() {
         userMessage?.id,
         trimmed,
       );
-      const chatIntent = detectQueryChatIntent(trimmed);
-      if (chatIntent.isChat) {
+      const queryMode = classifyQueryMode(trimmed);
+      if (queryMode.kind === 'chat' && queryMode.chatIntent) {
         let chatMs = 0;
+        const draftResult: StructuredQueryResult = {
+          answer: '正在生成回复。',
+          sources: [],
+          suggestions: ['询问一个具体知识库问题', '切换到补充/深度研究前先说明研究对象'],
+          trace: [
+            {
+              layer: 'chat',
+              label: '闲聊意图',
+              detail: `识别为${queryMode.chatIntent.label}，置信度 ${Math.round(queryMode.confidence * 100)}%。本轮跳过 Wiki 页面检索和结构化查询，直接调用 Query 模型回复。`,
+            },
+          ],
+        };
+        const assistantDraft = addAssistantMessage(trimmed, draftResult.answer, draftResult, []);
+        let streamedAnswer = '';
         const answered = await measureAsync(
           () =>
-            answerQueryChat({
+            streamAnswerQueryChat({
               question: trimmed,
-              intentLabel: chatIntent.label,
+              intentLabel: queryMode.chatIntent?.label ?? queryMode.label,
               conversationContext,
               providerConfig: queryProviderConfig,
               reasoningMode: 'disabled',
+              onToken: (token) => {
+                streamedAnswer += token;
+                if (!assistantDraft) return;
+                updateAssistantMessage(assistantDraft.id, {
+                  content: streamedAnswer,
+                  result: {
+                    ...draftResult,
+                    answer: streamedAnswer,
+                  },
+                });
+              },
             }),
           (elapsed) => {
             chatMs = elapsed;
@@ -135,11 +162,19 @@ export function QueryPage() {
             {
               layer: 'chat',
               label: '闲聊意图',
-              detail: `识别为${chatIntent.label}，置信度 ${Math.round(chatIntent.confidence * 100)}%。本轮跳过 Wiki 页面检索和结构化查询，直接调用 Query 模型回复。耗时：${formatDuration(chatMs)}。${formatProviderTimingDetail(answered.llmTiming)}`,
+              detail: `识别为${queryMode.chatIntent.label}，置信度 ${Math.round(queryMode.confidence * 100)}%。本轮跳过 Wiki 页面检索和结构化查询，直接调用 Query 模型回复。耗时：${formatDuration(chatMs)}。${formatProviderTimingDetail(answered.llmTiming)}`,
             },
           ],
         };
-        addAssistantMessage(trimmed, result.answer, result, []);
+        if (assistantDraft) {
+          updateAssistantMessage(assistantDraft.id, {
+            content: result.answer,
+            result,
+            references: [],
+          });
+        } else {
+          addAssistantMessage(trimmed, result.answer, result, []);
+        }
         return;
       }
 
@@ -148,24 +183,45 @@ export function QueryPage() {
       const retrievalQuestion = buildLookupRetrievalText(contextualQuestion, queryUnderstanding);
       const retrievalUsedConversation = contextualQuestion !== trimmed;
       let retrievalMs = 0;
+      let workspaceMs = 0;
       let answerMs = 0;
 
-      const retrieved = await measureAsync(
-        () =>
-          retrieveQueryContext(retrievalQuestion, {
-            limit: 10,
-            maxContextChars: queryProviderConfig?.contextWindow,
-          }),
-        (elapsed) => {
-          retrievalMs = elapsed;
-        },
-      );
+      const [retrieved, workspaceContext] = await Promise.all([
+        measureAsync(
+          () =>
+            retrieveQueryContext(retrievalQuestion, {
+              limit: queryMode.retrieval.pageLimit,
+              maxContextChars: queryProviderConfig?.contextWindow,
+              enableGraphExpansion: queryMode.retrieval.enableGraphExpansion,
+            }),
+          (elapsed) => {
+            retrievalMs = elapsed;
+          },
+        ),
+        measureAsync(
+          () =>
+            activeWorkspaceRoot
+              ? loadQueryWorkspaceContext({
+                  workspaceRoot: activeWorkspaceRoot,
+                  question: retrievalQuestion,
+                  queryMode,
+                  maxContextChars: queryProviderConfig?.contextWindow,
+                })
+              : Promise.resolve(undefined),
+          (elapsed) => {
+            workspaceMs = elapsed;
+          },
+        ),
+      ]);
+      const workspaceTrace = buildWorkspaceTrace(workspaceContext?.trace, workspaceMs);
 
       if (retrieved.pages.length === 0) {
         const noContext = buildWikiRagNoContextResult({
           question: trimmed,
           queryUnderstanding,
+          queryMode,
           retrievalTrace: retrieved.trace,
+          workspaceTrace,
           retrievalUsedConversation,
           timing: {
             retrievalMs,
@@ -179,7 +235,9 @@ export function QueryPage() {
       const initial = buildWikiRagBaseResult({
         retrievedPages: retrieved.pages,
         queryUnderstanding,
+        queryMode,
         retrievalTrace: retrieved.trace,
+        workspaceTrace,
         retrievalUsedConversation,
         timing: {
           retrievalMs,
@@ -188,11 +246,13 @@ export function QueryPage() {
       });
       let result: StructuredQueryResult = initial.result;
       let finalReferences = initial.references;
+      const assistantDraft = addAssistantMessage(trimmed, result.answer, result, finalReferences);
 
       try {
+        let streamedAnswer = '';
         const answered = await measureAsync(
           () =>
-            answerQueryWithWikiPages({
+            streamAnswerQueryWithWikiPages({
               question: trimmed,
               indexSummary: retrieved.indexSummary,
               pages: retrieved.pages.map((page) => ({
@@ -210,9 +270,22 @@ export function QueryPage() {
                 related: page.related,
                 updated: page.updated,
               })),
+              queryMode,
+              workspaceContext,
               conversationContext,
               providerConfig: queryProviderConfig,
               reasoningMode: 'disabled',
+              onToken: (token) => {
+                streamedAnswer += token;
+                if (!assistantDraft) return;
+                updateAssistantMessage(assistantDraft.id, {
+                  content: streamedAnswer,
+                  result: {
+                    ...result,
+                    answer: streamedAnswer,
+                  },
+                });
+              },
             }),
           (elapsed) => {
             answerMs = elapsed;
@@ -233,7 +306,15 @@ export function QueryPage() {
         result = applyWikiRagPageAnswerFailure(result, error);
       }
 
-      addAssistantMessage(trimmed, result.answer, result, finalReferences);
+      if (assistantDraft) {
+        updateAssistantMessage(assistantDraft.id, {
+          content: result.answer,
+          result,
+          references: finalReferences,
+        });
+      } else {
+        addAssistantMessage(trimmed, result.answer, result, finalReferences);
+      }
     } finally {
       setIsResponding(false);
       setResponseMode(null);
@@ -577,6 +658,11 @@ function formatProviderTimingDetail(timing: RuntimeProviderTiming | undefined) {
     timing.attempts > 1 ? `尝试 ${timing.attempts} 次` : '',
   ].filter(Boolean);
   return parts.length ? `明细：${parts.join('；')}。` : '';
+}
+
+function buildWorkspaceTrace(trace: string[] | undefined, elapsedMs: number) {
+  if (!trace?.length) return undefined;
+  return [...trace, `工作区上下文耗时：${formatDuration(elapsedMs)}。`];
 }
 
 function buildPendingDeepResearchQueryResult(

@@ -1,4 +1,3 @@
-import Dexie from 'dexie';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   createEntity,
@@ -17,7 +16,6 @@ import {
   resetDatabase,
   upsertPendingCompileSuggestion,
 } from '@/lib/db';
-import { MyWikiDatabase } from '@/lib/db/schema';
 
 describe('MyWiki data layer', () => {
   beforeEach(async () => {
@@ -79,65 +77,6 @@ describe('MyWiki data layer', () => {
     expect(entity.clientId).toBe(clientId);
     expect(relationship.clientId).toBe(clientId);
     expect(task.clientId).toBe(clientId);
-  });
-
-  it('migrates version 5 browser records to version 6 without losing data', async () => {
-    const databaseName = `migration-smoke-${crypto.randomUUID()}`;
-    const clientId = getClientId();
-
-    class LegacyDatabase extends Dexie {
-      constructor(name: string) {
-        super(name);
-        this.version(5).stores({
-          entries: 'id, capturedAt, processed, source',
-          entities: 'id, type, title, *tags, *scenes, createdAt, updatedAt',
-          relationships: 'id, from, to, type, createdAt, *evidence',
-          tasks: 'id, owner, status, createdAt, dueDate, source, *linkedTo',
-          compileSuggestions: 'id, &fingerprint, status, entityId, propertyKey, evidenceEntryId, createdAt, updatedAt',
-          ingestJobs: 'id, status, contentHash, createdAt, updatedAt',
-          ingestCache: '&contentHash, updatedAt, *entryIds',
-          graphInsightDismissals: 'id, type, dismissedAt',
-          rawAssets: 'id, status, kind, contentHash, filename, createdAt, updatedAt',
-          queryCache: '&key, updatedAt, dataUpdatedAt',
-        });
-      }
-    }
-
-    const legacy = new LegacyDatabase(databaseName);
-    await legacy.open();
-    await legacy.table('entries').add({
-      id: 'legacy-entry',
-      content: 'legacy content',
-      capturedAt: 1,
-      processed: false,
-      source: 'text',
-    });
-    await legacy.table('entities').add({
-      id: 'legacy-entity',
-      type: 'topic',
-      title: 'Legacy Topic',
-      tags: ['legacy'],
-      scenes: [],
-      createdAt: 1,
-      updatedAt: 1,
-    });
-    await legacy.close();
-
-    const migrated = new MyWikiDatabase(databaseName);
-    await migrated.open();
-
-    await expect(migrated.entries.get('legacy-entry')).resolves.toMatchObject({
-      id: 'legacy-entry',
-      content: 'legacy content',
-      clientId,
-    });
-    await expect(migrated.entities.get('legacy-entity')).resolves.toMatchObject({
-      id: 'legacy-entity',
-      title: 'Legacy Topic',
-      clientId,
-    });
-
-    await migrated.delete();
   });
 
   it('merges exact-title compatible duplicate wiki entities and rewires references', async () => {

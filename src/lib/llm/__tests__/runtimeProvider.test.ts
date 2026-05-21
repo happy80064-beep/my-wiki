@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { extractProviderText, requestConfiguredProviderText } from '@/lib/llm/runtimeProvider';
+import { extractProviderText, parseProviderStreamChunk, requestConfiguredProviderText } from '@/lib/llm/runtimeProvider';
 import type { LlmProviderConfig } from '@/lib/llm/providers';
 
 const providerConfig: LlmProviderConfig = {
@@ -10,6 +10,7 @@ const providerConfig: LlmProviderConfig = {
   apiKey: 'test-key',
   model: 'test-model',
   contextWindow: 8000,
+  reasoningMode: 'auto',
 };
 
 describe('runtime provider response extraction', () => {
@@ -90,5 +91,32 @@ describe('runtime provider response extraction', () => {
 
     expect(result).toMatchObject({ ok: true, text: 'ok' });
     expect(receivedSignal).toBe(controller.signal);
+  });
+
+  it('parses OpenAI-compatible stream chunks', () => {
+    const text = parseProviderStreamChunk(
+      [
+        'data: {"choices":[{"delta":{"content":"结论"}}]}',
+        'data: {"choices":[{"delta":{"content":"：已确认"}}]}',
+        'data: [DONE]',
+        '',
+      ].join('\n'),
+      'openai-compatible',
+    );
+
+    expect(text).toBe('结论：已确认');
+  });
+
+  it('parses Anthropic-compatible stream chunks', () => {
+    const text = parseProviderStreamChunk(
+      [
+        'event: content_block_delta',
+        'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"风险"}}',
+        '',
+      ].join('\n'),
+      'anthropic-compatible',
+    );
+
+    expect(text).toBe('风险');
   });
 });

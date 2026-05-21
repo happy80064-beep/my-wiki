@@ -1,6 +1,6 @@
 import { AlertTriangle, Check, ExternalLink, FileText, X } from 'lucide-react';
 import { useMemo, useState } from 'react';
-import { useLiveQuery } from 'dexie-react-hooks';
+import { useLiveQuery } from '@/lib/db/liveQuery';
 import { Link } from 'react-router';
 import {
   applyCompileSuggestion,
@@ -9,7 +9,7 @@ import {
   dismissCompileSuggestion,
   dismissWikiReviewItem,
 } from '@/lib/db';
-import { syncIndexedDbKnowledgeToDefaultWorkspace } from '@/lib/workspace';
+import { syncWorkspaceRecordsToDefaultWorkspace } from '@/lib/workspace';
 import type { CompileSuggestionRecord, CompileSuggestionStatus, WikiReviewRecord, WikiReviewStatus } from '@/types';
 
 type ReviewFilter = WikiReviewStatus | 'all';
@@ -40,28 +40,28 @@ export function ReviewsPage() {
   async function handleApplyWiki(review: WikiReviewRecord) {
     setActionStatus('');
     await applyWikiReviewItem(review.id);
-    await syncIndexedDbKnowledgeToDefaultWorkspace().catch(() => undefined);
+    await syncWorkspaceRecordsToDefaultWorkspace();
     setActionStatus(`已应用 AI 更新：${review.entityTitle}。旧内容已保留为过期块。`);
   }
 
   async function handleDismissWiki(review: WikiReviewRecord) {
     setActionStatus('');
     await dismissWikiReviewItem(review.id);
-    await syncIndexedDbKnowledgeToDefaultWorkspace().catch(() => undefined);
+    await syncWorkspaceRecordsToDefaultWorkspace();
     setActionStatus(`已保留人工编辑内容：${review.entityTitle}。`);
   }
 
   async function handleApplySuggestion(suggestion: CompileSuggestionRecord) {
     setActionStatus('');
     await applyCompileSuggestion(suggestion.id);
-    await syncIndexedDbKnowledgeToDefaultWorkspace().catch(() => undefined);
+    await syncWorkspaceRecordsToDefaultWorkspace();
     setActionStatus(`已写回结构化建议：${suggestion.entityTitle}。`);
   }
 
   async function handleDismissSuggestion(suggestion: CompileSuggestionRecord) {
     setActionStatus('');
     await dismissCompileSuggestion(suggestion.id);
-    await syncIndexedDbKnowledgeToDefaultWorkspace().catch(() => undefined);
+    await syncWorkspaceRecordsToDefaultWorkspace();
     setActionStatus(`已忽略结构化建议：${suggestion.entityTitle}。`);
   }
 

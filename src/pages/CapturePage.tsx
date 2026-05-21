@@ -1,6 +1,6 @@
 import { Loader2, Plus, Save, Trash2, WandSparkles } from 'lucide-react';
 import { type ClipboardEvent, type DragEvent, type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
-import { useLiveQuery } from 'dexie-react-hooks';
+import { useLiveQuery } from '@/lib/db/liveQuery';
 import {
   type CaptureDraft,
   type DraftEntity,

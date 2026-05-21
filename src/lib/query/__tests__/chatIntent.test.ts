@@ -23,6 +23,19 @@ describe('query chat intent', () => {
     expect(intent.label).toBe('包含知识库查询意图');
   });
 
+  it('routes external realtime questions away from wiki retrieval', () => {
+    const intent = detectQueryChatIntent('你好，今天北京天气怎么样');
+
+    expect(intent.isChat).toBe(true);
+    expect(intent.kind).toBe('external_realtime');
+  });
+
+  it('keeps project timing questions in retrieval even when they contain time words', () => {
+    const intent = detectQueryChatIntent('福瑞科技园三期今天的项目进展怎么样？');
+
+    expect(intent.isChat).toBe(false);
+  });
+
   it('keeps concrete wiki questions in retrieval flow', () => {
     const intent = detectQueryChatIntent('桌面生命体用了哪些模型？');
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildQueryAnswerPrompt, normalizeQueryAnswerResponse } from '../queryAnswer';
+import { classifyQueryMode } from '../queryMode';
 
 describe('query answer prompt helpers', () => {
   it('builds a wiki-page-first answer prompt', () => {
@@ -30,7 +31,70 @@ describe('query answer prompt helpers', () => {
     expect(prompt).toContain('Structured Support');
     expect(prompt).toContain('专业、严谨、内容精炼');
     expect(prompt).toContain('不要补编页面没有明示的信息');
-    expect(prompt).toContain('开放性问题通常不超过 600 中文字');
+    expect(prompt).toContain('本轮是开放分析或混合查询');
+  });
+
+  it('keeps lookup prompts short and strict', () => {
+    const prompt = buildQueryAnswerPrompt({
+      question: '福瑞科技园三期什么时候完工？',
+      indexSummary: '',
+      queryMode: classifyQueryMode('福瑞科技园三期什么时候完工？'),
+      pages: [
+        {
+          index: 1,
+          entityId: 'project_1',
+          type: 'project',
+          title: '福瑞健康科技园三期项目',
+          href: '/wiki/project/project_1',
+          summary: '项目概述',
+          content: '预计 2029 年投入运营，当前 Wiki 未明确写出完工日期。',
+          score: 120,
+        },
+      ],
+    });
+
+    expect(prompt).toContain('Mode: lookup');
+    expect(prompt).toContain('Answer shape: direct');
+    expect(prompt).toContain('本轮是单点事实查询');
+    expect(prompt).toContain('直接短答通常不超过 120 中文字');
+    expect(prompt).not.toContain('通常 600-1200 中文字');
+  });
+
+  it('adds workspace context without making it citable evidence', () => {
+    const prompt = buildQueryAnswerPrompt({
+      question: '福瑞三期未来运营风险怎么优化？',
+      indexSummary: '',
+      queryMode: classifyQueryMode('福瑞三期未来运营风险怎么优化？'),
+      workspaceContext: {
+        purpose: '关注园区运营与招商。',
+        index: '- 福瑞健康科技园三期项目：医康旅一体化。',
+        files: [
+          {
+            path: 'raw/sources/report.md',
+            title: '可研报告',
+            kind: 'source',
+            excerpt: '原始材料片段',
+            score: 18,
+          },
+        ],
+      },
+      pages: [
+        {
+          index: 1,
+          entityId: 'project_1',
+          type: 'project',
+          title: '福瑞健康科技园三期项目',
+          href: '/wiki/project/project_1',
+          summary: '项目概述',
+          content: '医疗资质、招商和空置率需要关注。',
+          score: 120,
+        },
+      ],
+    });
+
+    expect(prompt).toContain('Workspace Context (scope and candidate material only)');
+    expect(prompt).toContain('不能替代编号页引用');
+    expect(prompt).toContain('raw/sources/report.md');
   });
 
   it('can build a pure wiki-page prompt without structured-query draft contamination', () => {

@@ -67,6 +67,7 @@ export async function recompileBrowserEntityWikiPage(
       systemPrompt:
         'You are the MyWiki v2 wiki compiler. Return exactly one FILE block and no commentary.',
       maxTokens: 4200,
+      reasoningMode: 'disabled',
     }, { signal: options.signal });
     if (!providerResult.ok) {
       throw new Error(`${providerResult.providerName} failed: ${providerResult.error}`);

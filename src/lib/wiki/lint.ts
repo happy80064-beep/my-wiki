@@ -570,6 +570,11 @@ function buildReferenceLookupKeys(value: string) {
       keys.add(withoutAsciiParenthetical);
       keys.add(withoutAsciiParenthetical.replace(/[\s_-]+/g, '-'));
     }
+    const withoutGeneratedPagePrefix = stripGeneratedPageTypePrefix(normalized);
+    if (withoutGeneratedPagePrefix) {
+      keys.add(withoutGeneratedPagePrefix);
+      keys.add(withoutGeneratedPagePrefix.replace(/[\s_-]+/g, '-'));
+    }
   };
 
   add(value);
@@ -595,6 +600,21 @@ function stripSourceDocumentExtension(value: string) {
   const stripped = value.replace(/\.(?:pdf|docx?|pptx?|xlsx?|xlsm|xlsb|csv|tsv|zip|html?|md|markdown|txt)$/i, '');
   if (!stripped || stripped === value) return '';
   return stripped;
+}
+
+function stripGeneratedPageTypePrefix(value: string) {
+  const segments = value.split('/');
+  const last = segments.pop() ?? '';
+  const strippedLast = stripGeneratedPageTypeSegment(last);
+  if (!strippedLast) return '';
+  return [...segments, strippedLast].join('/');
+}
+
+function stripGeneratedPageTypeSegment(value: string) {
+  const match = value.match(/^(entity|concept|project|source|topic|person|organization|company|event|metric|indicator)[\s_-]+(.+)$/i);
+  const suffix = match?.[2]?.trim();
+  if (!suffix || suffix.length < 2 || !/[\u4e00-\u9fa5]/.test(suffix)) return '';
+  return suffix;
 }
 
 function isRawWorkspaceReference(value: string) {

@@ -141,6 +141,32 @@ describe('provider settings', () => {
     expect(settings.configs.find((config) => config.providerId === 'openai')?.apiKey).toBe('sk-test');
   });
 
+  it('normalizes reasoning controls from stale provider data', () => {
+    const settings = normalizeProviderSettings({
+      configs: [
+        {
+          providerId: 'deepseek',
+          reasoningMode: 'disabled',
+          reasoningBudgetTokens: 2048,
+        },
+        {
+          providerId: 'zhipu',
+          reasoningMode: 'legacy-thinking',
+          reasoningBudgetTokens: '4096',
+        },
+      ],
+    });
+
+    expect(settings.configs.find((config) => config.providerId === 'deepseek')).toMatchObject({
+      reasoningMode: 'disabled',
+      reasoningBudgetTokens: 2048,
+    });
+    expect(settings.configs.find((config) => config.providerId === 'zhipu')).toMatchObject({
+      reasoningMode: 'auto',
+      reasoningBudgetTokens: undefined,
+    });
+  });
+
   it('validates the active provider only', () => {
     const settings = activateProvider(createDefaultProviderSettings(), 'openai');
     expect(validateActiveProvider(settings)).toEqual(['API Key is required for enabled remote providers.']);

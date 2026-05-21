@@ -1,5 +1,5 @@
 import { type ReactNode, useMemo } from 'react';
-import { useLiveQuery } from 'dexie-react-hooks';
+import { useLiveQuery } from '@/lib/db/liveQuery';
 import { Link, useParams } from 'react-router';
 import { db } from '@/lib/db';
 import type { Entity, Relationship, Task } from '@/types';

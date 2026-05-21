@@ -28,6 +28,7 @@ export type QueryUnderstanding = {
   need: QueryNeed;
   intent: QueryUnderstandingIntent;
   answerStyle: 'direct' | 'brief_list' | 'synthesis';
+  answerShape?: 'direct' | 'list' | 'compact_table' | 'analysis';
   attribute?: QueryUnderstandingAttribute;
   evidenceTerms: string[];
   rewrite: string;
@@ -168,6 +169,7 @@ export function understandQuery(question: string): QueryUnderstanding {
       need: 'lookup',
       intent: 'list_lookup',
       answerStyle: 'brief_list',
+      answerShape: metricTerms.some((term) => trimmed.includes(term)) ? 'compact_table' : 'list',
       evidenceTerms: ['有哪些', '包括', '包含', '清单', '列表'],
       rewrite: rewriteWithTerms(trimmed, ['有哪些', '包括', '包含', '清单']),
       guidance: ['用短列表回答；只列和问题直接相关的项目，不要扩写成背景介绍。'],
@@ -192,6 +194,7 @@ export function understandQuery(question: string): QueryUnderstanding {
       need: 'open',
       intent: 'open_analysis',
       answerStyle: 'synthesis',
+      answerShape: 'analysis',
       evidenceTerms: [],
       rewrite: trimmed,
       guidance: ['这是开放性问题，需要综合多个 Wiki 页面和证据，不应走简单快查模板。'],
@@ -203,6 +206,7 @@ export function understandQuery(question: string): QueryUnderstanding {
     need: directQuestionPattern.test(trimmed) ? 'lookup' : 'open',
     intent: directQuestionPattern.test(trimmed) ? 'entity_profile' : 'evidence_search',
     answerStyle: directQuestionPattern.test(trimmed) ? 'direct' : 'synthesis',
+    answerShape: directQuestionPattern.test(trimmed) ? 'direct' : 'analysis',
     evidenceTerms: [],
     rewrite: trimmed,
     guidance: directQuestionPattern.test(trimmed)
@@ -225,6 +229,7 @@ export function queryUnderstandingForPrompt(understanding: QueryUnderstanding | 
     `Intent: ${understanding.intent}`,
     understanding.attribute ? `Requested field: ${understanding.attribute}` : '',
     `Answer style: ${understanding.answerStyle}`,
+    understanding.answerShape ? `Answer shape: ${understanding.answerShape}` : '',
     understanding.evidenceTerms.length ? `Evidence terms: ${understanding.evidenceTerms.join(', ')}` : '',
     understanding.guidance.length ? `Guidance:\n${understanding.guidance.map((item) => `- ${item}`).join('\n')}` : '',
   ]
@@ -242,6 +247,12 @@ function buildUnderstanding(
     need: 'lookup',
     intent: rule.intent,
     answerStyle,
+    answerShape:
+      answerStyle === 'direct'
+        ? 'direct'
+        : answerStyle === 'brief_list'
+          ? 'list'
+          : 'analysis',
     attribute: rule.attribute,
     evidenceTerms: rule.terms,
     rewrite: rewriteWithTerms(question, rule.terms),

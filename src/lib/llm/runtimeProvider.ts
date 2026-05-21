@@ -7,7 +7,7 @@ import {
   type LlmTextRequestInput,
 } from './textProvider';
 import { validateLlmProviderConfig, type LlmProviderConfig } from './providers';
-import { parseRuntimeJson, postJsonThroughRuntime } from '@/lib/runtime/httpJson';
+import { parseRuntimeJson, postJsonStreamThroughRuntime, postJsonThroughRuntime } from '@/lib/runtime/httpJson';
 import { isProviderRetryableError, rememberProviderFailure, withProviderRequestSlot } from './requestScheduler';
 
 export type RuntimeProviderTiming = {
@@ -24,6 +24,10 @@ export type RuntimeProviderResult =
 
 export type RuntimeProviderRequestOptions = {
   signal?: AbortSignal;
+};
+
+export type RuntimeProviderStreamOptions = RuntimeProviderRequestOptions & {
+  onToken: (token: string) => void;
 };
 
 export function normalizeRequestProviderConfig(input: LlmProviderConfig | null | undefined): LlmProviderConfig | null {
@@ -52,6 +56,115 @@ export async function requestConfiguredProviderText(
     },
   );
   return { ...result, timing };
+}
+
+export async function requestConfiguredProviderTextStream(
+  config: LlmProviderConfig,
+  input: LlmTextRequestInput,
+  options: RuntimeProviderStreamOptions,
+): Promise<RuntimeProviderResult> {
+  const timing = createProviderTiming();
+  const result = await withProviderRequestSlot(
+    config,
+    options.signal,
+    () => requestConfiguredProviderTextStreamScheduled(config, input, options, timing),
+    (slotTiming) => {
+      timing.queueMs += slotTiming.queueMs;
+      timing.cooldownMs += slotTiming.cooldownMs;
+    },
+  );
+  return { ...result, timing };
+}
+
+async function requestConfiguredProviderTextStreamScheduled(
+  config: LlmProviderConfig,
+  input: LlmTextRequestInput,
+  options: RuntimeProviderStreamOptions,
+  timing: RuntimeProviderTiming,
+): Promise<RuntimeProviderResult> {
+  throwIfAborted(options.signal);
+  timing.attempts = 1;
+  const requestStart = Date.now();
+  const result = await requestConfiguredProviderTextStreamOnce(config, input, options);
+  timing.requestMs += Date.now() - requestStart;
+  if (!result.ok && isProviderRetryableError(result.error)) rememberProviderFailure(config, result.error);
+  return result;
+}
+
+async function requestConfiguredProviderTextStreamOnce(
+  config: LlmProviderConfig,
+  input: LlmTextRequestInput,
+  options: RuntimeProviderStreamOptions,
+): Promise<RuntimeProviderResult> {
+  const providerName = config.providerId;
+  try {
+    const request = buildProviderTextRequest(config, input);
+    const streamRequest = {
+      ...request,
+      body: buildStreamingProviderBody(request.body, request.responseApiMode),
+    };
+    let rawBody = '';
+    let text = '';
+    let streamBuffer = '';
+    const response = await postJsonStreamThroughRuntime(
+      streamRequest,
+      (event) => {
+        if (event.type !== 'chunk') return;
+        rawBody += event.text;
+        streamBuffer += event.text;
+        const chunks = takeCompleteStreamEvents(streamBuffer);
+        streamBuffer = chunks.remainder;
+        for (const chunk of chunks.events) {
+          const parsed = parseProviderStreamChunk(chunk, request.responseApiMode);
+          if (!parsed) continue;
+          text += parsed;
+          options.onToken(parsed);
+        }
+      },
+      { signal: options.signal },
+    );
+    if (streamBuffer.trim()) {
+      const parsed = parseProviderStreamChunk(streamBuffer, request.responseApiMode);
+      if (parsed) {
+        text += parsed;
+        options.onToken(parsed);
+      }
+    }
+
+    if (!response.ok) {
+      const data = parseJsonBody(response.body || rawBody);
+      return {
+        ok: false,
+        error: extractProviderError(data) || `${providerName} stream request failed with ${response.status}.`,
+        providerName,
+        model: config.model,
+      };
+    }
+
+    const fullStreamText = parseProviderStreamChunk(response.body || rawBody, request.responseApiMode).trim();
+    const finalText = fullStreamText || text.trim();
+    if (!finalText) {
+      const data = parseJsonBody(response.body || rawBody);
+      const nonStreamingText = extractProviderText(data, request.responseApiMode, {
+        includeToolUseInput: Boolean(input.structuredOutput),
+      });
+      if (nonStreamingText) {
+        options.onToken(nonStreamingText);
+        return { ok: true, text: nonStreamingText, providerName, model: config.model };
+      }
+      return { ok: false, error: `${providerName} returned empty streamed content.`, providerName, model: config.model };
+    }
+
+    return { ok: true, text: finalText, providerName, model: config.model };
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    return {
+      ok: false,
+      error: formatUnknownError(error, `${providerName} stream request failed.`),
+      providerName,
+      model: config.model,
+    };
+  }
 }
 
 async function requestConfiguredProviderTextScheduled(
@@ -247,6 +360,12 @@ export function extractProviderError(data: unknown) {
   return '';
 }
 
+export function parseProviderStreamChunk(chunk: string, apiMode: LlmProviderConfig['apiMode']) {
+  if (apiMode === 'anthropic-compatible') return parseAnthropicStreamChunk(chunk);
+  if (apiMode === 'gemini-native') return parseGeminiStreamChunk(chunk);
+  return parseOpenAiStreamChunk(chunk);
+}
+
 export function stripThinking(text: string) {
   return text
     .replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, '')
@@ -348,6 +467,87 @@ function buildOpenAiVisionImageUrl(
   input: { imageBase64: string; mimeType: string },
 ) {
   return `data:${input.mimeType};base64,${input.imageBase64}`;
+}
+
+function buildStreamingProviderBody(body: Record<string, unknown>, apiMode: LlmProviderConfig['apiMode']) {
+  if (apiMode === 'gemini-native') return body;
+  return {
+    ...body,
+    stream: true,
+  };
+}
+
+function parseOpenAiStreamChunk(chunk: string) {
+  let text = '';
+  for (const line of chunk.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || !trimmed.startsWith('data:')) continue;
+    const data = trimmed.slice(5).trim();
+    if (!data || data === '[DONE]') continue;
+    try {
+      const payload = JSON.parse(data) as {
+        choices?: Array<{ delta?: { content?: string }; message?: { content?: string } }>;
+      };
+      text += payload.choices?.map((choice) => choice.delta?.content ?? choice.message?.content ?? '').join('') ?? '';
+    } catch {
+      continue;
+    }
+  }
+  return text;
+}
+
+function parseAnthropicStreamChunk(chunk: string) {
+  let text = '';
+  for (const line of chunk.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || !trimmed.startsWith('data:')) continue;
+    const data = trimmed.slice(5).trim();
+    if (!data || data === '[DONE]') continue;
+    try {
+      const payload = JSON.parse(data) as {
+        type?: string;
+        delta?: { text?: string };
+        content_block?: { text?: string };
+      };
+      if (payload.type === 'content_block_delta') text += payload.delta?.text ?? '';
+      if (payload.type === 'content_block_start') text += payload.content_block?.text ?? '';
+    } catch {
+      continue;
+    }
+  }
+  return text;
+}
+
+function parseGeminiStreamChunk(chunk: string) {
+  let text = '';
+  for (const line of chunk.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const data = trimmed.startsWith('data:') ? trimmed.slice(5).trim() : trimmed;
+    if (!data || data === '[DONE]' || data === '[' || data === ']') continue;
+    try {
+      const cleaned = data.replace(/,$/, '');
+      const payload = JSON.parse(cleaned) as {
+        candidates?: Array<{ content?: { parts?: Array<{ text?: string; thought?: boolean }> } }>;
+      };
+      text +=
+        payload.candidates?.[0]?.content?.parts
+          ?.filter((part) => !part.thought)
+          .map((part) => part.text ?? '')
+          .join('') ?? '';
+    } catch {
+      continue;
+    }
+  }
+  return text;
+}
+
+function takeCompleteStreamEvents(buffer: string) {
+  const parts = buffer.split(/\r?\n\r?\n/);
+  return {
+    events: parts.slice(0, -1),
+    remainder: parts.at(-1) ?? '',
+  };
 }
 
 function parseJsonBody(body: string) {

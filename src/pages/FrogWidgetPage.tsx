@@ -2,7 +2,7 @@ import { Check, ChevronDown, ChevronUp, Clipboard, FileDown, Loader2, Minus, Rot
 import { type ClipboardEvent, type DragEvent, type PointerEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { LogicalSize } from '@tauri-apps/api/dpi';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { useLiveQuery } from 'dexie-react-hooks';
+import { useLiveQuery } from '@/lib/db/liveQuery';
 import {
   createRawAssetFromFile,
   createRawAssetFromUrl,

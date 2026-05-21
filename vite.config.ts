@@ -790,7 +790,11 @@ export default defineConfig(({ mode }) => {
             }
           });
 
-          server.middlewares.use('/api/query/answer', async (req, res) => {
+          server.middlewares.use('/api/query/answer', async (req, res, next) => {
+            if (req.url?.startsWith('/stream')) {
+              next();
+              return;
+            }
             if (req.method !== 'POST') {
               sendJson(res, 405, { error: 'Method not allowed' });
               return;
@@ -874,7 +878,86 @@ export default defineConfig(({ mode }) => {
             }
           });
 
-          server.middlewares.use('/api/query/chat', async (req, res) => {
+          server.middlewares.use('/api/query/answer/stream', async (req, res) => {
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { error: 'Method not allowed' });
+              return;
+            }
+
+            try {
+              const payload = (await readJsonBody(req)) as QueryAnswerRequest & {
+                providerConfig?: LlmProviderConfig | null;
+                reasoningMode?: LlmTextRequestInput['reasoningMode'];
+              };
+              if (!payload.question?.trim() || !Array.isArray(payload.pages) || payload.pages.length === 0) {
+                sendJson(res, 400, { error: 'question and pages are required.' });
+                return;
+              }
+
+              const requestProviderConfig = normalizeRequestProviderConfig(payload.providerConfig);
+              if (!requestProviderConfig && !minimaxApiKey) {
+                sendJson(res, 500, { error: 'MINIMAX_API_KEY is not configured.' });
+                return;
+              }
+
+              startSse(res);
+              const prompt = buildQueryAnswerPrompt(payload);
+              const systemPrompt =
+                '你是 MyWiki Query 3.0 的中文 Wiki 对话分析助手。请基于给定的编号 Wiki 页面进行高质量 Markdown 回答，禁止输出 <think>、思考过程或 JSON。必须在末尾追加一个形如 <!-- cited: 1,2 --> 的 HTML 注释。';
+
+              const providerResult = requestProviderConfig
+                ? await requestConfiguredProviderTextStream({
+                    config: requestProviderConfig,
+                    prompt,
+                    systemPrompt,
+                    maxTokens: resolveDevQueryAnswerMaxTokens(payload),
+                    reasoningMode: payload.reasoningMode,
+                    onToken: (token) => sendSse(res, { type: 'token', text: token }),
+                  })
+                : await requestOpenAiCompatibleTextStream({
+                    apiKey: minimaxApiKey,
+                    baseUrl: minimaxBaseUrl,
+                    model: minimaxModel,
+                    providerName: 'MiniMax',
+                    prompt,
+                    systemPrompt,
+                    maxTokens: resolveDevQueryAnswerMaxTokens(payload),
+                    extraBody: payload.reasoningMode === 'disabled' ? { thinking: { type: 'disabled' } } : undefined,
+                    onToken: (token) => sendSse(res, { type: 'token', text: token }),
+                  });
+
+              if (!providerResult.ok) {
+                sendSse(res, { type: 'error', error: `${providerResult.providerName} failed: ${providerResult.error}` });
+                res.end();
+                return;
+              }
+
+              const normalized = normalizeQueryAnswerResponse(
+                providerResult.text,
+                payload.structuredSupport?.draftAnswer || '现有 Wiki 页面还不能可靠回答这个问题。',
+              );
+              sendSse(res, {
+                type: 'done',
+                ...normalized,
+                provider: providerResult.providerName,
+                model: providerResult.model,
+              });
+              res.end();
+            } catch (error) {
+              if (!res.headersSent) startSse(res);
+              sendSse(res, {
+                type: 'error',
+                error: error instanceof Error ? error.message : 'Query answer stream generation failed.',
+              });
+              res.end();
+            }
+          });
+
+          server.middlewares.use('/api/query/chat', async (req, res, next) => {
+            if (req.url?.startsWith('/stream')) {
+              next();
+              return;
+            }
             if (req.method !== 'POST') {
               sendJson(res, 405, { error: 'Method not allowed' });
               return;
@@ -947,6 +1030,77 @@ export default defineConfig(({ mode }) => {
               sendJson(res, 500, {
                 error: error instanceof Error ? error.message : 'Query chat generation failed.',
               });
+            }
+          });
+
+          server.middlewares.use('/api/query/chat/stream', async (req, res) => {
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { error: 'Method not allowed' });
+              return;
+            }
+
+            try {
+              const payload = (await readJsonBody(req)) as QueryChatAnswerRequest & {
+                providerConfig?: LlmProviderConfig | null;
+                reasoningMode?: LlmTextRequestInput['reasoningMode'];
+              };
+              if (!payload.question?.trim()) {
+                sendJson(res, 400, { error: 'question is required.' });
+                return;
+              }
+
+              const requestProviderConfig = normalizeRequestProviderConfig(payload.providerConfig);
+              if (!requestProviderConfig && !minimaxApiKey) {
+                sendJson(res, 500, { error: 'MINIMAX_API_KEY is not configured.' });
+                return;
+              }
+
+              startSse(res);
+              const prompt = buildQueryChatPrompt(payload);
+              const systemPrompt =
+                '你是 MyWiki 的中文对话助手。当前轮次是闲聊或助手能力说明，简短自然回复，不要声称检索了 Wiki。';
+
+              const providerResult = requestProviderConfig
+                ? await requestConfiguredProviderTextStream({
+                    config: requestProviderConfig,
+                    prompt,
+                    systemPrompt,
+                    maxTokens: 800,
+                    reasoningMode: payload.reasoningMode,
+                    onToken: (token) => sendSse(res, { type: 'token', text: token }),
+                  })
+                : await requestOpenAiCompatibleTextStream({
+                    apiKey: minimaxApiKey,
+                    baseUrl: minimaxBaseUrl,
+                    model: minimaxModel,
+                    providerName: 'MiniMax',
+                    prompt,
+                    systemPrompt,
+                    maxTokens: 800,
+                    extraBody: payload.reasoningMode === 'disabled' ? { thinking: { type: 'disabled' } } : undefined,
+                    onToken: (token) => sendSse(res, { type: 'token', text: token }),
+                  });
+
+              if (!providerResult.ok) {
+                sendSse(res, { type: 'error', error: `${providerResult.providerName} failed: ${providerResult.error}` });
+                res.end();
+                return;
+              }
+
+              sendSse(res, {
+                type: 'done',
+                answer: normalizeQueryChatResponse(providerResult.text) || '你好，我在。你可以直接问我知识库里的具体问题。',
+                provider: providerResult.providerName,
+                model: providerResult.model,
+              });
+              res.end();
+            } catch (error) {
+              if (!res.headersSent) startSse(res);
+              sendSse(res, {
+                type: 'error',
+                error: error instanceof Error ? error.message : 'Query chat stream generation failed.',
+              });
+              res.end();
             }
           });
 
@@ -1563,6 +1717,7 @@ async function requestConfiguredProviderTwoStepCapture({
       prompt: buildCaptureMarkdownAnalysisPrompt(structuredContent, entityIndexJson, workspaceContext),
       systemPrompt: 'You are the MyWiki source reading agent. Output Markdown analysis only, not JSON.',
       maxTokens: 3200,
+      reasoningMode: 'disabled',
     });
     if (!markdownAnalysisResult.ok) return markdownAnalysisResult;
 
@@ -1578,6 +1733,7 @@ async function requestConfiguredProviderTwoStepCapture({
       systemPrompt: 'You are the MyWiki structured ingest agent. Output only the schema-compliant JSON object.',
       maxTokens: STRUCTURED_JSON_MAX_TOKENS,
       structuredOutput: buildCaptureAnalysisStructuredOutput(),
+      reasoningMode: 'disabled',
     });
     if (!structuredAnalysisResult.ok) return structuredAnalysisResult;
 
@@ -1619,6 +1775,7 @@ async function normalizeCaptureAnalysisWithConfiguredProviderRepair({
       systemPrompt: 'You are the MyWiki JSON repair agent. Output only a valid JSON object, not Markdown.',
       maxTokens: STRUCTURED_JSON_MAX_TOKENS,
       structuredOutput: buildCaptureAnalysisStructuredOutput('repair_capture_analysis'),
+      reasoningMode: 'disabled',
     });
     if (!repairResult.ok) {
       throw new Error(`Capture analysis JSON repair failed: ${repairResult.error}`);
@@ -1671,6 +1828,7 @@ async function prepareConfiguredProviderContentForStructuredCapture({
       prompt: buildCaptureDigestPrompt(chunks[index], index + 1, chunks.length, workspaceContext),
       systemPrompt: 'You are the MyWiki long-document reading agent. Output only a Markdown reading digest, not JSON.',
       maxTokens: 1800,
+      reasoningMode: 'disabled',
     });
     if (!digestResult.ok) return { ok: false, error: `${config.providerId} long document digest failed: ${digestResult.error}` };
 
@@ -2341,6 +2499,58 @@ async function requestConfiguredProviderText({
   }
 }
 
+async function requestConfiguredProviderTextStream({
+  config,
+  prompt,
+  systemPrompt,
+  maxTokens,
+  responseFormat,
+  structuredOutput,
+  reasoningMode,
+  onToken,
+}: {
+  config: LlmProviderConfig;
+  onToken: (token: string) => void;
+} & LlmTextRequestInput): Promise<{ ok: true; text: string; providerName: string; model: string } | { ok: false; error: string; providerName: string; model: string }> {
+  const providerName = config.providerId;
+  try {
+    const request = buildProviderTextRequest(config, { prompt, systemPrompt, maxTokens, responseFormat, structuredOutput, reasoningMode });
+    const response = await fetchWithTimeout(request.url, {
+      method: 'POST',
+      headers: request.headers,
+      body: JSON.stringify(buildDevStreamingProviderBody(request.body, request.responseApiMode)),
+    });
+    const raw = await readProviderStream(response, request.responseApiMode, onToken);
+
+    if (!response.ok) {
+      const data = safeParseJson(raw);
+      return {
+        ok: false,
+        error: extractProviderError(data) || `${providerName} request failed with ${response.status}.`,
+        providerName,
+        model: config.model,
+      };
+    }
+
+    const streamText = collectProviderStreamText(raw, request.responseApiMode);
+    const text =
+      streamText ||
+      extractProviderText(safeParseJson(raw), request.responseApiMode, { includeToolUseInput: Boolean(structuredOutput) });
+    if (!streamText && text) onToken(text);
+    if (!text) {
+      return { ok: false, error: `${providerName} returned empty content.`, providerName, model: config.model };
+    }
+    return { ok: true, text, providerName, model: config.model };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : `${providerName} request failed.`,
+      providerName,
+      model: config.model,
+    };
+  }
+}
+
 async function requestOpenAiCompatibleText({
   apiKey,
   baseUrl,
@@ -2473,6 +2683,77 @@ async function requestOpenAiCompatibleTextOnce({
   }
 }
 
+async function requestOpenAiCompatibleTextStream({
+  apiKey,
+  baseUrl,
+  model,
+  providerName,
+  prompt,
+  systemPrompt,
+  maxTokens,
+  extraBody,
+  onToken,
+}: {
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  providerName: string;
+  prompt: string;
+  systemPrompt: string;
+  maxTokens: number;
+  extraBody?: Record<string, unknown>;
+  onToken: (token: string) => void;
+}): Promise<{ ok: true; text: string; providerName: string; model: string } | { ok: false; error: string; providerName: string; model: string }> {
+  try {
+    const response = await fetchWithTimeout(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          {
+            role: 'system',
+            content: systemPrompt,
+          },
+          {
+            role: 'user',
+            content: prompt,
+          },
+        ],
+        stream: true,
+        temperature: 0.2,
+        max_tokens: maxTokens,
+        ...extraBody,
+      }),
+    });
+    const raw = await readProviderStream(response, 'openai-compatible', onToken);
+
+    if (!response.ok) {
+      const data = safeParseJson(raw);
+      return {
+        ok: false,
+        error: extractProviderError(data) || `${providerName} request failed with ${response.status}.`,
+        providerName,
+        model,
+      };
+    }
+
+    const text = collectProviderStreamText(raw, 'openai-compatible') || extractProviderText(safeParseJson(raw), 'openai-compatible');
+    if (!text) return { ok: false, error: `${providerName} returned empty content.`, providerName, model };
+    return { ok: true, text, providerName, model };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : `${providerName} request failed.`,
+      providerName,
+      model,
+    };
+  }
+}
+
 function extractProviderText(
   data: unknown,
   apiMode: LlmProviderConfig['apiMode'],
@@ -2518,6 +2799,140 @@ function extractProviderText(
     if (toolArguments?.trim()) return toolArguments.trim();
   }
   return first?.message?.content?.trim() ?? '';
+}
+
+function buildDevStreamingProviderBody(body: Record<string, unknown>, apiMode: LlmProviderConfig['apiMode']) {
+  if (apiMode === 'gemini-native') return body;
+  return {
+    ...body,
+    stream: true,
+  };
+}
+
+async function readProviderStream(
+  response: Response,
+  apiMode: LlmProviderConfig['apiMode'],
+  onToken: (token: string) => void,
+) {
+  if (!response.body) return await response.text();
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let raw = '';
+  let buffer = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    const chunk = decoder.decode(value, { stream: true });
+    raw += chunk;
+    buffer += chunk;
+    const complete = takeCompleteProviderStreamEvents(buffer);
+    buffer = complete.remainder;
+    for (const event of complete.events) {
+      const token = parseProviderStreamChunk(event, apiMode);
+      if (token) onToken(token);
+    }
+  }
+  const tail = decoder.decode();
+  if (tail) {
+    raw += tail;
+    buffer += tail;
+  }
+  if (buffer.trim()) {
+    const token = parseProviderStreamChunk(buffer, apiMode);
+    if (token) onToken(token);
+  }
+  return raw;
+}
+
+function collectProviderStreamText(raw: string, apiMode: LlmProviderConfig['apiMode']) {
+  return parseProviderStreamChunk(raw, apiMode).trim();
+}
+
+function parseProviderStreamChunk(chunk: string, apiMode: LlmProviderConfig['apiMode']) {
+  if (apiMode === 'anthropic-compatible') return parseAnthropicStreamChunk(chunk);
+  if (apiMode === 'gemini-native') return parseGeminiStreamChunk(chunk);
+  return parseOpenAiStreamChunk(chunk);
+}
+
+function parseOpenAiStreamChunk(chunk: string) {
+  let text = '';
+  for (const line of chunk.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || !trimmed.startsWith('data:')) continue;
+    const data = trimmed.slice(5).trim();
+    if (!data || data === '[DONE]') continue;
+    try {
+      const payload = JSON.parse(data) as {
+        choices?: Array<{ delta?: { content?: string }; message?: { content?: string } }>;
+      };
+      text += payload.choices?.map((choice) => choice.delta?.content ?? choice.message?.content ?? '').join('') ?? '';
+    } catch {
+      continue;
+    }
+  }
+  return text;
+}
+
+function parseAnthropicStreamChunk(chunk: string) {
+  let text = '';
+  for (const line of chunk.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || !trimmed.startsWith('data:')) continue;
+    const data = trimmed.slice(5).trim();
+    if (!data || data === '[DONE]') continue;
+    try {
+      const payload = JSON.parse(data) as {
+        type?: string;
+        delta?: { text?: string };
+        content_block?: { text?: string };
+      };
+      if (payload.type === 'content_block_delta') text += payload.delta?.text ?? '';
+      if (payload.type === 'content_block_start') text += payload.content_block?.text ?? '';
+    } catch {
+      continue;
+    }
+  }
+  return text;
+}
+
+function parseGeminiStreamChunk(chunk: string) {
+  let text = '';
+  for (const line of chunk.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const data = trimmed.startsWith('data:') ? trimmed.slice(5).trim() : trimmed;
+    if (!data || data === '[DONE]' || data === '[' || data === ']') continue;
+    try {
+      const cleaned = data.replace(/,$/, '');
+      const payload = JSON.parse(cleaned) as {
+        candidates?: Array<{ content?: { parts?: Array<{ text?: string; thought?: boolean }> } }>;
+      };
+      text +=
+        payload.candidates?.[0]?.content?.parts
+          ?.filter((part) => !part.thought)
+          .map((part) => part.text ?? '')
+          .join('') ?? '';
+    } catch {
+      continue;
+    }
+  }
+  return text;
+}
+
+function safeParseJson(value: string) {
+  try {
+    return value ? JSON.parse(value) : {};
+  } catch {
+    return { message: value };
+  }
+}
+
+function takeCompleteProviderStreamEvents(buffer: string) {
+  const parts = buffer.split(/\r?\n\r?\n/);
+  return {
+    events: parts.slice(0, -1),
+    remainder: parts.at(-1) ?? '',
+  };
 }
 
 function extractProviderError(data: unknown) {
@@ -2582,6 +2997,24 @@ function sendJson(res: import('node:http').ServerResponse, statusCode: number, p
   res.statusCode = statusCode;
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.end(JSON.stringify(payload));
+}
+
+function startSse(res: import('node:http').ServerResponse) {
+  res.statusCode = 200;
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+}
+
+function sendSse(res: import('node:http').ServerResponse, payload: unknown) {
+  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
+function resolveDevQueryAnswerMaxTokens(payload: QueryAnswerRequest) {
+  const mode = payload.queryMode;
+  if (!mode || mode.kind === 'lookup') return mode?.answerShape === 'direct' ? 900 : 1400;
+  return 2400;
 }
 
 function requireDevFsPath(value: unknown, label: string) {

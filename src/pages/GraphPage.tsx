@@ -23,7 +23,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import { useLiveQuery } from 'dexie-react-hooks';
+import { useLiveQuery } from '@/lib/db/liveQuery';
 import { Link, useNavigate } from 'react-router';
 import * as THREE from 'three';
 import {
@@ -318,7 +318,7 @@ export function GraphPage() {
   );
   const openGraphNode = useCallback(
     (node: SceneNode) => {
-      navigate(`/wiki/${node.entity.type}/${node.entity.id}`);
+      navigate(buildWikiEntityHref(node.entity));
     },
     [navigate],
   );
@@ -738,7 +738,7 @@ export function GraphPage() {
                   return (
                     <a
                       key={node.entity.id}
-                      href={`/wiki/${node.entity.type}/${node.entity.id}`}
+                      href={buildWikiEntityHref(node.entity)}
                       onClick={(event) => {
                         if (nodeWasDraggedRef.current) {
                           event.preventDefault();
@@ -875,7 +875,7 @@ export function GraphPage() {
                             return (
                               <Link
                                 key={entityId}
-                                to={`/wiki/${entity.type}/${entity.id}`}
+                                to={buildWikiEntityHref(entity)}
                                 onClick={(event) => event.stopPropagation()}
                                 className="rounded-full border border-[#d9d9d6] bg-white px-2.5 py-1 text-xs text-[#155eef]"
                               >
@@ -1573,6 +1573,11 @@ function InsightIcon({ type }: { type: keyof typeof insightTypeLabels }) {
   if (type === 'bridge-node') return <GitBranch size={16} className={className} />;
   if (type === 'dense-hub') return <Network size={16} className={className} />;
   return <Radar size={16} className={className} />;
+}
+
+function buildWikiEntityHref(entity: Entity) {
+  const reference = entity.title.trim() || entity.id;
+  return `/wiki?ref=${encodeURIComponent(reference)}`;
 }
 
 function buildHighlightedNodeIds(scene: GraphScene, hoveredNodeId: string | null, selectedInsight: GraphInsight | null) {

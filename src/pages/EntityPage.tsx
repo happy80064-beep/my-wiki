@@ -1,6 +1,6 @@
 import { Save, Trash2 } from 'lucide-react';
 import { type ReactNode, useEffect, useMemo, useState } from 'react';
-import { useLiveQuery } from 'dexie-react-hooks';
+import { useLiveQuery } from '@/lib/db/liveQuery';
 import { Link, useParams } from 'react-router';
 import { RelationshipGraph } from '@/components/wiki/RelationshipGraph';
 import { getSubgraph, relationshipTypeLabel } from '@/lib/graph';

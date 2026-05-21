@@ -231,6 +231,40 @@ describe('wiki patch prompts', () => {
     );
   });
 
+  it('derives a substantive project entity from a Chinese imported markdown heading when structured output is empty', () => {
+    const analysis = normalizeCaptureAnalysis(
+      JSON.stringify({
+        entities: [],
+        concepts: [],
+        claims: [],
+        hierarchies: [],
+        indicators: [],
+        contradictions: [],
+        recommendedUpdates: [],
+      }),
+    );
+    const draft = normalizeCaptureAnalysisToCaptureDraft(
+      analysis,
+      [
+        '# 导入文件：管理式医疗.md',
+        '',
+        '来源格式：Markdown',
+        '',
+        '# 福瑞股份肝病专科管理式医疗+价值医疗双模式落地执行框架',
+        '',
+        '围绕患者覆盖、费用控制、价值医疗闭环和执行指标展开。',
+      ].join('\n'),
+    );
+    const entities = [draft.primaryEntity, ...draft.relatedEntities];
+
+    expect(entities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ title: '管理式医疗', tags: expect.arrayContaining(['source']) }),
+        expect.objectContaining({ title: '福瑞股份肝病专科管理式医疗+价值医疗双模式落地执行框架', type: 'project' }),
+      ]),
+    );
+  });
+
   it('keeps the reference-project style 50k source window before long document digesting', () => {
     const content = `${'a'.repeat(50000)}TAIL_SHOULD_NOT_ENTER_STRUCTURED_CAPTURE`;
     const bounded = buildCaptureSourceForStructuredProcessing(content);

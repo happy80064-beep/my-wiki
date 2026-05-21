@@ -1,4 +1,6 @@
-import type { LlmProviderConfig } from './providers';
+import type { LlmProviderConfig, LlmReasoningMode } from './providers';
+
+export type { LlmReasoningMode } from './providers';
 
 export type LlmTextRequestInput = {
   prompt: string;
@@ -8,8 +10,6 @@ export type LlmTextRequestInput = {
   structuredOutput?: LlmStructuredOutputSpec;
   reasoningMode?: LlmReasoningMode;
 };
-
-export type LlmReasoningMode = 'disabled';
 
 export type LlmTextHttpRequest = {
   url: string;
@@ -51,6 +51,8 @@ export function anthropicCompatibleRequiresBearerAuth(url: string) {
 export function buildOpenAiTextRequest(config: LlmProviderConfig, input: LlmTextRequestInput): LlmTextHttpRequest {
   const maxTokens = resolveTextMaxTokens(config, input);
   const reasoningBody = buildOpenAiReasoningBody(config, input.reasoningMode);
+  const temperatureBody = shouldOmitOpenAiTemperature(config) ? {} : { temperature: 0.2 };
+  const tokenBudgetBody = shouldUseOpenAiCompletionTokens(config) ? { max_completion_tokens: maxTokens } : { max_tokens: maxTokens };
   const structuredTool = input.structuredOutput
     ? {
         type: 'function',
@@ -75,8 +77,8 @@ export function buildOpenAiTextRequest(config: LlmProviderConfig, input: LlmText
         { role: 'user', content: input.prompt },
       ],
       stream: false,
-      temperature: 0.2,
-      max_tokens: maxTokens,
+      ...temperatureBody,
+      ...tokenBudgetBody,
       ...(structuredTool
         ? {
             tools: [structuredTool],
@@ -93,6 +95,7 @@ export function buildAnthropicTextRequest(config: LlmProviderConfig, input: LlmT
   const url = buildAnthropicMessagesUrl(config.endpoint);
   const maxTokens = resolveTextMaxTokens(config, input);
   const reasoningBody = buildAnthropicReasoningBody(config, input.reasoningMode);
+  const thinkingEnabled = isAnthropicThinkingEnabled(reasoningBody);
   const headers: Record<string, string> = { 'Content-Type': jsonContentType };
   if (anthropicCompatibleRequiresBearerAuth(url)) {
     headers.Authorization = `Bearer ${config.apiKey.trim()}`;
@@ -110,7 +113,7 @@ export function buildAnthropicTextRequest(config: LlmProviderConfig, input: LlmT
       system: input.systemPrompt,
       messages: [{ role: 'user', content: input.prompt }],
       stream: false,
-      temperature: 0.2,
+      ...(thinkingEnabled ? {} : { temperature: 0.2 }),
       max_tokens: maxTokens,
       ...(input.structuredOutput
         ? {
@@ -176,27 +179,89 @@ function isMiniMaxProvider(providerId: LlmProviderConfig['providerId']) {
 }
 
 function buildOpenAiReasoningBody(config: LlmProviderConfig, reasoningMode: LlmReasoningMode | undefined) {
-  if (reasoningMode !== 'disabled') return {};
-  if (isMiniMaxProvider(config.providerId) || config.providerId === 'deepseek' || endpointLooksLike(config.endpoint, /(minimax|minimaxi|deepseek)/i)) {
+  const mode = reasoningMode ?? config.reasoningMode ?? 'auto';
+  if (mode === 'auto') return {};
+  if (mode === 'disabled' && shouldUseOpenAiThinkingObject(config)) {
     return { thinking: { type: 'disabled' } };
   }
-  if (config.providerId === 'ollama' || /qwen[-_]?3/i.test(config.model)) {
+  if (mode === 'disabled' && (config.providerId === 'ollama' || /qwen[-_]?3/i.test(config.model))) {
     return { chat_template_kwargs: { enable_thinking: false } };
+  }
+  if (mode !== 'disabled' && shouldUseOpenAiThinkingObject(config)) {
+    return {
+      thinking: { type: 'enabled' },
+      ...(mode === 'low' || mode === 'medium' || mode === 'high' ? { reasoning_effort: mode } : {}),
+    };
+  }
+  if (mode === 'low' || mode === 'medium' || mode === 'high') {
+    return { reasoning_effort: mode };
   }
   return {};
 }
 
 function buildAnthropicReasoningBody(config: LlmProviderConfig, reasoningMode: LlmReasoningMode | undefined) {
-  if (reasoningMode !== 'disabled') return {};
-  if (isMiniMaxProvider(config.providerId) || endpointLooksLike(config.endpoint, /(minimax|minimaxi)/i)) {
-    return { thinking: { type: 'disabled' } };
+  const mode = reasoningMode ?? config.reasoningMode ?? 'auto';
+  if (mode === 'auto' || mode === 'disabled') {
+    if (mode === 'disabled' && (isMiniMaxProvider(config.providerId) || endpointLooksLike(config.endpoint, /(minimax|minimaxi)/i))) {
+      return { thinking: { type: 'disabled' } };
+    }
+    return {};
   }
-  return {};
+
+  const budget = resolveReasoningBudgetTokens(config, mode);
+  if (budget <= 0) return {};
+  return compactUndefinedProperties({
+    thinking: { type: 'enabled', budget_tokens: budget },
+    max_tokens: Math.max(resolveReasoningBudgetCeiling(config, budget), budget + 1),
+  });
 }
 
 function buildGeminiThinkingConfig(config: LlmProviderConfig, reasoningMode: LlmReasoningMode | undefined) {
-  if (reasoningMode !== 'disabled') return {};
-  return /gemini-2\.5-flash/i.test(config.model) ? { thinkingConfig: { thinkingBudget: 0 } } : {};
+  const mode = reasoningMode ?? config.reasoningMode ?? 'auto';
+  if (mode === 'auto') return {};
+  if (mode === 'disabled') return { thinkingConfig: { thinkingBudget: 0 } };
+  return { thinkingConfig: { thinkingBudget: resolveReasoningBudgetTokens(config, mode) } };
+}
+
+function shouldUseOpenAiThinkingObject(config: LlmProviderConfig) {
+  return (
+    isMiniMaxProvider(config.providerId) ||
+    config.providerId === 'deepseek' ||
+    config.providerId === 'zhipu' ||
+    endpointLooksLike(config.endpoint, /(minimax|minimaxi|deepseek|bigmodel|z\.ai)/i)
+  );
+}
+
+function shouldOmitOpenAiTemperature(config: LlmProviderConfig) {
+  if (shouldUseOpenAiCompletionTokens(config)) return true;
+  return endpointLooksLike(config.endpoint, /api\.moonshot\.(ai|cn)/i) || /(^|[/:.-])kimi([/:.-]|$)/i.test(config.model);
+}
+
+function shouldUseOpenAiCompletionTokens(config: LlmProviderConfig) {
+  const model = config.model.trim().toLowerCase();
+  return config.providerId === 'openai' && (/^gpt-5(?:[.\-_]|$)/.test(model) || /^o\d+(?:[.\-_]|$)/.test(model));
+}
+
+function isAnthropicThinkingEnabled(body: Record<string, unknown>) {
+  const thinking = body.thinking;
+  return Boolean(thinking && typeof thinking === 'object' && (thinking as { type?: unknown }).type === 'enabled');
+}
+
+function resolveReasoningBudgetTokens(config: LlmProviderConfig, mode: LlmReasoningMode) {
+  if (mode === 'custom') return Math.max(0, Math.floor(config.reasoningBudgetTokens ?? 0));
+  if (mode === 'low') return 1024;
+  if (mode === 'medium') return 4096;
+  if (mode === 'high') return 8192;
+  if (mode === 'max') return 16384;
+  return 0;
+}
+
+function resolveReasoningBudgetCeiling(config: LlmProviderConfig, budget: number) {
+  return Math.max(4096, Math.min(config.contextWindow || 200000, budget + 4096));
+}
+
+function compactUndefinedProperties<T extends Record<string, unknown>>(value: T): T {
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined)) as T;
 }
 
 function endpointLooksLike(endpoint: string, pattern: RegExp) {

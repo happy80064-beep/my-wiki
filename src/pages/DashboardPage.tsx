@@ -1,5 +1,5 @@
 import { AlertTriangle, Archive, CheckCircle2, Database, Info, Search, Sparkles } from 'lucide-react';
-import { useLiveQuery } from 'dexie-react-hooks';
+import { useLiveQuery } from '@/lib/db/liveQuery';
 import { WorkspaceStatusCard } from '@/components/workspace/WorkspaceStatusCard';
 import { runWikiLint } from '@/lib/graph';
 
@@ -7,7 +7,7 @@ const milestones = [
   {
     icon: Database,
     title: '统一本地数据层',
-    text: 'v2 会把 Raw Inbox、Wiki Markdown、索引和运行状态收拢到同一个文件工作区，逐步替代分散的 IndexedDB 数据。',
+    text: 'v2 会把 Raw Inbox、Wiki Markdown、索引和运行状态收拢到同一个文件工作区，作为统一业务数据源。',
   },
   {
     icon: Archive,

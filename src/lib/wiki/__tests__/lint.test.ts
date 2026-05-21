@@ -197,6 +197,33 @@ describe('wiki lint core', () => {
     expect(results.some((result) => result.type === 'broken-link')).toBe(false);
   });
 
+  it('matches generated entity-prefixed wikilinks to existing Chinese page titles', () => {
+    const pages: WikiLintPage[] = [
+      page('wiki/projects/cunde.md', 'CUNDE DC 疗法', [
+        '---',
+        'type: project',
+        'title: CUNDE DC 疗法',
+        'updated: 2026-05-21',
+        '---',
+        '',
+        '负责人是 [[entities/entity-李俊杰|李俊杰]]。',
+      ]),
+      page('wiki/entities/李俊杰.md', '李俊杰', [
+        '---',
+        'type: entity',
+        'title: 李俊杰',
+        'updated: 2026-05-21',
+        '---',
+        '',
+        'Body',
+      ]),
+    ];
+
+    const results = runStructuralWikiLint(pages);
+
+    expect(results.some((result) => result.type === 'broken-link')).toBe(false);
+  });
+
   it('keeps parenthetical alias links broken when simplification would be ambiguous', () => {
     const pages: WikiLintPage[] = [
       page('wiki/sources/runtime-source.md', 'Runtime Source', [

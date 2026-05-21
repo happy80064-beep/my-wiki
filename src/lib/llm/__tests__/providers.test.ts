@@ -66,10 +66,18 @@ describe('llm provider presets', () => {
 
   it('includes current Zhipu vision, OCR and embedding model capabilities', () => {
     expect(getProviderModelPreset('zhipu', 'glm-4.6v')?.capabilities).toEqual(['text', 'vision']);
+    expect(getProviderModelPreset('zhipu', 'glm-4v-plus')?.capabilities).toEqual(['text', 'vision']);
     expect(getProviderModelPreset('zhipu', 'glm-5v-turbo')?.capabilities).toEqual(['text', 'vision']);
     expect(getProviderModelPreset('zhipu', 'glm-4.6v-flash')?.capabilities).toEqual(['text', 'vision']);
     expect(getProviderModelPreset('zhipu', 'glm-ocr')?.capabilities).toEqual(['vision', 'ocr']);
     expect(getProviderModelPreset('zhipu', 'embedding-3')?.capabilities).toEqual(['embedding']);
+  });
+
+  it('includes current reasoning-capable provider model suggestions', () => {
+    expect(getProviderModelPreset('openai', 'gpt-4.1-nano')?.recommendedFor).toContain('query-fast');
+    expect(getProviderModelPreset('deepseek', 'deepseek-reasoner')?.recommendedFor).toContain('query-deep');
+    expect(getProviderModelPreset('moonshot', 'kimi-k2-thinking')?.recommendedFor).toContain('query-deep');
+    expect(getProviderModelPreset('nvidia', 'qwen/qwen3.5-397b-a17b')?.recommendedFor).toContain('query-deep');
   });
 
   it('validates enabled remote provider config', () => {
@@ -82,6 +90,7 @@ describe('llm provider presets', () => {
         apiKey: '',
         model: 'gpt-5.5',
         contextWindow: 200000,
+        reasoningMode: 'auto',
       }),
     ).toEqual(['API Key is required for enabled remote providers.']);
 
@@ -94,6 +103,8 @@ describe('llm provider presets', () => {
         apiKey: 'sk-test',
         model: 'gpt-5.5',
         contextWindow: 200000,
+        reasoningMode: 'custom',
+        reasoningBudgetTokens: 2048,
       }),
     ).toEqual([]);
   });
@@ -108,6 +119,7 @@ describe('llm provider presets', () => {
         apiKey: '',
         model: 'qwen3',
         contextWindow: 32000,
+        reasoningMode: 'disabled',
       }),
     ).toEqual([]);
   });

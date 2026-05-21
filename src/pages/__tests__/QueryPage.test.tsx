@@ -6,10 +6,10 @@ import { QueryPage } from '../QueryPage';
 const answerQueryChatMock = vi.hoisted(() => vi.fn());
 const retrieveQueryContextMock = vi.hoisted(() => vi.fn());
 const runStructuredQueryMock = vi.hoisted(() => vi.fn());
-const answerQueryWithWikiPagesMock = vi.hoisted(() => vi.fn());
+const streamAnswerQueryWithWikiPagesMock = vi.hoisted(() => vi.fn());
 
 vi.mock('@/lib/query/chatAnswerClient', () => ({
-  answerQueryChat: answerQueryChatMock,
+  streamAnswerQueryChat: answerQueryChatMock,
 }));
 
 vi.mock('@/lib/query/wikiRetrieval', () => ({
@@ -17,7 +17,14 @@ vi.mock('@/lib/query/wikiRetrieval', () => ({
 }));
 
 vi.mock('@/lib/query/queryAnswerClient', () => ({
-  answerQueryWithWikiPages: answerQueryWithWikiPagesMock,
+  streamAnswerQueryWithWikiPages: streamAnswerQueryWithWikiPagesMock,
+}));
+
+vi.mock('@/lib/query/workspaceContext', () => ({
+  loadQueryWorkspaceContext: vi.fn(async () => ({
+    purpose: '测试目的',
+    trace: ['已读取 purpose.md。', '已执行工作区 Markdown chunk 级词法召回，选入 1 个候选片段。'],
+  })),
 }));
 
 vi.mock('@/lib/graph', async (importOriginal) => {
@@ -40,14 +47,18 @@ describe('QueryPage', () => {
     answerQueryChatMock.mockReset();
     retrieveQueryContextMock.mockReset();
     runStructuredQueryMock.mockReset();
-    answerQueryWithWikiPagesMock.mockReset();
+    streamAnswerQueryWithWikiPagesMock.mockReset();
   });
 
   it('routes chat intent before wiki retrieval and structured query', async () => {
-    answerQueryChatMock.mockResolvedValue({
+    answerQueryChatMock.mockImplementation(async (payload) => {
+      payload.onToken('你好，我在。');
+      payload.onToken('你可以直接问我知识库里的具体问题。');
+      return {
       answer: '你好，我在。你可以直接问我知识库里的具体问题。',
       provider: 'test-provider',
       model: 'test-model',
+      };
     });
 
     render(<QueryPage />);
@@ -62,12 +73,13 @@ describe('QueryPage', () => {
         expect.objectContaining({
           question: '你好',
           intentLabel: '问候/寒暄',
+          onToken: expect.any(Function),
         }),
       );
     });
     expect(retrieveQueryContextMock).not.toHaveBeenCalled();
     expect(runStructuredQueryMock).not.toHaveBeenCalled();
-    expect(answerQueryWithWikiPagesMock).not.toHaveBeenCalled();
+    expect(streamAnswerQueryWithWikiPagesMock).not.toHaveBeenCalled();
     expect(await screen.findByText('你好，我在。你可以直接问我知识库里的具体问题。')).toBeTruthy();
   });
 
@@ -78,11 +90,15 @@ describe('QueryPage', () => {
       pages: [makeRetrievedPage()],
       trace: ['问题分词：福瑞、完工', 'Wiki 候选页：1 个，实际选入上下文 1 个。'],
     });
-    answerQueryWithWikiPagesMock.mockResolvedValue({
+    streamAnswerQueryWithWikiPagesMock.mockImplementation(async (payload) => {
+      payload.onToken('**结论：** 当前 Wiki 没有明确写出完工/竣工日期，');
+      payload.onToken('只能确认预计 2029 年投入运营。[1]');
+      return {
       answer: '**结论：** 当前 Wiki 没有明确写出完工/竣工日期，只能确认预计 2029 年投入运营。[1]',
       citedIndices: [1],
       provider: 'test-provider',
       model: 'test-model',
+      };
     });
 
     render(<QueryPage />);
@@ -96,13 +112,15 @@ describe('QueryPage', () => {
     await waitFor(() => {
       expect(retrieveQueryContextMock).toHaveBeenCalledWith(
         expect.stringContaining('投入运营'),
-        expect.objectContaining({ limit: 10 }),
-      );
-      expect(answerQueryWithWikiPagesMock).toHaveBeenCalledWith(
+          expect.objectContaining({ limit: 8, enableGraphExpansion: false }),
+        );
+      expect(streamAnswerQueryWithWikiPagesMock).toHaveBeenCalledWith(
         expect.objectContaining({
           question: '福瑞科技园三期什么时候完工？',
           reasoningMode: 'disabled',
+          queryMode: expect.objectContaining({ kind: 'lookup', answerShape: 'direct' }),
           pages: [expect.objectContaining({ title: '福瑞健康科技园三期项目' })],
+          onToken: expect.any(Function),
         }),
       );
     });
@@ -117,11 +135,15 @@ describe('QueryPage', () => {
       pages: [makeRetrievedPage()],
       trace: ['问题分词：福瑞、商业模式、风险', 'Wiki 候选页：1 个，实际选入上下文 1 个。'],
     });
-    answerQueryWithWikiPagesMock.mockResolvedValue({
+    streamAnswerQueryWithWikiPagesMock.mockImplementation(async (payload) => {
+      payload.onToken('**结论：** 项目以医康旅一体化为主线，');
+      payload.onToken('关键风险集中在医疗资质、招商去化和现金流节奏。[1]');
+      return {
       answer: '**结论：** 项目以医康旅一体化为主线，关键风险集中在医疗资质、招商去化和现金流节奏。[1]',
       citedIndices: [1],
       provider: 'test-provider',
       model: 'test-model',
+      };
     });
 
     render(<QueryPage />);
@@ -132,10 +154,17 @@ describe('QueryPage', () => {
     fireEvent.click(screen.getByRole('button', { name: /发送/ }));
 
     await waitFor(() => {
-      expect(answerQueryWithWikiPagesMock).toHaveBeenCalledWith(
+      expect(retrieveQueryContextMock).toHaveBeenCalledWith(
+        expect.stringContaining('福瑞健康科技园三期项目'),
+        expect.objectContaining({ limit: 12, enableGraphExpansion: true }),
+      );
+      expect(streamAnswerQueryWithWikiPagesMock).toHaveBeenCalledWith(
         expect.objectContaining({
           question: '福瑞健康科技园三期项目的商业模式和关键风险是什么？',
           reasoningMode: 'disabled',
+          queryMode: expect.objectContaining({ kind: 'mixed', answerShape: 'analysis' }),
+          workspaceContext: expect.objectContaining({ purpose: '测试目的' }),
+          onToken: expect.any(Function),
         }),
       );
     });
@@ -161,7 +190,7 @@ describe('QueryPage', () => {
     await waitFor(() => {
       expect(retrieveQueryContextMock).toHaveBeenCalled();
     });
-    expect(answerQueryWithWikiPagesMock).not.toHaveBeenCalled();
+    expect(streamAnswerQueryWithWikiPagesMock).not.toHaveBeenCalled();
     expect(runStructuredQueryMock).not.toHaveBeenCalled();
     expect(await screen.findByText(/当前 Wiki 没有检索到足以回答这个问题的页面/)).toBeTruthy();
   });

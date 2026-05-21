@@ -91,6 +91,7 @@ async function extractCaptureDraftWithRuntimeProvider(
     prompt: buildCaptureMarkdownAnalysisPrompt(structuredContent, entityIndexJson, workspaceContext),
     systemPrompt: '你是 MyWiki 原文件阅读 Agent。只输出 Markdown 分析文本，不要输出 JSON。',
     maxTokens: 3200,
+    reasoningMode: 'disabled',
   }, { signal: options.signal });
   if (!markdownAnalysisResult.ok) {
     throw new Error(`${markdownAnalysisResult.providerName} markdown analysis failed: ${markdownAnalysisResult.error}`);
@@ -107,6 +108,7 @@ async function extractCaptureDraftWithRuntimeProvider(
     systemPrompt: '你是 MyWiki 结构化入库 Agent。只输出符合 schema 的 JSON 对象。',
     maxTokens: 4200,
     structuredOutput: buildCaptureAnalysisStructuredOutput(),
+    reasoningMode: 'disabled',
   }, { signal: options.signal });
   if (!structuredAnalysisResult.ok) {
     throw new Error(`${structuredAnalysisResult.providerName} structured analysis failed: ${structuredAnalysisResult.error}`);
@@ -214,6 +216,7 @@ async function getOrCreateCaptureDigest(input: {
     prompt,
     systemPrompt: 'You are the MyWiki long-document reading agent. Output only a Markdown reading digest, not JSON.',
     maxTokens: 1800,
+    reasoningMode: 'disabled',
   }, { signal: input.signal });
   if (!digestResult.ok) {
     throw new Error(`${digestResult.providerName} long document digest failed: ${digestResult.error}`);
@@ -333,6 +336,7 @@ async function normalizeCaptureAnalysisWithRepair(input: {
       systemPrompt: '你是 MyWiki JSON 修复 Agent。只输出一个合法 JSON 对象，不要 Markdown。',
       maxTokens: 2600,
       structuredOutput: buildCaptureAnalysisStructuredOutput('repair_capture_analysis'),
+      reasoningMode: 'disabled',
     }, { signal: input.signal });
     if (!repairResult.ok) {
       throw new Error(`模型返回的摄入分析 JSON 不合法，自动修复请求失败：${repairResult.error}`);

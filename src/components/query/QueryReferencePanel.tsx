@@ -1,6 +1,6 @@
 import { ExternalLink, FileText, Globe2, Layers, Tags, X } from 'lucide-react';
 import type { ReactNode } from 'react';
-import { useLiveQuery } from 'dexie-react-hooks';
+import { useLiveQuery } from '@/lib/db/liveQuery';
 import { db } from '@/lib/db';
 import type { QueryChatReference, QueryChatReferencePreview } from '@/lib/query/chatHelpers';
 import { buildInitialBrowserEntityMarkdown } from '@/lib/wiki/browserWikiPageHelpers';

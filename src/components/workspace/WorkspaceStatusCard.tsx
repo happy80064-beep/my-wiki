@@ -10,8 +10,9 @@ import {
   getWorkspaceDefaultRoot,
   initializeAndScanWorkspace,
   projectTemplates,
+  restoreWorkspaceRecordsFromWorkspace,
   sameWorkspaceRoot,
-  switchIndexedDbKnowledgeWorkspace,
+  switchWorkspaceRecordsRoot,
   useWorkspaceRuntimeStore,
   type ProjectTemplateId,
   type WorkspaceRegistryItem,
@@ -70,6 +71,7 @@ export function WorkspaceStatusCard() {
     try {
       const root = activeRoot || (await getWorkspaceDefaultRoot());
       setDefaultParentDirectory(parentDirectoryOf(root));
+      await restoreWorkspaceRecordsFromWorkspace(root);
       const nextSnapshot = await initializeAndScanWorkspace(createWorkspaceStorage(), root, {
         templateId,
         outputLanguage: 'zh-CN',
@@ -94,7 +96,7 @@ export function WorkspaceStatusCard() {
     setCreateError('');
     try {
       const project = await createWorkspaceProject(createWorkspaceStorage(), input);
-      const switched = await switchIndexedDbKnowledgeWorkspace(project.root);
+      const switched = await switchWorkspaceRecordsRoot(project.root);
       setSnapshot(switched.workspace);
       setActiveWorkspace(switched.workspace.layout.root, switched.workspace, {
         name: project.name,
@@ -130,7 +132,7 @@ export function WorkspaceStatusCard() {
     setStatus('loading');
     setMessage('正在保存当前知识库并切换...');
     try {
-      const switched = await switchIndexedDbKnowledgeWorkspace(targetRoot);
+      const switched = await switchWorkspaceRecordsRoot(targetRoot);
       setSnapshot(switched.workspace);
       setActiveWorkspace(switched.workspace.layout.root, switched.workspace, {
         name: workspace?.name,
@@ -357,8 +359,8 @@ function basenameOf(path: string) {
   return normalized.split('/').filter(Boolean).at(-1) || 'MyWiki 知识库';
 }
 
-function buildSwitchMessage(name: string, mode: 'snapshot' | 'markdown' | 'empty') {
-  const sourceLabel = mode === 'snapshot' ? '完整快照' : mode === 'markdown' ? 'Markdown 页面' : '空白工作区';
+function buildSwitchMessage(name: string, mode: 'records' | 'markdown' | 'empty') {
+  const sourceLabel = mode === 'records' ? '工作区记录' : mode === 'markdown' ? 'Markdown 页面' : '空白工作区';
   return `已切换到知识库：${name}。已加载${sourceLabel}，后续知识库、图谱、审核、巡检和查询会读取当前知识库。`;
 }
 

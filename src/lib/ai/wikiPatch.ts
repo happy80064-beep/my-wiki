@@ -1239,16 +1239,25 @@ function inferImportedKnowledgeEntity(
 }
 
 function extractImportedKnowledgeTitleCandidates(content: string) {
-  const lines = content
+  const candidates = content
     .replace(/^#\s*导入文件[:：].*$/m, '')
     .replace(/^#\s*原始文件[:：].*$/m, '')
     .split(/\r?\n/)
-    .flatMap((line) => splitCandidateLine(line))
-    .map(cleanCandidateTitle)
-    .filter(Boolean);
+    .flatMap((line) => {
+      const isHeading = /^#{1,6}\s+\S/.test(line.trim());
+      return splitCandidateLine(line)
+        .map(cleanCandidateTitle)
+        .filter(Boolean)
+        .map((title) => ({ title, scoreBonus: isHeading ? 5 : 0 }));
+    });
 
-  return [...new Set(lines)]
-    .map((title) => ({ title, score: scoreKnowledgeTitleCandidate(title) }))
+  const byTitle = new Map<string, number>();
+  for (const candidate of candidates) {
+    byTitle.set(candidate.title, Math.max(byTitle.get(candidate.title) ?? 0, candidate.scoreBonus));
+  }
+
+  return Array.from(byTitle.entries())
+    .map(([title, scoreBonus]) => ({ title, score: scoreKnowledgeTitleCandidate(title) + scoreBonus }))
     .filter((item) => item.score > 0)
     .sort((left, right) => right.score - left.score || left.title.length - right.title.length)
     .map((item) => item.title)
@@ -1295,7 +1304,7 @@ function scoreKnowledgeTitleCandidate(value: string) {
 }
 
 function inferEntityTypeFromKnowledgeText(value: string): EntityType {
-  if (/(项目|可研|方案|测算|计划|规划|Project|Study|Plan)/i.test(value)) return 'project';
+  if (/(项目|可研|方案|测算|计划|规划|执行框架|落地执行|Project|Study|Plan)/i.test(value)) return 'project';
   if (/(会议|纪要|访谈|meeting|minutes|interview)/i.test(value)) return 'event';
   return 'topic';
 }

@@ -36,6 +36,8 @@ export type LlmProviderPreset = {
 
 export type ModelCapability = 'text' | 'vision' | 'embedding' | 'ocr';
 
+export type LlmReasoningMode = 'auto' | 'disabled' | 'low' | 'medium' | 'high' | 'max' | 'custom';
+
 export type LlmModelPreset = {
   id: string;
   label?: string;
@@ -66,6 +68,8 @@ export type LlmProviderConfig = {
   apiKey: string;
   model: string;
   contextWindow: number;
+  reasoningMode?: LlmReasoningMode;
+  reasoningBudgetTokens?: number;
 };
 
 export const ROLE_REQUIRED_CAPABILITIES: Record<ModelRoleId, ModelCapability[]> = {
@@ -82,10 +86,22 @@ export const LLM_MODEL_PRESETS: Partial<Record<LlmProviderId, LlmModelPreset[]>>
     { id: 'gpt-5.5', capabilities: ['text', 'vision'], recommendedFor: ['wiki-compile', 'query-deep', 'vision'] },
     { id: 'gpt-5.4', capabilities: ['text', 'vision'], recommendedFor: ['wiki-compile', 'query-deep', 'vision'] },
     { id: 'gpt-5.4-mini', capabilities: ['text', 'vision'], recommendedFor: ['query-fast', 'vision'] },
+    { id: 'gpt-4o', capabilities: ['text', 'vision'], recommendedFor: ['wiki-compile', 'query-deep', 'vision'] },
+    { id: 'gpt-4o-mini', capabilities: ['text', 'vision'], recommendedFor: ['query-fast', 'vision'] },
+    { id: 'gpt-4.1', capabilities: ['text', 'vision'], recommendedFor: ['wiki-compile', 'query-deep'] },
+    { id: 'gpt-4.1-mini', capabilities: ['text', 'vision'], recommendedFor: ['query-fast'] },
+    { id: 'gpt-4.1-nano', capabilities: ['text'], recommendedFor: ['query-fast'] },
+    { id: 'o3', capabilities: ['text'], recommendedFor: ['query-deep', 'review-lint'] },
+    { id: 'o3-mini', capabilities: ['text'], recommendedFor: ['query-fast', 'review-lint'] },
+    { id: 'o1', capabilities: ['text'], recommendedFor: ['query-deep', 'review-lint'] },
+    { id: 'o1-mini', capabilities: ['text'], recommendedFor: ['query-fast'] },
     { id: 'text-embedding-3-large', capabilities: ['embedding'], recommendedFor: ['embedding'] },
     { id: 'text-embedding-3-small', capabilities: ['embedding'], recommendedFor: ['embedding'] },
   ],
   anthropic: [
+    { id: 'claude-opus-4.7', capabilities: ['text', 'vision'], recommendedFor: ['query-deep', 'vision'] },
+    { id: 'claude-opus-4.6', capabilities: ['text', 'vision'], recommendedFor: ['query-deep', 'vision'] },
+    { id: 'claude-sonnet-4.6', capabilities: ['text', 'vision'], recommendedFor: ['wiki-compile', 'query-deep', 'vision'] },
     { id: 'claude-sonnet-4.5', capabilities: ['text', 'vision'], recommendedFor: ['wiki-compile', 'query-deep', 'vision'] },
     { id: 'claude-haiku-4.5', capabilities: ['text', 'vision'], recommendedFor: ['query-fast', 'vision'] },
   ],
@@ -118,12 +134,24 @@ export const LLM_MODEL_PRESETS: Partial<Record<LlmProviderId, LlmModelPreset[]>>
     { id: 'MiniMax-M2.5', capabilities: ['text'], recommendedFor: ['query-fast', 'review-lint'] },
   ],
   moonshot: [
+    { id: 'kimi-k2.6', capabilities: ['text'], recommendedFor: ['wiki-compile', 'query-deep', 'review-lint'] },
+    { id: 'kimi-k2.5', capabilities: ['text'], recommendedFor: ['wiki-compile', 'query-deep'] },
+    { id: 'kimi-k2-thinking', capabilities: ['text'], recommendedFor: ['query-deep', 'review-lint'] },
+    { id: 'kimi-for-coding', capabilities: ['text'], recommendedFor: ['query-deep'] },
     { id: 'kimi-k2', capabilities: ['text'], recommendedFor: ['wiki-compile', 'query-deep', 'review-lint'] },
     { id: 'moonshot-v1-128k', capabilities: ['text'], recommendedFor: ['wiki-compile', 'query-deep'] },
   ],
   zhipu: [
     { id: 'glm-4.6', capabilities: ['text'], recommendedFor: ['wiki-compile', 'query-deep', 'review-lint'] },
-    { id: 'glm-4.5', capabilities: ['text'], recommendedFor: ['wiki-compile', 'query-deep', 'review-lint'] },
+    { id: 'glm-4.5', capabilities: ['text'], recommendedFor: ['query-deep', 'review-lint'], notes: '实测 tool 调用稳定性弱于 glm-4.6，不建议作为首选 Wiki 编译模型。' },
+    { id: 'glm-4.5-air', capabilities: ['text'], recommendedFor: ['query-fast', 'review-lint'] },
+    { id: 'glm-4.5-airx', capabilities: ['text'], recommendedFor: ['query-fast', 'review-lint'] },
+    { id: 'glm-4.5-flash', capabilities: ['text'], recommendedFor: ['query-fast'] },
+    { id: 'glm-4-plus', capabilities: ['text'], recommendedFor: ['query-deep'] },
+    { id: 'glm-4-air', capabilities: ['text'], recommendedFor: ['query-fast'] },
+    { id: 'glm-4-flash', capabilities: ['text'], recommendedFor: ['query-fast'] },
+    { id: 'glm-zero-preview', capabilities: ['text'], recommendedFor: ['query-deep'] },
+    { id: 'glm-4v-plus', label: 'GLM-4V-Plus', capabilities: ['text', 'vision'], recommendedFor: ['vision'] },
     { id: 'glm-5v-turbo', label: 'GLM-5V-Turbo', capabilities: ['text', 'vision'], recommendedFor: ['vision'] },
     { id: 'glm-4.6v', label: 'GLM-4.6V', capabilities: ['text', 'vision'], recommendedFor: ['vision'] },
     { id: 'glm-4.6v-flash', label: 'GLM-4.6V-Flash', capabilities: ['text', 'vision'], recommendedFor: ['vision'] },
@@ -137,13 +165,31 @@ export const LLM_MODEL_PRESETS: Partial<Record<LlmProviderId, LlmModelPreset[]>>
     { id: 'llama-3.3-70b-versatile', capabilities: ['text'], recommendedFor: ['query-fast', 'review-lint'] },
   ],
   xai: [
+    { id: 'grok-4-latest', capabilities: ['text', 'vision'], recommendedFor: ['query-deep', 'vision'] },
     { id: 'grok-4', capabilities: ['text', 'vision'], recommendedFor: ['query-deep', 'vision'] },
+    { id: 'grok-3', capabilities: ['text'], recommendedFor: ['query-deep'] },
+    { id: 'grok-3-mini', capabilities: ['text'], recommendedFor: ['query-fast'] },
+    { id: 'grok-3-fast', capabilities: ['text'], recommendedFor: ['query-fast'] },
+    { id: 'grok-3-mini-fast', capabilities: ['text'], recommendedFor: ['query-fast'] },
   ],
   nvidia: [
+    { id: 'nvidia/llama-3.3-nemotron-super-49b-v1.5', capabilities: ['text'], recommendedFor: ['query-deep'] },
+    { id: 'nvidia/nemotron-3-super-120b-a12b', capabilities: ['text'], recommendedFor: ['query-deep'] },
+    { id: 'nvidia/nemotron-3-nano-30b-a3b', capabilities: ['text'], recommendedFor: ['query-fast'] },
+    { id: 'meta/llama-3.3-70b-instruct', capabilities: ['text'], recommendedFor: ['query-fast', 'review-lint'] },
+    { id: 'meta/llama-3.1-405b-instruct', capabilities: ['text'], recommendedFor: ['query-deep'] },
+    { id: 'meta/llama-3.1-70b-instruct', capabilities: ['text'], recommendedFor: ['query-fast'] },
+    { id: 'qwen/qwen3.5-397b-a17b', capabilities: ['text'], recommendedFor: ['query-deep'] },
+    { id: 'deepseek-ai/deepseek-v3.2', capabilities: ['text'], recommendedFor: ['query-deep'] },
+    { id: 'moonshotai/kimi-k2.6', capabilities: ['text'], recommendedFor: ['query-deep'] },
+    { id: 'minimaxai/minimax-m2.7', capabilities: ['text'], recommendedFor: ['wiki-compile', 'query-deep'] },
+    { id: 'minimaxai/minimax-m2.5', capabilities: ['text'], recommendedFor: ['query-fast'] },
+    { id: 'z-ai/glm5', capabilities: ['text'], recommendedFor: ['query-deep'] },
     { id: 'nvidia/llama-3.1-nemotron-ultra-253b-v1', capabilities: ['text'], recommendedFor: ['query-deep'] },
   ],
   ollama: [
     { id: 'qwen3', capabilities: ['text'], recommendedFor: ['query-fast', 'review-lint'] },
+    { id: 'qwen3.5', capabilities: ['text'], recommendedFor: ['query-fast', 'review-lint'] },
     { id: 'llama3.3', capabilities: ['text'], recommendedFor: ['query-fast'] },
     { id: 'nomic-embed-text', capabilities: ['embedding'], recommendedFor: ['embedding'] },
     { id: 'mxbai-embed-large', capabilities: ['embedding'], recommendedFor: ['embedding'] },
@@ -405,6 +451,7 @@ export function createDefaultProviderConfig(providerId: LlmProviderId): LlmProvi
     apiKey: '',
     model: preset.defaultModels[0] ?? '',
     contextWindow: 200000,
+    reasoningMode: 'auto',
   };
 }
 
@@ -428,6 +475,12 @@ export function validateLlmProviderConfig(config: LlmProviderConfig) {
   }
   if (!Number.isFinite(config.contextWindow) || config.contextWindow < 4000) {
     errors.push('Context window must be at least 4000 characters.');
+  }
+  if (config.reasoningMode === 'custom') {
+    const budget = config.reasoningBudgetTokens;
+    if (!Number.isFinite(budget) || !budget || budget < 0) {
+      errors.push('Custom reasoning budget must be a positive number.');
+    }
   }
 
   return errors;

@@ -1,6 +1,6 @@
 {
   "name": "mywiki",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": true,
   "type": "module",
   "repository": {
@@ -24,8 +24,6 @@
     "@tauri-apps/plugin-dialog": "2.7.1",
     "@tauri-apps/plugin-window-state": "~2.4.1",
     "@vitejs/plugin-react": "^6.0.1",
-    "dexie": "^4.4.2",
-    "dexie-react-hooks": "^4.4.0",
     "graphology": "^0.26.0",
     "graphology-communities-louvain": "^2.0.2",
     "jszip": "^3.10.1",
@@ -48,7 +46,6 @@
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@types/three": "^0.184.1",
-    "fake-indexeddb": "^6.2.5",
     "happy-dom": "^20.9.0",
     "typescript": "^6.0.3",
     "vite": "^8.0.10",
