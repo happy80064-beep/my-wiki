@@ -294,6 +294,58 @@ describe('text provider bridge', () => {
     expect(request.body.tool_choice).toEqual({ type: 'function', function: { name: 'capture_analysis' } });
   });
 
+  it('uses a larger output budget for DeepSeek structured ingestion requests', () => {
+    const request = buildProviderTextRequest(
+      {
+        providerId: 'deepseek',
+        enabled: true,
+        apiMode: 'openai-compatible',
+        endpoint: 'https://api.deepseek.com',
+        apiKey: 'sk-deep',
+        model: 'deepseek-v4-pro',
+        contextWindow: 200000,
+      },
+      {
+        ...baseInput,
+        maxTokens: 4200,
+        structuredOutput: {
+          name: 'capture_analysis',
+          description: 'Return capture analysis',
+          schema: { type: 'object', properties: { entities: { type: 'array' } }, required: ['entities'] },
+        },
+      },
+    );
+
+    expect(request.body.max_tokens).toBe(8000);
+    expect(request.body.tool_choice).toEqual({ type: 'function', function: { name: 'capture_analysis' } });
+  });
+
+  it('uses bounded JSON content for DeepSeek streamed structured ingestion requests', () => {
+    const request = buildProviderTextRequest(
+      {
+        providerId: 'deepseek',
+        enabled: true,
+        apiMode: 'openai-compatible',
+        endpoint: 'https://api.deepseek.com',
+        apiKey: 'sk-deep',
+        model: 'deepseek-v4-pro',
+        contextWindow: 200000,
+      },
+      {
+        ...baseInput,
+        maxTokens: 4200,
+        responseFormat: 'json_object',
+        reasoningMode: 'disabled',
+      },
+    );
+
+    expect(request.body.max_tokens).toBe(8000);
+    expect(request.body.response_format).toEqual({ type: 'json_object' });
+    expect(request.body.tools).toBeUndefined();
+    expect(request.body.tool_choice).toBeUndefined();
+    expect(request.body.thinking).toEqual({ type: 'disabled' });
+  });
+
   it('builds Gemini-native requests without OpenAI-compatible auth headers', () => {
     const request = buildGeminiTextRequest(
       {

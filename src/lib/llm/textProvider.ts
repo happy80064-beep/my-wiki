@@ -168,7 +168,7 @@ export function buildProviderTextRequest(config: LlmProviderConfig, input: LlmTe
 }
 
 function resolveTextMaxTokens(config: LlmProviderConfig, input: LlmTextRequestInput) {
-  if ((input.responseFormat === 'json_object' || input.structuredOutput) && isMiniMaxProvider(config.providerId)) {
+  if ((input.responseFormat === 'json_object' || input.structuredOutput) && shouldUseLargeJsonOutputBudget(config)) {
     return Math.max(input.maxTokens, 8000);
   }
   return input.maxTokens;
@@ -176,6 +176,10 @@ function resolveTextMaxTokens(config: LlmProviderConfig, input: LlmTextRequestIn
 
 function isMiniMaxProvider(providerId: LlmProviderConfig['providerId']) {
   return providerId === 'minimax-cn' || providerId === 'minimax-global';
+}
+
+function shouldUseLargeJsonOutputBudget(config: LlmProviderConfig) {
+  return isMiniMaxProvider(config.providerId) || config.providerId === 'deepseek' || endpointLooksLike(config.endpoint, /deepseek/i);
 }
 
 function buildOpenAiReasoningBody(config: LlmProviderConfig, reasoningMode: LlmReasoningMode | undefined) {

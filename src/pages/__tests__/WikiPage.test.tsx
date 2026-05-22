@@ -398,8 +398,47 @@ describe('RuntimeWikiPage', () => {
     await screen.findAllByText('可删除知识页');
     fireEvent.click(screen.getByLabelText('删除知识页 可删除知识页'));
 
+    expect(screen.getByText('是否删除“可删除知识页”？')).toBeTruthy();
+    fireEvent.click(screen.getByText('确认删除'));
+
     await waitFor(async () => {
       expect(await db.entities.get(entity.id)).toBeUndefined();
+    });
+  });
+
+  it('does not enqueue duplicate page deletes while deletion is pending', async () => {
+    const entity = await createEntity({
+      type: 'topic',
+      title: '慢删除知识页',
+      summary: '这页用于测试重复点击。',
+      tags: ['concept'],
+    });
+    let releaseDelete!: () => void;
+    const originalBulkDelete = db.entities.bulkDelete.bind(db.entities);
+    vi.spyOn(db.entities, 'bulkDelete').mockImplementation(async (keys) => {
+      await new Promise<void>((resolve) => {
+        releaseDelete = resolve;
+      });
+      return originalBulkDelete(keys);
+    });
+
+    render(<RuntimeWikiPage />);
+
+    await screen.findAllByText('慢删除知识页');
+    const deleteButton = screen.getByLabelText('删除知识页 慢删除知识页');
+    fireEvent.click(deleteButton);
+    fireEvent.click(screen.getByText('确认删除'));
+    fireEvent.click(deleteButton);
+
+    expect((deleteButton as HTMLButtonElement).disabled).toBe(true);
+
+    await waitFor(() => {
+      expect(typeof releaseDelete).toBe('function');
+    });
+    releaseDelete();
+
+    await waitFor(() => {
+      expect(screen.queryByLabelText('删除知识页 慢删除知识页')).toBeNull();
     });
   });
 
@@ -422,9 +461,55 @@ describe('RuntimeWikiPage', () => {
     await screen.findByText('概念页 A');
     fireEvent.click(screen.getByLabelText('删除 概念 分组知识页'));
 
+    expect(screen.getByText('是否删除“概念”？')).toBeTruthy();
+    expect(screen.getByText('将删除该 type 分组下的 2 个知识页。关联的原始材料不会被删除。')).toBeTruthy();
+    fireEvent.click(screen.getByText('确认删除'));
+
     await waitFor(async () => {
       expect(await db.entities.get(first.id)).toBeUndefined();
       expect(await db.entities.get(second.id)).toBeUndefined();
+    });
+  });
+
+  it('does not enqueue duplicate type group deletes while deletion is pending', async () => {
+    await createEntity({
+      type: 'topic',
+      title: '慢删除概念 A',
+      summary: '这页属于概念分组。',
+      tags: ['concept'],
+    });
+    await createEntity({
+      type: 'topic',
+      title: '慢删除概念 B',
+      summary: '这页也属于概念分组。',
+      tags: ['concept'],
+    });
+    let releaseDelete!: () => void;
+    const originalBulkDelete = db.entities.bulkDelete.bind(db.entities);
+    vi.spyOn(db.entities, 'bulkDelete').mockImplementation(async (keys) => {
+      await new Promise<void>((resolve) => {
+        releaseDelete = resolve;
+      });
+      return originalBulkDelete(keys);
+    });
+
+    render(<RuntimeWikiPage />);
+
+    await screen.findByText('慢删除概念 A');
+    const deleteGroupButton = screen.getByLabelText('删除 概念 分组知识页');
+    fireEvent.click(deleteGroupButton);
+    fireEvent.click(screen.getByText('确认删除'));
+    fireEvent.click(deleteGroupButton);
+
+    expect((deleteGroupButton as HTMLButtonElement).disabled).toBe(true);
+
+    await waitFor(() => {
+      expect(typeof releaseDelete).toBe('function');
+    });
+    releaseDelete();
+
+    await waitFor(() => {
+      expect(screen.queryByText('慢删除概念 A')).toBeNull();
     });
   });
 

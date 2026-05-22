@@ -84,24 +84,33 @@ export async function updateEntity(id: string, patch: UpdateEntityInput) {
 }
 
 export async function deleteEntity(id: string) {
+  await deleteEntities([id]);
+}
+
+export async function deleteEntities(ids: string[]) {
+  const idSet = new Set(ids.filter(Boolean));
+  if (idSet.size === 0) return;
+
   await db.transaction('rw', [db.entities, db.relationships, db.tasks, db.entries, db.compileSuggestions, db.wikiReviewItems], async () => {
-    await db.relationships.where('from').equals(id).or('to').equals(id).delete();
-    await db.tasks.where('owner').equals(id).delete();
-    await db.compileSuggestions.where('entityId').equals(id).delete();
-    await db.wikiReviewItems.where('entityId').equals(id).delete();
+    await db.relationships
+      .filter((relationship) => idSet.has(relationship.from) || idSet.has(relationship.to))
+      .delete();
+    await db.tasks.where('owner').anyOf(Array.from(idSet)).delete();
+    await db.compileSuggestions.where('entityId').anyOf(Array.from(idSet)).delete();
+    await db.wikiReviewItems.where('entityId').anyOf(Array.from(idSet)).delete();
 
     await db.tasks.toCollection().modify((task) => {
-      task.linkedTo = task.linkedTo.filter((linkedId) => linkedId !== id);
-      if (task.assignedBy === id) {
+      task.linkedTo = task.linkedTo.filter((linkedId) => !idSet.has(linkedId));
+      if (task.assignedBy && idSet.has(task.assignedBy)) {
         delete task.assignedBy;
       }
     });
 
     await db.entries.toCollection().modify((entry) => {
-      entry.derivedEntities = entry.derivedEntities.filter((entityId) => entityId !== id);
+      entry.derivedEntities = entry.derivedEntities.filter((entityId) => !idSet.has(entityId));
     });
 
-    await db.entities.delete(id);
+    await db.entities.bulkDelete(Array.from(idSet));
   });
 }
 

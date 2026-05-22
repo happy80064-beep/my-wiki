@@ -1,7 +1,7 @@
 import { ArrowUpRight, Calendar, ChevronDown, ChevronRight, Download, Edit3, FileText, Layers, Loader2, RotateCcw, Save, Search, Sparkles, Tag, Trash2, Upload, UserRound, XCircle } from 'lucide-react';
 import { useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLiveQuery } from '@/lib/db/liveQuery';
-import { db, deleteEntity, mergeExactDuplicateCompatibleEntities } from '@/lib/db';
+import { db, deleteEntities, deleteEntity, mergeExactDuplicateCompatibleEntities } from '@/lib/db';
 import { reloadWorkspaceRecordStateFromDisk } from '@/lib/db/schema';
 import {
   restoreMarkdownExportZip,
@@ -73,6 +73,9 @@ type BrowserWikiEntityStatus = {
   label: string;
   detail: string;
 };
+type DeleteConfirmation =
+  | { kind: 'page'; entity: Entity }
+  | { kind: 'group'; label: string; pages: BrowserWikiTreePage[] };
 type BrowserWikiSearchDocument = {
   entity: Entity;
   title: string;
@@ -143,6 +146,8 @@ export function RuntimeWikiPage({ syncError = '' }: { syncError?: string } = {})
   const [compileStatus, setCompileStatus] = useState('');
   const [restoreStatus, setRestoreStatus] = useState('');
   const [compilingEntityId, setCompilingEntityId] = useState<string | null>(null);
+  const [deletingEntityIds, setDeletingEntityIds] = useState<Set<string>>(() => new Set());
+  const [deleteConfirmation, setDeleteConfirmation] = useState<DeleteConfirmation | null>(null);
   const [queueStatus, setQueueStatus] = useState<RawAssetQueueSnapshot | null>(null);
   const [workspaceQueueTasks, setWorkspaceQueueTasks] = useState<RawAssetWorkspaceQueueTask[]>([]);
   const [workspaceQueuePath, setWorkspaceQueuePath] = useState('');
@@ -734,33 +739,77 @@ export function RuntimeWikiPage({ syncError = '' }: { syncError?: string } = {})
   }
 
   async function handleDeleteEntityPage(entity: Entity) {
-    if (!window.confirm(`确定删除知识页“${entity.title}”？关联的原始材料不会被删除。`)) return;
+    if (deletingEntityIds.has(entity.id)) return;
 
-    await deleteEntity(entity.id);
-    if (selected?.kind === 'entity' && selected.id === entity.id) {
-      setSelected(null);
-      setEditing(false);
-      setDraftMarkdown('');
+    setDeletingEntityIds((current) => new Set(current).add(entity.id));
+    setSaveStatus(`正在删除知识页：${entity.title}...`);
+    try {
+      await deleteEntity(entity.id);
+      if (selected?.kind === 'entity' && selected.id === entity.id) {
+        setSelected(null);
+        setEditing(false);
+        setDraftMarkdown('');
+      }
+      setSaveStatus(`已删除知识页：${entity.title}`);
+      await syncWorkspaceRecordsToDefaultWorkspace();
+    } catch (error) {
+      setSaveStatus(error instanceof Error ? error.message : `删除知识页失败：${entity.title}`);
+    } finally {
+      setDeletingEntityIds((current) => {
+        const next = new Set(current);
+        next.delete(entity.id);
+        return next;
+      });
     }
-    setSaveStatus(`已删除知识页：${entity.title}`);
-    await syncWorkspaceRecordsToDefaultWorkspace();
   }
 
   async function handleDeleteEntityTypeGroup(label: string, pages: BrowserWikiTreePage[]) {
     if (!pages.length) return;
     const ids = pages.map((page) => page.entity.id);
-    if (!window.confirm(`确定删除“${label}”下的 ${ids.length} 个知识页？关联的原始材料不会被删除。`)) return;
+    if (ids.some((id) => deletingEntityIds.has(id))) return;
 
-    for (const id of ids) {
-      await deleteEntity(id);
+    setDeletingEntityIds((current) => new Set([...current, ...ids]));
+    setSaveStatus(`正在删除“${label}”下的 ${ids.length} 个知识页...`);
+    try {
+      await deleteEntities(ids);
+      if (selected?.kind === 'entity' && ids.includes(selected.id)) {
+        setSelected(null);
+        setEditing(false);
+        setDraftMarkdown('');
+      }
+      setSaveStatus(`已删除“${label}”下的 ${ids.length} 个知识页。`);
+      await syncWorkspaceRecordsToDefaultWorkspace();
+    } catch (error) {
+      setSaveStatus(error instanceof Error ? error.message : `删除“${label}”分组失败。`);
+    } finally {
+      setDeletingEntityIds((current) => {
+        const next = new Set(current);
+        ids.forEach((id) => next.delete(id));
+        return next;
+      });
     }
-    if (selected?.kind === 'entity' && ids.includes(selected.id)) {
-      setSelected(null);
-      setEditing(false);
-      setDraftMarkdown('');
+  }
+
+  function requestDeleteEntityPage(entity: Entity) {
+    if (deletingEntityIds.has(entity.id)) return;
+    setDeleteConfirmation({ kind: 'page', entity });
+  }
+
+  function requestDeleteEntityTypeGroup(label: string, pages: BrowserWikiTreePage[]) {
+    const ids = pages.map((page) => page.entity.id);
+    if (!ids.length || ids.some((id) => deletingEntityIds.has(id))) return;
+    setDeleteConfirmation({ kind: 'group', label, pages });
+  }
+
+  async function confirmPendingDelete() {
+    const pending = deleteConfirmation;
+    if (!pending) return;
+    setDeleteConfirmation(null);
+    if (pending.kind === 'page') {
+      await handleDeleteEntityPage(pending.entity);
+      return;
     }
-    setSaveStatus(`已删除“${label}”下的 ${ids.length} 个知识页。`);
-    await syncWorkspaceRecordsToDefaultWorkspace();
+    await handleDeleteEntityTypeGroup(pending.label, pending.pages);
   }
 
   async function handleDeleteSourceItem(source: BrowserSourceItem) {
@@ -1228,8 +1277,9 @@ export function RuntimeWikiPage({ syncError = '' }: { syncError?: string } = {})
                       setSaveStatus('');
                       setCompileStatus('');
                     }}
-                    onDeleteGroup={() => void handleDeleteEntityTypeGroup(group.label, group.pages as BrowserWikiTreePage[])}
-                    onDeletePage={(page) => void handleDeleteEntityPage(page.entity)}
+                    onDeleteGroup={() => requestDeleteEntityTypeGroup(group.label, group.pages as BrowserWikiTreePage[])}
+                    onDeletePage={(page) => requestDeleteEntityPage(page.entity)}
+                    deletingEntityIds={deletingEntityIds}
                   />
                 ))}
               </>
@@ -1331,6 +1381,13 @@ export function RuntimeWikiPage({ syncError = '' }: { syncError?: string } = {})
           )}
         </aside>
       </div>
+      {deleteConfirmation ? (
+        <DeleteConfirmDialog
+          confirmation={deleteConfirmation}
+          onCancel={() => setDeleteConfirmation(null)}
+          onConfirm={() => void confirmPendingDelete()}
+        />
+      ) : null}
     </section>
   );
 }
@@ -1407,6 +1464,54 @@ function BrowserPanelHeader({ eyebrow, title, action }: { eyebrow: string; title
   );
 }
 
+function DeleteConfirmDialog({
+  confirmation,
+  onCancel,
+  onConfirm,
+}: {
+  confirmation: DeleteConfirmation;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const isGroup = confirmation.kind === 'group';
+  const title = isGroup ? `是否删除“${confirmation.label}”？` : `是否删除“${confirmation.entity.title}”？`;
+  const detail = isGroup
+    ? `将删除该 type 分组下的 ${confirmation.pages.length} 个知识页。关联的原始材料不会被删除。`
+    : '将删除这个知识页。关联的原始材料不会被删除。';
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-[rgba(15,23,42,0.32)] px-4" role="dialog" aria-modal="true" aria-labelledby="delete-confirm-title">
+      <div className="w-full max-w-[420px] rounded-[12px] border border-[#e5e5e4] bg-white p-5 shadow-[0_24px_70px_rgba(15,23,42,0.22)]">
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-[10px] bg-[#fff1f2] text-[#b42318]">
+            <Trash2 size={18} />
+          </div>
+          <div className="min-w-0">
+            <h3 id="delete-confirm-title" className="text-base font-semibold text-[#1f2937]">{title}</h3>
+            <p className="mt-2 text-sm leading-6 text-[#626965]">{detail}</p>
+          </div>
+        </div>
+        <div className="mt-5 flex justify-end gap-2">
+          <button
+            type="button"
+            className="rounded-[8px] border border-[#d9d9d6] bg-white px-3 py-2 text-sm font-medium text-[#374151] hover:bg-[#f7f7f5]"
+            onClick={onCancel}
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            className="rounded-[8px] border border-[#d92d20] bg-[#d92d20] px-3 py-2 text-sm font-medium text-white hover:bg-[#b42318]"
+            onClick={onConfirm}
+          >
+            确认删除
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function BrowserWikiTreeGroup({
   label,
   type,
@@ -1417,6 +1522,7 @@ function BrowserWikiTreeGroup({
   onSelect,
   onDeleteGroup,
   onDeletePage,
+  deletingEntityIds,
 }: {
   label: string;
   type: WikiPageType;
@@ -1427,7 +1533,9 @@ function BrowserWikiTreeGroup({
   onSelect: (page: BrowserWikiTreePage) => void;
   onDeleteGroup: () => void;
   onDeletePage: (page: BrowserWikiTreePage) => void;
+  deletingEntityIds: Set<string>;
 }) {
+  const groupDeleting = pages.some((page) => deletingEntityIds.has(page.entity.id));
   return (
     <section className="mb-1 min-w-0 rounded-[10px] border border-[#e5e5e4] bg-white">
       <div className="group/type-row flex min-w-0 items-center gap-1 border-b border-[#e5e5e4] hover:bg-[#f7f7f5]">
@@ -1446,10 +1554,11 @@ function BrowserWikiTreeGroup({
           type="button"
           className="pointer-events-none mr-2 flex size-7 shrink-0 items-center justify-center rounded-[8px] text-[#8a8f8b] opacity-0 transition hover:bg-[#fff1f2] hover:text-[#b42318] focus-visible:pointer-events-auto focus-visible:opacity-100 group-hover/type-row:pointer-events-auto group-hover/type-row:opacity-100"
           onClick={onDeleteGroup}
+          disabled={groupDeleting}
           aria-label={`删除 ${label} 分组知识页`}
-          title={`删除 ${label} 分组知识页`}
+          title={groupDeleting ? `正在删除 ${label} 分组知识页` : `删除 ${label} 分组知识页`}
         >
-          <Trash2 size={14} />
+          {groupDeleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
         </button>
       </div>
       {!expanded ? null : pages.length === 0 ? (
@@ -1457,48 +1566,74 @@ function BrowserWikiTreeGroup({
       ) : (
         <div className="grid min-w-0 gap-1 px-2 py-1.5">
           {pages.map((page) => (
-            <div
+            <BrowserWikiTreePageRow
               key={`${type}:${page.entity.id}`}
-              className={[
-                'group/tree-row flex min-w-0 items-center gap-1 rounded-[8px] transition',
-                selectedEntityId === page.entity.id ? 'bg-[#eef4ff] text-[#155eef]' : 'text-[#626965] hover:bg-[#f7f7f5] hover:text-[#1f2937]',
-              ].join(' ')}
-            >
-              <button
-                type="button"
-                onClick={() => onSelect(page)}
-                className="min-w-0 flex-1 px-2 py-1.5 text-left text-sm"
-                title={page.title}
-              >
-                <span className="block truncate">{page.title}</span>
-              </button>
-              {page.wikiStatus.state === 'complete' ? null : (
-                <span
-                  className={[
-                    'shrink-0 rounded-full border px-1.5 py-0.5 text-[10px] font-medium',
-                    page.wikiStatus.state === 'draft'
-                      ? 'border-[#f2d08f] bg-[#fff8e6] text-[#8a5a00]'
-                      : 'border-[#e5e5e4] bg-[#fbfbfa] text-[#626965]',
-                  ].join(' ')}
-                  title={page.wikiStatus.detail}
-                >
-                  {page.wikiStatus.state === 'draft' ? '草稿' : '未生成'}
-                </span>
-              )}
-              <button
-                type="button"
-                className="pointer-events-none mr-1 flex size-7 shrink-0 items-center justify-center rounded-[8px] text-[#8a8f8b] opacity-0 transition hover:bg-[#fff1f2] hover:text-[#b42318] focus-visible:pointer-events-auto focus-visible:opacity-100 group-hover/tree-row:pointer-events-auto group-hover/tree-row:opacity-100"
-                onClick={() => onDeletePage(page)}
-                aria-label={`删除知识页 ${page.title}`}
-                title={`删除知识页：${page.title}`}
-              >
-                <Trash2 size={14} />
-              </button>
-            </div>
+              page={page}
+              selected={selectedEntityId === page.entity.id}
+              deleting={deletingEntityIds.has(page.entity.id)}
+              onSelect={onSelect}
+              onDeletePage={onDeletePage}
+            />
           ))}
         </div>
       )}
     </section>
+  );
+}
+
+function BrowserWikiTreePageRow({
+  page,
+  selected,
+  deleting,
+  onSelect,
+  onDeletePage,
+}: {
+  page: BrowserWikiTreePage;
+  selected: boolean;
+  deleting: boolean;
+  onSelect: (page: BrowserWikiTreePage) => void;
+  onDeletePage: (page: BrowserWikiTreePage) => void;
+}) {
+  return (
+    <div
+      className={[
+        'group/tree-row flex min-w-0 items-center gap-1 rounded-[8px] transition',
+        selected ? 'bg-[#eef4ff] text-[#155eef]' : 'text-[#626965] hover:bg-[#f7f7f5] hover:text-[#1f2937]',
+      ].join(' ')}
+    >
+      <button
+        type="button"
+        onClick={() => onSelect(page)}
+        disabled={deleting}
+        className="min-w-0 flex-1 px-2 py-1.5 text-left text-sm disabled:cursor-wait disabled:opacity-60"
+        title={page.title}
+      >
+        <span className="block truncate">{page.title}</span>
+      </button>
+      {page.wikiStatus.state === 'complete' ? null : (
+        <span
+          className={[
+            'shrink-0 rounded-full border px-1.5 py-0.5 text-[10px] font-medium',
+            page.wikiStatus.state === 'draft'
+              ? 'border-[#f2d08f] bg-[#fff8e6] text-[#8a5a00]'
+              : 'border-[#e5e5e4] bg-[#fbfbfa] text-[#626965]',
+          ].join(' ')}
+          title={page.wikiStatus.detail}
+        >
+          {page.wikiStatus.state === 'draft' ? '草稿' : '未生成'}
+        </span>
+      )}
+      <button
+        type="button"
+        className="pointer-events-none mr-1 flex size-7 shrink-0 items-center justify-center rounded-[8px] text-[#8a8f8b] opacity-0 transition hover:bg-[#fff1f2] hover:text-[#b42318] disabled:cursor-wait disabled:opacity-100 focus-visible:pointer-events-auto focus-visible:opacity-100 group-hover/tree-row:pointer-events-auto group-hover/tree-row:opacity-100"
+        onClick={() => onDeletePage(page)}
+        disabled={deleting}
+        aria-label={`删除知识页 ${page.title}`}
+        title={deleting ? `正在删除知识页：${page.title}` : `删除知识页：${page.title}`}
+      >
+        {deleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+      </button>
+    </div>
   );
 }
 

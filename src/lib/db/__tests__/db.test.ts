@@ -5,6 +5,7 @@ import {
   createRelationship,
   createTask,
   db,
+  deleteEntities,
   deleteEntity,
   deleteRelationship,
   deleteTask,
@@ -246,6 +247,37 @@ describe('MyWiki data layer', () => {
 
     expect(await db.entities.get(person.id)).toBeUndefined();
     expect(await listRelationshipsForEntity(project.id)).toEqual([]);
+  });
+
+  it('cascades relationships and source links when deleting entities in one batch', async () => {
+    const entry = await createEntry({ content: '批量删除引用清理测试。', source: 'text' });
+    const person = await createEntity({ type: 'person', title: '负责人' });
+    const project = await createEntity({ type: 'project', title: '项目' });
+    const topic = await createEntity({ type: 'topic', title: '保留主题' });
+    await createRelationship({
+      from: person.id,
+      to: project.id,
+      type: 'participant',
+      evidence: [entry.id],
+    });
+    await createTask({
+      description: '关联任务',
+      owner: topic.id,
+      linkedTo: [person.id, project.id],
+      source: entry.id,
+    });
+    await db.entries.update(entry.id, {
+      derivedEntities: [person.id, project.id, topic.id],
+    });
+
+    await deleteEntities([person.id, project.id]);
+
+    expect(await db.entities.get(person.id)).toBeUndefined();
+    expect(await db.entities.get(project.id)).toBeUndefined();
+    expect(await db.entities.get(topic.id)).toBeTruthy();
+    expect(await db.relationships.toArray()).toEqual([]);
+    expect((await db.tasks.toArray())[0]?.linkedTo).toEqual([]);
+    expect((await db.entries.get(entry.id))?.derivedEntities).toEqual([topic.id]);
   });
 
   it('removes deleted relationship and task ids from source entries', async () => {

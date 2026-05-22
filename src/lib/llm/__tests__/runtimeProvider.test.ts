@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { extractProviderText, parseProviderStreamChunk, requestConfiguredProviderText } from '@/lib/llm/runtimeProvider';
+import {
+  extractProviderText,
+  parseProviderStreamChunk,
+  requestConfiguredProviderText,
+  requestConfiguredProviderTextStream,
+} from '@/lib/llm/runtimeProvider';
 import type { LlmProviderConfig } from '@/lib/llm/providers';
 
 const providerConfig: LlmProviderConfig = {
@@ -118,5 +123,39 @@ describe('runtime provider response extraction', () => {
     );
 
     expect(text).toBe('风险');
+  });
+
+  it('diagnoses streamed reasoning without final content', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        const body = [
+          `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: '思考'.repeat(300) } }] })}`,
+          '',
+          'data: [DONE]',
+          '',
+        ].join('\n');
+        return new Response(body, {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        });
+      }),
+    );
+
+    const result = await requestConfiguredProviderTextStream(
+      providerConfig,
+      {
+        prompt: 'hello',
+        systemPrompt: 'test',
+        maxTokens: 32,
+        reasoningMode: 'disabled',
+      },
+      { onToken: vi.fn() },
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain('reasoning/thinking but no final content');
+    }
   });
 });

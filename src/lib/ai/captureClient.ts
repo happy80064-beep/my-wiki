@@ -3,8 +3,8 @@ import { db } from '@/lib/db';
 import { assertDevAiApiAvailable } from './devApiGuard';
 import { getProviderConfigForRole, loadProviderSettings } from '@/lib/llm/providerSettings';
 import { isTauriRuntime } from '@/lib/runtime/tauri';
-import { requestConfiguredProviderText } from '@/lib/llm/runtimeProvider';
-import type { LlmProviderId } from '@/lib/llm/providers';
+import { requestConfiguredProviderText, requestConfiguredProviderTextStream } from '@/lib/llm/runtimeProvider';
+import type { LlmProviderConfig, LlmProviderId } from '@/lib/llm/providers';
 import { resolveActiveWorkspaceSchemaContext, type WorkspaceSchemaContext } from '@/lib/workspace/schemaContext';
 import {
   buildCaptureAnalysisFromMarkdownPrompt,
@@ -98,18 +98,15 @@ async function extractCaptureDraftWithRuntimeProvider(
   }
 
   const analysisSourceExcerpt = buildStructuredCaptureExcerpt(structuredContent, 14000);
-  const structuredAnalysisResult = await requestConfiguredProviderText(config, {
+  const structuredAnalysisResult = await requestStructuredCaptureAnalysis(config, {
     prompt: buildCaptureAnalysisFromMarkdownPrompt({
       sourceExcerpt: analysisSourceExcerpt,
       markdownAnalysis: markdownAnalysisResult.text,
       entityIndexJson,
       workspaceContext,
     }),
-    systemPrompt: '你是 MyWiki 结构化入库 Agent。只输出符合 schema 的 JSON 对象。',
-    maxTokens: 4200,
-    structuredOutput: buildCaptureAnalysisStructuredOutput(),
-    reasoningMode: 'disabled',
-  }, { signal: options.signal });
+    signal: options.signal,
+  });
   if (!structuredAnalysisResult.ok) {
     throw new Error(`${structuredAnalysisResult.providerName} structured analysis failed: ${structuredAnalysisResult.error}`);
   }
@@ -128,6 +125,40 @@ async function extractCaptureDraftWithRuntimeProvider(
     model: config.model,
     mode: 'two-step',
   };
+}
+
+async function requestStructuredCaptureAnalysis(
+  config: LlmProviderConfig,
+  input: { prompt: string; signal?: AbortSignal },
+) {
+  const common = {
+    prompt: input.prompt,
+    systemPrompt: '你是 MyWiki 结构化入库 Agent。只输出符合 schema 的 JSON 对象。',
+    maxTokens: 4200,
+    reasoningMode: 'disabled' as const,
+  };
+
+  if (shouldStreamStructuredJson(config)) {
+    return requestConfiguredProviderTextStream(
+      config,
+      { ...common, responseFormat: 'json_object' },
+      { signal: input.signal, onToken: () => undefined },
+    );
+  }
+
+  return requestConfiguredProviderText(
+    config,
+    { ...common, structuredOutput: buildCaptureAnalysisStructuredOutput() },
+    { signal: input.signal },
+  );
+}
+
+function shouldStreamStructuredJson(config: LlmProviderConfig) {
+  const endpoint = config.endpoint.trim();
+  return (
+    config.apiMode === 'openai-compatible' &&
+    (config.providerId === 'deepseek' || /deepseek/i.test(endpoint))
+  );
 }
 
 async function prepareContentForStructuredCapture(
@@ -334,8 +365,10 @@ async function normalizeCaptureAnalysisWithRepair(input: {
         input.workspaceContext,
       ),
       systemPrompt: '你是 MyWiki JSON 修复 Agent。只输出一个合法 JSON 对象，不要 Markdown。',
-      maxTokens: 2600,
-      structuredOutput: buildCaptureAnalysisStructuredOutput('repair_capture_analysis'),
+      maxTokens: 5200,
+      ...(shouldStreamStructuredJson(input.config)
+        ? { responseFormat: 'json_object' as const }
+        : { structuredOutput: buildCaptureAnalysisStructuredOutput('repair_capture_analysis') }),
       reasoningMode: 'disabled',
     }, { signal: input.signal });
     if (!repairResult.ok) {

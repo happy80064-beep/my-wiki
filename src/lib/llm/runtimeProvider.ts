@@ -106,6 +106,7 @@ async function requestConfiguredProviderTextStreamOnce(
     let rawBody = '';
     let text = '';
     let streamBuffer = '';
+    let reasoningCharsObserved = 0;
     const response = await postJsonStreamThroughRuntime(
       streamRequest,
       (event) => {
@@ -115,6 +116,7 @@ async function requestConfiguredProviderTextStreamOnce(
         const chunks = takeCompleteStreamEvents(streamBuffer);
         streamBuffer = chunks.remainder;
         for (const chunk of chunks.events) {
+          reasoningCharsObserved += countReasoningCharsInStreamChunk(chunk, request.responseApiMode);
           const parsed = parseProviderStreamChunk(chunk, request.responseApiMode);
           if (!parsed) continue;
           text += parsed;
@@ -124,6 +126,7 @@ async function requestConfiguredProviderTextStreamOnce(
       { signal: options.signal },
     );
     if (streamBuffer.trim()) {
+      reasoningCharsObserved += countReasoningCharsInStreamChunk(streamBuffer, request.responseApiMode);
       const parsed = parseProviderStreamChunk(streamBuffer, request.responseApiMode);
       if (parsed) {
         text += parsed;
@@ -151,6 +154,14 @@ async function requestConfiguredProviderTextStreamOnce(
       if (nonStreamingText) {
         options.onToken(nonStreamingText);
         return { ok: true, text: nonStreamingText, providerName, model: config.model };
+      }
+      if (reasoningCharsObserved >= 512) {
+        return {
+          ok: false,
+          error: `${providerName} streamed ${reasoningCharsObserved} characters of reasoning/thinking but no final content. 请关闭 thinking/reasoning 或降低该任务复杂度后重试。`,
+          providerName,
+          model: config.model,
+        };
       }
       return { ok: false, error: `${providerName} returned empty streamed content.`, providerName, model: config.model };
     }
@@ -364,6 +375,34 @@ export function parseProviderStreamChunk(chunk: string, apiMode: LlmProviderConf
   if (apiMode === 'anthropic-compatible') return parseAnthropicStreamChunk(chunk);
   if (apiMode === 'gemini-native') return parseGeminiStreamChunk(chunk);
   return parseOpenAiStreamChunk(chunk);
+}
+
+function countReasoningCharsInStreamChunk(chunk: string, apiMode: LlmProviderConfig['apiMode']) {
+  if (apiMode === 'gemini-native') return 0;
+  let count = 0;
+  for (const line of chunk.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || !trimmed.startsWith('data:')) continue;
+    const data = trimmed.slice(5).trim();
+    if (!data || data === '[DONE]') continue;
+    try {
+      const payload = JSON.parse(data) as {
+        choices?: Array<{ delta?: { reasoning_content?: string; reasoning?: string } }>;
+        type?: string;
+        delta?: { type?: string; thinking?: string };
+      };
+      for (const choice of payload.choices ?? []) {
+        count += choice.delta?.reasoning_content?.length ?? 0;
+        count += choice.delta?.reasoning?.length ?? 0;
+      }
+      if (payload.type === 'content_block_delta' && payload.delta?.type === 'thinking_delta') {
+        count += payload.delta.thinking?.length ?? 0;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return count;
 }
 
 export function stripThinking(text: string) {

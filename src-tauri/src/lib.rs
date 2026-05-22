@@ -109,7 +109,7 @@ async fn http_post_json(request: HttpJsonRequest) -> Result<HttpJsonResponse, St
 
     let response = builder.send().await.map_err(|error| error.to_string())?;
     let status = response.status();
-    let body = response.text().await.map_err(|error| error.to_string())?;
+    let body = read_response_body_lossy(response).await?;
 
     Ok(HttpJsonResponse {
         status: status.as_u16(),
@@ -183,6 +183,15 @@ async fn http_post_json_stream(
     Ok(result)
 }
 
+async fn read_response_body_lossy(response: reqwest::Response) -> Result<String, String> {
+    let bytes = response.bytes().await.map_err(|error| error.to_string())?;
+    Ok(decode_response_bytes_lossy(&bytes))
+}
+
+fn decode_response_bytes_lossy(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).to_string()
+}
+
 #[tauri::command]
 fn open_external_url(url: String) -> Result<(), String> {
     let target = url.trim();
@@ -216,6 +225,25 @@ fn open_external_url(url: String) -> Result<(), String> {
 
     command.spawn().map_err(|error| error.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_response_bytes_lossy;
+
+    #[test]
+    fn response_body_decoder_preserves_provider_error_text() {
+        let body = br#"{"error":{"message":"Payment Required: balance is insufficient"}}"#;
+
+        assert!(decode_response_bytes_lossy(body).contains("Payment Required"));
+    }
+
+    #[test]
+    fn response_body_decoder_preserves_non_utf8_body_lossily() {
+        let body = decode_response_bytes_lossy(&[0xff, b'o', b'o', 0xfe]);
+
+        assert!(body.contains("oo"));
+    }
 }
 
 #[tauri::command]

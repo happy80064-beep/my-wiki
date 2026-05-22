@@ -11,7 +11,7 @@ import {
   normalizeCaptureAnalysis,
   normalizeCaptureAnalysisToCaptureDraft,
 } from '@/lib/ai/wikiPatch';
-import { requestConfiguredProviderText } from '@/lib/llm/runtimeProvider';
+import { requestConfiguredProviderText, requestConfiguredProviderTextStream } from '@/lib/llm/runtimeProvider';
 import { createRawAssetFromFile, processRawAssetQueue } from '@/lib/rawAssets';
 import { createLocalCaptureDraft } from '@/lib/capture';
 import { db, resetDatabase } from '@/lib/db';
@@ -397,6 +397,42 @@ describe.skipIf(!runRealApi)('real API Frog-style raw asset compilation', () => 
   );
 
   it(
+    'compiles the reported managed-care markdown with DeepSeek through structured ingest without fallback',
+    async () => {
+      const sourcePath = resolveReportedManagedCareMarkdownPath();
+      const providerConfig = buildConfiguredTextProvidersFromEnv().find((provider) => provider.providerId === 'deepseek');
+      if (!providerConfig) throw new Error('DEEPSEEK_API_KEY is required for the reported managed-care regression test.');
+
+      const content = await readFile(sourcePath, 'utf8');
+      expect(content.length).toBeGreaterThan(5000);
+
+      const extraction = await runConfiguredProviderStructuredSmoke(providerConfig, content);
+      const extractedEntities = getDraftEntities(extraction.draft);
+      console.info(
+        JSON.stringify(
+          {
+            reportedManagedCareDeepSeek: {
+              sourcePath,
+              provider: providerConfig.providerId,
+              model: providerConfig.model,
+              sourceLength: content.length,
+              entityCount: extractedEntities.length,
+              titles: extractedEntities.slice(0, 8).map((entity) => entity.title),
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      expect(extraction.mode).toBe('two-step');
+      expect(extractedEntities.length).toBeGreaterThan(0);
+      expect(extractedEntities.some((entity) => /管理式医疗|医疗|肝病|福瑞/.test(`${entity.title} ${entity.summary}`))).toBe(true);
+    },
+    420_000,
+  );
+
+  it(
     'compiles the real 149-page project PDF through raw ingest and wiki generation without fallback',
     async () => {
       const pdfPath = resolveReal149PdfPath();
@@ -769,22 +805,19 @@ async function runConfiguredProviderStructuredSmoke(
     maxTokens: 1600,
     reasoningMode: 'disabled',
   }, { signal: timeoutSignal(providerStageTimeoutMs(providerConfig.providerId, 'markdown'), `${providerConfig.providerId} markdown analysis`) });
-  expect(markdownResult.ok, `${providerConfig.providerId} markdown analysis`).toBe(true);
   if (!markdownResult.ok) throw new Error(markdownResult.error);
+  expect(markdownResult.ok, `${providerConfig.providerId} markdown analysis`).toBe(true);
 
-  const structuredResult = await requestConfiguredProviderText(providerConfig, {
+  const structuredResult = await requestConfiguredStructuredCapture(providerConfig, {
     prompt: buildCaptureAnalysisFromMarkdownPrompt({
       sourceExcerpt: content,
       markdownAnalysis: markdownResult.text,
       entityIndexJson: '[]',
     }),
-    systemPrompt: '你是 MyWiki 结构化入库 Agent。只输出符合 schema 的 JSON 对象。',
-    maxTokens: 4200,
-    structuredOutput: buildCaptureAnalysisStructuredOutput(),
-    reasoningMode: 'disabled',
-  }, { signal: timeoutSignal(providerStageTimeoutMs(providerConfig.providerId, 'structured'), `${providerConfig.providerId} structured analysis`) });
-  expect(structuredResult.ok, `${providerConfig.providerId} structured analysis`).toBe(true);
+    signal: timeoutSignal(providerStageTimeoutMs(providerConfig.providerId, 'structured'), `${providerConfig.providerId} structured analysis`),
+  });
   if (!structuredResult.ok) throw new Error(structuredResult.error);
+  expect(structuredResult.ok, `${providerConfig.providerId} structured analysis`).toBe(true);
 
   const analysis = normalizeCaptureAnalysis(structuredResult.text);
   return {
@@ -882,6 +915,42 @@ function resolveReal149PdfPath() {
   const found = candidates.find((path) => existsSync(path));
   if (!found) {
     throw new Error('REAL_149_PDF_PATH is required for the real 149-page PDF regression test.');
+  }
+  return found;
+}
+
+function requestConfiguredStructuredCapture(
+  providerConfig: ReturnType<typeof buildConfiguredTextProvidersFromEnv>[number],
+  input: { prompt: string; signal: AbortSignal },
+) {
+  const common = {
+    prompt: input.prompt,
+    systemPrompt: '你是 MyWiki 结构化入库 Agent。只输出符合 schema 的 JSON 对象。',
+    maxTokens: 4200,
+    reasoningMode: 'disabled' as const,
+  };
+  if (providerConfig.providerId === 'deepseek' || /deepseek/i.test(providerConfig.endpoint)) {
+    return requestConfiguredProviderTextStream(
+      providerConfig,
+      { ...common, responseFormat: 'json_object' },
+      { signal: input.signal, onToken: () => undefined },
+    );
+  }
+  return requestConfiguredProviderText(
+    providerConfig,
+    { ...common, structuredOutput: buildCaptureAnalysisStructuredOutput() },
+    { signal: input.signal },
+  );
+}
+
+function resolveReportedManagedCareMarkdownPath() {
+  const candidates = [
+    getEnv('REAL_MANAGED_CARE_MD_PATH'),
+    'D:\\MyWiki-MVP\\工作-wiki-2026\\raw\\sources\\管理式医疗.md',
+  ].filter((path): path is string => Boolean(path));
+  const found = candidates.find((path) => existsSync(path));
+  if (!found) {
+    throw new Error('REAL_MANAGED_CARE_MD_PATH is required for the reported managed-care markdown regression test.');
   }
   return found;
 }

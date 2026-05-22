@@ -310,6 +310,7 @@ describe('source-level batch wiki compiler helpers', () => {
     expect(prompt).toContain('report.pdf');
     expect(prompt).toContain('wiki/');
     expect(prompt).toContain('必须为“本次必须输出的目标页面”中的每一个 targetPath 输出');
+    expect(prompt).toContain('证据不足的章节要明确写“当前来源未确认”');
   });
 
   it('normalizes multiple FILE blocks back to entity results and reports missing pages', () => {

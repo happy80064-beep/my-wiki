@@ -19,6 +19,7 @@ import {
   type CaptureAnalysis,
 } from '@/lib/ai/wikiPatch';
 import { inferWikiTargetSpec } from '@/lib/wiki/markdownCompiler';
+import { getDraftEntities } from '@/lib/capture/draft';
 
 describe('wiki patch prompts', () => {
   it('builds two-step ingestion prompts with patch constraints', () => {
@@ -263,6 +264,53 @@ describe('wiki patch prompts', () => {
         expect.objectContaining({ title: '福瑞股份肝病专科管理式医疗+价值医疗双模式落地执行框架', type: 'project' }),
       ]),
     );
+  });
+
+  it('folds thin list-only project subtopics into the project page instead of creating weak standalone pages', () => {
+    const analysis = normalizeCaptureAnalysis(
+      JSON.stringify({
+        entities: [
+          {
+            title: '福瑞健康科技园三期项目',
+            type: 'project',
+            evidence: '福瑞健康科技园三期项目包含医疗与健康中心、文旅与科普园、智算中心三个板块。',
+          },
+          {
+            title: '文旅与科普园',
+            type: 'project',
+            evidence: '福瑞健康科技园三期项目包含医疗与健康中心、文旅与科普园、智算中心三个板块。',
+          },
+        ],
+        concepts: [
+          {
+            title: '智算中心',
+            evidence: '福瑞健康科技园三期项目包含医疗与健康中心、文旅与科普园、智算中心三个板块。',
+          },
+        ],
+        claims: [],
+        hierarchies: [],
+        indicators: [],
+        contradictions: [],
+        recommendedUpdates: [
+          {
+            targetTitle: '医疗与健康中心',
+            action: 'CREATE_ENTITY',
+            reason: '福瑞健康科技园三期项目包含医疗与健康中心、文旅与科普园、智算中心三个板块。',
+          },
+        ],
+      }),
+    );
+
+    const draft = normalizeCaptureAnalysisToCaptureDraft(
+      analysis,
+      ['# 导入文件：项目小样本.md', '', '福瑞健康科技园三期项目包含医疗与健康中心、文旅与科普园、智算中心三个板块。'].join('\n'),
+    );
+    const titles = getDraftEntities(draft).map((entity) => entity.title);
+
+    expect(titles).toContain('福瑞健康科技园三期项目');
+    expect(titles).not.toContain('文旅与科普园');
+    expect(titles).not.toContain('智算中心');
+    expect(titles).not.toContain('医疗与健康中心');
   });
 
   it('keeps the reference-project style 50k source window before long document digesting', () => {

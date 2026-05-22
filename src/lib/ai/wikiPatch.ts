@@ -78,6 +78,23 @@ export type CaptureWorkspaceContext = {
   templateId?: string;
 };
 
+export const captureAnalysisLimits = {
+  entities: 12,
+  concepts: 8,
+  claims: 20,
+  hierarchies: 8,
+  hierarchyItems: 8,
+  indicators: 20,
+  contradictions: 8,
+  recommendedUpdates: 16,
+  titleChars: 80,
+  evidenceChars: 180,
+  reasonChars: 180,
+  tagChars: 40,
+  tags: 8,
+  aliases: 6,
+} as const;
+
 function buildCaptureWorkspaceContextBlock(context?: CaptureWorkspaceContext) {
   const purpose = context?.purpose?.trim();
   const schema = context?.schema?.trim();
@@ -400,6 +417,8 @@ ${buildCaptureWorkspaceContextBlock(input.workspaceContext)}
 硬性规则：
 - 第一字符必须是 {，最后一个字符必须是 }；不要 Markdown，不要解释。
 - 所有 key 使用英文双引号；数组分隔只能用英文逗号。
+- 输出只保留最重要、证据最强的条目：entities 最多 ${captureAnalysisLimits.entities} 个，concepts 最多 ${captureAnalysisLimits.concepts} 个，claims 最多 ${captureAnalysisLimits.claims} 个，hierarchies 最多 ${captureAnalysisLimits.hierarchies} 个且每个 items 最多 ${captureAnalysisLimits.hierarchyItems} 个，indicators 最多 ${captureAnalysisLimits.indicators} 个，contradictions 最多 ${captureAnalysisLimits.contradictions} 个，recommendedUpdates 最多 ${captureAnalysisLimits.recommendedUpdates} 个。
+- evidence 和 reason 必须是短句，不要整段复制；单条 evidence/reason 最多 ${captureAnalysisLimits.evidenceChars} 个中文字符左右。
 - 对导入文件，必须包含来源文件本身对应的 recommendedUpdates，并至少包含一个文件中真正讲到的 project/topic/concept/entity，除非材料完全没有可读知识。
 - entities[].pageType 必须优先从当前 schema.md 的 Page Types 中选择；同时把这个 pageType 放进 tags，方便知识树按 schema 分类。
 - 不要把来源文件标题当作唯一知识项；source 页和知识对象要分开。
@@ -418,15 +437,16 @@ export function buildCaptureAnalysisStructuredOutput(name = 'capture_analysis') 
       properties: {
         entities: {
           type: 'array',
+          maxItems: captureAnalysisLimits.entities,
           items: {
             type: 'object',
             properties: {
-              title: { type: 'string' },
+              title: { type: 'string', maxLength: captureAnalysisLimits.titleChars },
               type: { type: 'string', enum: ['person', 'project', 'event', 'topic'] },
-              pageType: { type: 'string' },
-              tags: { type: 'array', items: { type: 'string' } },
-              aliases: { type: 'array', items: { type: 'string' } },
-              evidence: { type: 'string' },
+              pageType: { type: 'string', maxLength: captureAnalysisLimits.tagChars },
+              tags: { type: 'array', maxItems: captureAnalysisLimits.tags, items: { type: 'string', maxLength: captureAnalysisLimits.tagChars } },
+              aliases: { type: 'array', maxItems: captureAnalysisLimits.aliases, items: { type: 'string', maxLength: captureAnalysisLimits.titleChars } },
+              evidence: { type: 'string', maxLength: captureAnalysisLimits.evidenceChars },
               existsLikely: { type: 'boolean' },
             },
             required: ['title', 'type', 'evidence'],
@@ -434,24 +454,26 @@ export function buildCaptureAnalysisStructuredOutput(name = 'capture_analysis') 
         },
         concepts: {
           type: 'array',
+          maxItems: captureAnalysisLimits.concepts,
           items: {
             type: 'object',
             properties: {
-              title: { type: 'string' },
-              evidence: { type: 'string' },
+              title: { type: 'string', maxLength: captureAnalysisLimits.titleChars },
+              evidence: { type: 'string', maxLength: captureAnalysisLimits.evidenceChars },
             },
             required: ['title', 'evidence'],
           },
         },
         claims: {
           type: 'array',
+          maxItems: captureAnalysisLimits.claims,
           items: {
             type: 'object',
             properties: {
-              subject: { type: 'string' },
-              predicate: { type: 'string' },
-              object: { type: 'string' },
-              evidence: { type: 'string' },
+              subject: { type: 'string', maxLength: captureAnalysisLimits.titleChars },
+              predicate: { type: 'string', maxLength: captureAnalysisLimits.titleChars },
+              object: { type: 'string', maxLength: captureAnalysisLimits.evidenceChars },
+              evidence: { type: 'string', maxLength: captureAnalysisLimits.evidenceChars },
               confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
             },
             required: ['subject', 'predicate', 'object', 'evidence', 'confidence'],
@@ -459,24 +481,26 @@ export function buildCaptureAnalysisStructuredOutput(name = 'capture_analysis') 
         },
         hierarchies: {
           type: 'array',
+          maxItems: captureAnalysisLimits.hierarchies,
           items: {
             type: 'object',
             properties: {
-              parentTitle: { type: 'string' },
-              categoryName: { type: 'string' },
+              parentTitle: { type: 'string', maxLength: captureAnalysisLimits.titleChars },
+              categoryName: { type: 'string', maxLength: captureAnalysisLimits.titleChars },
               items: {
                 type: 'array',
+                maxItems: captureAnalysisLimits.hierarchyItems,
                 items: {
                   type: 'object',
                   properties: {
-                    title: { type: 'string' },
-                    kind: { type: 'string' },
-                    evidence: { type: 'string' },
+                    title: { type: 'string', maxLength: captureAnalysisLimits.titleChars },
+                    kind: { type: 'string', maxLength: captureAnalysisLimits.titleChars },
+                    evidence: { type: 'string', maxLength: captureAnalysisLimits.evidenceChars },
                   },
                   required: ['title', 'evidence'],
                 },
               },
-              evidence: { type: 'string' },
+              evidence: { type: 'string', maxLength: captureAnalysisLimits.evidenceChars },
               confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
             },
             required: ['parentTitle', 'categoryName', 'items', 'evidence', 'confidence'],
@@ -484,41 +508,44 @@ export function buildCaptureAnalysisStructuredOutput(name = 'capture_analysis') 
         },
         indicators: {
           type: 'array',
+          maxItems: captureAnalysisLimits.indicators,
           items: {
             type: 'object',
             properties: {
-              entityTitle: { type: 'string' },
-              name: { type: 'string' },
+              entityTitle: { type: 'string', maxLength: captureAnalysisLimits.titleChars },
+              name: { type: 'string', maxLength: captureAnalysisLimits.titleChars },
               value: { type: ['number', 'null'] },
-              rawValue: { type: 'string' },
-              unit: { type: 'string' },
-              businessLine: { type: 'string' },
-              categoryName: { type: 'string' },
-              evidence: { type: 'string' },
+              rawValue: { type: 'string', maxLength: captureAnalysisLimits.titleChars },
+              unit: { type: 'string', maxLength: captureAnalysisLimits.tagChars },
+              businessLine: { type: 'string', maxLength: captureAnalysisLimits.titleChars },
+              categoryName: { type: 'string', maxLength: captureAnalysisLimits.titleChars },
+              evidence: { type: 'string', maxLength: captureAnalysisLimits.evidenceChars },
               confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
-              note: { type: 'string' },
-              asOfDate: { type: 'string' },
+              note: { type: 'string', maxLength: captureAnalysisLimits.evidenceChars },
+              asOfDate: { type: 'string', maxLength: captureAnalysisLimits.tagChars },
             },
             required: ['entityTitle', 'name', 'value', 'evidence', 'confidence'],
           },
         },
         contradictions: {
           type: 'array',
+          maxItems: captureAnalysisLimits.contradictions,
           items: {
             type: 'object',
             properties: {
-              title: { type: 'string' },
-              evidence: { type: 'string' },
+              title: { type: 'string', maxLength: captureAnalysisLimits.titleChars },
+              evidence: { type: 'string', maxLength: captureAnalysisLimits.evidenceChars },
             },
             required: ['title', 'evidence'],
           },
         },
         recommendedUpdates: {
           type: 'array',
+          maxItems: captureAnalysisLimits.recommendedUpdates,
           items: {
             type: 'object',
             properties: {
-              targetTitle: { type: 'string' },
+              targetTitle: { type: 'string', maxLength: captureAnalysisLimits.titleChars },
               action: {
                 type: 'string',
                 enum: [
@@ -530,7 +557,7 @@ export function buildCaptureAnalysisStructuredOutput(name = 'capture_analysis') 
                   'REVIEW_REQUIRED',
                 ],
               },
-              reason: { type: 'string' },
+              reason: { type: 'string', maxLength: captureAnalysisLimits.reasonChars },
             },
             required: ['targetTitle', 'action', 'reason'],
           },
@@ -937,6 +964,10 @@ export function normalizeCaptureAnalysisToCaptureDraft(
   const entityByTitle = new Map<string, DraftEntity>();
   const importedSource = extractImportedSourceInfo(content);
   let importedSourceClientId: string | undefined;
+  const projectTitles = analysis.entities
+    .filter((entity) => entity.type === 'project')
+    .map((entity) => entity.title.trim())
+    .filter(Boolean);
 
   const ensureEntity = (
     title: string,
@@ -972,6 +1003,7 @@ export function normalizeCaptureAnalysisToCaptureDraft(
   }
 
   for (const entity of analysis.entities.slice(0, 18)) {
+    if (shouldFoldThinListedSubtopic(entity.title, entity.type, entity.evidence, projectTitles, importedSource)) continue;
     ensureEntity(
       entity.title,
       entity.type,
@@ -981,6 +1013,7 @@ export function normalizeCaptureAnalysisToCaptureDraft(
   }
 
   for (const concept of analysis.concepts.slice(0, 18)) {
+    if (shouldFoldThinListedSubtopic(concept.title, 'topic', concept.evidence, projectTitles, importedSource)) continue;
     ensureEntity(concept.title, 'topic', concept.evidence, ['concept', '概念']);
   }
 
@@ -1022,6 +1055,7 @@ export function normalizeCaptureAnalysisToCaptureDraft(
   }
 
   for (const update of analysis.recommendedUpdates.slice(0, 16)) {
+    if (shouldFoldThinListedSubtopic(update.targetTitle, 'topic', update.reason, projectTitles, importedSource)) continue;
     const inferred = inferEntityFromRecommendedUpdate(update, importedSource, workspaceContext?.schema);
     if (!inferred) continue;
     ensureEntity(update.targetTitle, inferred.type, update.reason, inferred.tags);
@@ -1054,6 +1088,7 @@ export function normalizeCaptureAnalysisToCaptureDraft(
 
   for (const update of analysis.recommendedUpdates) {
     if (update.action === 'CREATE_ENTITY' || update.action === 'REVIEW_REQUIRED') {
+      if (shouldFoldThinListedSubtopic(update.targetTitle, 'topic', update.reason, projectTitles, importedSource)) continue;
       ensureEntity(update.targetTitle, 'topic', update.reason, update.action === 'REVIEW_REQUIRED' ? ['待审核'] : []);
     }
   }
@@ -1081,6 +1116,25 @@ export function normalizeCaptureAnalysisToCaptureDraft(
   }
 
   return { primaryEntity, relatedEntities, relationships, tasks: [], compileSuggestions };
+}
+
+function shouldFoldThinListedSubtopic(
+  title: string,
+  type: EntityType,
+  evidence: string,
+  projectTitles: string[],
+  importedSource?: ReturnType<typeof extractImportedSourceInfo>,
+) {
+  const cleanedTitle = title.trim();
+  const cleanedEvidence = evidence.trim();
+  if (!importedSource || !cleanedTitle || projectTitles.length === 0) return false;
+  if (!['topic', 'project'].includes(type)) return false;
+  if (normalizeTitle(cleanedTitle) === normalizeTitle(importedSource.title)) return false;
+  if (type === 'project' && cleanedEvidence.indexOf(cleanedTitle) <= 5) return false;
+  if (cleanedEvidence.length > 120 || !cleanedEvidence.includes(cleanedTitle)) return false;
+  if (!projectTitles.some((projectTitle) => cleanedEvidence.includes(projectTitle))) return false;
+  const listSeparators = cleanedEvidence.match(/[、，,；;和及与]/g)?.length ?? 0;
+  return listSeparators >= 2;
 }
 
 export function validateWikiPatch(patch: WikiPatch) {
