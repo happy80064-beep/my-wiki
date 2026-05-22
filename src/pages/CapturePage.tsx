@@ -75,8 +75,6 @@ const assetKindLabel: Record<RawAssetKind, string> = {
   html: '网页',
   presentation: '演示文稿',
   archive: '压缩包',
-  audio: '音频',
-  video: '视频',
 };
 
 type SaveResult = {
@@ -1231,8 +1229,6 @@ function mimeExtension(mimeType: string) {
   if (mimeType.includes('csv')) return 'csv';
   if (mimeType.includes('tab-separated-values')) return 'tsv';
   if (mimeType.includes('html')) return 'html';
-  if (mimeType.startsWith('audio/')) return mimeType.includes('mpeg') ? 'mp3' : 'wav';
-  if (mimeType.startsWith('video/')) return 'mp4';
   if (mimeType.startsWith('text/')) return 'txt';
   return 'bin';
 }

@@ -293,9 +293,7 @@ export type RawAssetKind =
   | 'spreadsheet'
   | 'html'
   | 'presentation'
-  | 'archive'
-  | 'audio'
-  | 'video';
+  | 'archive';
 
 export type RawAssetStatus =
   | 'raw'

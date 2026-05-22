@@ -1,32 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { SettingsPage } from '../SettingsPage';
-
-vi.mock('@/lib/runtime/ffmpegComponent', () => ({
-  buildFfmpegComponentDownloadUrls: vi.fn((status: { assetName?: string | null }) =>
-    status.assetName
-      ? {
-          downloadUrl: `https://example.test/${status.assetName}`,
-          sha256Url: `https://example.test/${status.assetName}.sha256`,
-        }
-      : null,
-  ),
-  getFfmpegComponentStatus: vi.fn(async () => ({
-    supported: true,
-    available: false,
-    installed: false,
-    source: 'missing',
-    componentPath: 'C:/Users/test/AppData/Local/com.mywiki.app/tools/ffmpeg/6.1.1/ffmpeg.exe',
-    installDir: 'C:/Users/test/AppData/Local/com.mywiki.app/tools/ffmpeg/6.1.1',
-    componentVersion: '6.1.1',
-    platform: 'windows',
-    arch: 'x64',
-    assetName: 'MyWiki_ffmpeg_0.1.7_windows_x64.zip',
-    message: '未安装音视频解析组件。',
-  })),
-  installFfmpegComponent: vi.fn(),
-  removeFfmpegComponent: vi.fn(),
-}));
 
 describe('SettingsPage', () => {
   beforeEach(() => {
@@ -98,12 +72,4 @@ describe('SettingsPage', () => {
     );
   });
 
-  it('shows the optional ffmpeg component controls', async () => {
-    render(<SettingsPage />);
-
-    expect(await screen.findByText('本地解析组件')).toBeTruthy();
-    expect(screen.getByText('ffmpeg 音视频解析组件')).toBeTruthy();
-    expect(screen.getByText('安装组件')).toBeTruthy();
-    expect(screen.getByText(/MyWiki_ffmpeg_0\.1\.7_windows_x64\.zip/)).toBeTruthy();
-  });
 });

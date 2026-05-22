@@ -135,6 +135,7 @@ class WorkspaceTable<TName extends TableName> {
         throw new Error(`Duplicate record in ${this.name}: ${getRecordKey(this.name, record)}`);
       }
       records.push(cloneForStorage(this.name, record));
+      clearQueryCacheAfterMutation(state, this.name);
     });
     return getRecordKey(this.name, record);
   }
@@ -142,6 +143,7 @@ class WorkspaceTable<TName extends TableName> {
   async put(record: RecordOf<TName>) {
     await enqueueWrite(async (state) => {
       upsertRecord(getTableRecords(state, this.name), this.name, record);
+      clearQueryCacheAfterMutation(state, this.name);
     });
     return getRecordKey(this.name, record);
   }
@@ -150,6 +152,7 @@ class WorkspaceTable<TName extends TableName> {
     await enqueueWrite(async (state) => {
       const table = getTableRecords(state, this.name);
       records.forEach((record) => upsertRecord(table, this.name, record));
+      clearQueryCacheAfterMutation(state, this.name);
     });
   }
 
@@ -161,6 +164,7 @@ class WorkspaceTable<TName extends TableName> {
         this.name,
         getTableRecords(state, this.name).filter((record) => !keySet.has(getRecordKey(this.name, record))),
       );
+      clearQueryCacheAfterMutation(state, this.name);
     });
   }
 
@@ -183,6 +187,7 @@ class WorkspaceTable<TName extends TableName> {
       if (index < 0) return;
       records[index] = cloneForStorage(this.name, { ...records[index], ...patch } as RecordOf<TName>);
       updated = 1;
+      clearQueryCacheAfterMutation(state, this.name);
     });
     return updated;
   }
@@ -194,12 +199,14 @@ class WorkspaceTable<TName extends TableName> {
         this.name,
         getTableRecords(state, this.name).filter((record) => getRecordKey(this.name, record) !== key),
       );
+      clearQueryCacheAfterMutation(state, this.name);
     });
   }
 
   async clear() {
     await enqueueWrite(async (state) => {
       replaceTableRecords(state, this.name, []);
+      clearQueryCacheAfterMutation(state, this.name);
     });
   }
 
@@ -305,6 +312,7 @@ class WorkspaceCollection<TName extends TableName> {
         this.table.name,
         getTableRecords(state, this.table.name).filter((record) => !doomed.has(getRecordKey(this.table.name, record))),
       );
+      clearQueryCacheAfterMutation(state, this.table.name);
     });
   }
 
@@ -321,6 +329,7 @@ class WorkspaceCollection<TName extends TableName> {
           records[index] = cloneForStorage(this.table.name, draft);
         }
       }
+      clearQueryCacheAfterMutation(state, this.table.name);
     });
   }
 
@@ -389,6 +398,7 @@ class WorkspaceUnionCollection<TName extends TableName> {
         this.table.name,
         getTableRecords(state, this.table.name).filter((record) => !doomed.has(getRecordKey(this.table.name, record))),
       );
+      clearQueryCacheAfterMutation(state, this.table.name);
     });
   }
 }
@@ -577,6 +587,11 @@ function getTableRecords<TName extends TableName>(state: WorkspaceRecordState, n
 
 function replaceTableRecords<TName extends TableName>(state: WorkspaceRecordState, name: TName, records: RecordOf<TName>[]) {
   (state.records[name] as RecordOf<TName>[]) = records.map((record) => cloneForStorage(name, record));
+}
+
+function clearQueryCacheAfterMutation<TName extends TableName>(state: WorkspaceRecordState, name: TName) {
+  if (name === 'queryCache') return;
+  state.records.queryCache = [];
 }
 
 function upsertRecord<TName extends TableName>(records: RecordOf<TName>[], tableName: TName, record: RecordOf<TName>) {

@@ -11,9 +11,7 @@ export type ImportFileKind =
   | 'spreadsheet'
   | 'html'
   | 'presentation'
-  | 'archive'
-  | 'audio'
-  | 'video';
+  | 'archive';
 
 export type ImportFileExtraction = {
   filename: string;
@@ -66,8 +64,6 @@ const presentationExtensions = new Set(['ppt', 'pptx']);
 const htmlExtensions = new Set(['html', 'htm']);
 const imageExtensions = new Set(['png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif', 'tif', 'tiff']);
 const archiveExtensions = new Set(['zip']);
-const audioExtensions = new Set(['wav', 'mp3', 'm4a']);
-const videoExtensions = new Set(['mp4']);
 const imageMimeTypes: Record<string, string> = {
   png: 'image/png',
   jpg: 'image/jpeg',
@@ -103,8 +99,6 @@ export function getImportFileKind(filename: string, mimeType = ''): ImportFileKi
   }
   if (htmlExtensions.has(extension) || normalizedMimeType.includes('html')) return 'html';
   if (archiveExtensions.has(extension) || normalizedMimeType.includes('zip')) return 'archive';
-  if (audioExtensions.has(extension) || normalizedMimeType.startsWith('audio/')) return 'audio';
-  if (videoExtensions.has(extension) || normalizedMimeType.startsWith('video/')) return 'video';
   if (textExtensions.has(extension) || normalizedMimeType.startsWith('text/')) return 'text';
   if (
     wordExtensions.has(extension) ||
@@ -180,7 +174,7 @@ export async function extractImportBlobText(
   onProgress?.({ percent: 48, label: `解析 ${input.filename}` });
   throwIfAborted(options.signal);
   let browserExtractionError: unknown;
-  if (kind !== 'pdf' && kind !== 'audio' && kind !== 'video') {
+  if (kind !== 'pdf') {
   try {
     const browserText = await extractBrowserReadableText({
       arrayBuffer,
@@ -214,10 +208,6 @@ export async function extractImportBlobText(
     throw browserExtractionError instanceof Error
       ? browserExtractionError
       : new Error(`${input.filename} 没有提取到可用文本。`);
-  }
-
-  if (kind === 'audio' || kind === 'video') {
-    throw new Error('音视频解析需要桌面安装版和 MyWiki 音视频解析组件 ffmpeg。请在设置页安装组件后重试。');
   }
 
   let simulatedPercent = 48;
@@ -797,8 +787,6 @@ const kindLabels: Record<ImportFileKind, string> = {
   html: '网页 HTML',
   presentation: '演示文稿',
   archive: '压缩包',
-  audio: '音频',
-  video: '视频',
 };
 
 function extractHtmlReadableText(html: string) {

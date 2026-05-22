@@ -49,17 +49,12 @@ jobs:
         shell: powershell
         run: pnpm desktop:build:windows
 
-      - name: Package optional ffmpeg component
-        shell: powershell
-        run: powershell -ExecutionPolicy Bypass -File scripts/package-ffmpeg-component.ps1
-
       - name: Collect Windows release assets
         shell: powershell
         run: |
           New-Item -ItemType Directory -Force -Path release\windows | Out-Null
           Copy-Item -Force src-tauri\target\release\bundle\nsis\*.exe release\windows\
           Copy-Item -Force src-tauri\target\release\bundle\msi\*.msi release\windows\
-          Copy-Item -Force release\components\MyWiki_ffmpeg_0.1.7_windows_x64.zip* release\windows\
           Get-FileHash -Algorithm SHA256 release\windows\* | ForEach-Object {
             "$($_.Hash)  $([System.IO.Path]::GetFileName($_.Path))"
           } | Set-Content release\windows\SHA256SUMS-windows.txt
@@ -103,9 +98,6 @@ jobs:
       - name: Build macOS package
         run: pnpm desktop:build:macos
 
-      - name: Package optional ffmpeg component
-        run: bash scripts/package-ffmpeg-component-macos.sh
-
       - name: Collect macOS release assets
         shell: bash
         run: |
@@ -116,7 +108,6 @@ jobs:
             ditto -c -k --keepParent "$app_path" "release/macos/MyWiki_macos_${RUNNER_ARCH}.app.zip"
           fi
           find src-tauri/target/release/bundle/dmg -name '*.dmg' -type f -exec cp {} release/macos/ \;
-          cp release/components/MyWiki_ffmpeg_0.1.7_macos_*.zip* release/macos/
           shasum -a 256 release/macos/* > release/macos/SHA256SUMS-macos.txt
 
       - name: Upload macOS release assets
@@ -153,7 +144,14 @@ jobs:
           fi
           echo "Publishing ${#assets[@]} assets to ${GH_REPO} ${TAG_NAME}."
           if gh release view "$TAG_NAME" --repo "$GH_REPO" >/dev/null 2>&1; then
+            mapfile -t old_assets < <(gh release view "$TAG_NAME" --repo "$GH_REPO" --json assets --jq '.assets[].name')
             gh release upload "$TAG_NAME" "${assets[@]}" --clobber --repo "$GH_REPO"
+            mapfile -t new_assets < <(printf '%s\n' "${assets[@]}" | xargs -n 1 basename | sort)
+            for asset in "${old_assets[@]}"; do
+              if ! printf '%s\n' "${new_assets[@]}" | grep -Fxq "$asset"; then
+                gh release delete-asset "$TAG_NAME" "$asset" --yes --repo "$GH_REPO"
+              fi
+            done
           else
             gh release create "$TAG_NAME" "${assets[@]}" \
               --repo "$GH_REPO" \

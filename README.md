@@ -8,7 +8,7 @@ MyWiki 是一个本地优先的个人 AI 知识中枢。它把 PDF、Word、Exce
 
 ## 当前状态
 
-`v0.1.7` 是内测 MVP 的本地工作区、查询、图谱、Raw Inbox/Frog 编译链路和可选音视频解析组件修订版本，重点把运行记录从浏览器 IndexedDB 迁到工作区文件，修复“原文件已入库但没有生成有效 Wiki 页”这类静默成功问题，并把 ffmpeg 改为应用内按需安装组件。
+`v0.1.7` 是内测 MVP 的本地工作区、查询、图谱、Raw Inbox/Frog 编译链路修订版本，重点把运行记录从浏览器 IndexedDB 迁到工作区文件，并修复“原文件已入库但没有生成有效 Wiki 页”这类静默成功问题。
 
 本版本相对 `v0.1.6` 的主要更新：
 
@@ -26,14 +26,16 @@ MyWiki 是一个本地优先的个人 AI 知识中枢。它把 PDF、Word、Exce
 12. 图谱可视化优化节点稳定性和社区连线可见性，降低非核心节点在无任务运行时的小范围跳动和闪烁。
 13. 查询页 UI 更新，把原“简单查询”文本开关改为更具象的模式开关样式，并配合新的查询模式展示。
 14. Markdown 原文件标题识别增强，导入长标题方案/框架类文档时更容易生成正确项目页；来源页不会再被自动主题聚合当成知识主题。
-15. 音视频解析组件改为按需安装：主安装包不内置 ffmpeg；设置页新增“本地解析组件”，可检测系统 ffmpeg、下载固定 Release 组件包、校验 SHA256、安装/移除组件。处理 MP3、MP4、M4A、WAV 等材料时若组件不可用，会显式失败并提示安装，不会静默降级。
+15. 查询缓存一致性修复：当用户确认应用 Wiki 编译建议、审核项或其他知识记录写回后，非缓存表写入会立即清空旧查询缓存，避免在同一毫秒内复用旧答案导致“已确认的待审核建议”再次出现。
+16. 音视频材料支持本次暂缓：MarkItDown 官方音频转写链路依赖 Google Speech Recognition，中文和长音频结果不可控；`v0.1.7` 不发布 ffmpeg 组件，也不把 MP3、MP4、M4A、WAV 列为支持导入格式，等待后续形成稳定 ASR 方案后再接入。
 
 本地打包版验收记录：
 
 - Query、图谱、Lint、工作区记录、Raw Inbox 队列和人工编辑保护相关单元测试已覆盖本次修改的主要行为。
+- 查询建议写回竞态已用固定 `Date.now()` 的真实同毫秒用例验证：先查询生成开源状态建议并写入缓存，再应用建议，随后再次查询必须重新读取实体属性，不允许命中旧缓存或重复返回待审核建议。
 - Raw Inbox/Frog 真实模型回归用例已使用 MiniMax 配置处理一份真实 Markdown 原文件：原文件状态为 `compiled`，生成了实质实体/Wiki 页，未触发 fallback、兜底或降级。
 - 本机环境为 Windows，macOS `.dmg` 无法在本机安装运行。macOS 包通过 GitHub Actions 的 `macos-latest` runner 执行 `pnpm test` 与 `pnpm desktop:build:macos` 后生成。
-- ffmpeg 组件链路已用真实 Windows ffmpeg 组件包验证：`MyWiki_ffmpeg_0.1.7_windows_x64.zip` 约 28.32 MB，SHA256 文件已生成，解压后 `ffmpeg -version` 正常；MarkItDown bridge 在注入 `MYWIKI_FFMPEG_PATH` 后 stderr 为空，不再出现 pydub 找不到 ffmpeg 的警告。
+- 音视频链路已按官方 MarkItDown 文档重新确认：ffmpeg 只能解决解码/抽轨，不能提供稳定中文 ASR；本版本已撤下音视频入口和组件发布，避免把不可控转写失败、超时或降级当作通过。
 
 当前发布安装包：
 
@@ -43,8 +45,6 @@ MyWiki 是一个本地优先的个人 AI 知识中枢。它把 PDF、Word、Exce
 | Windows | `MyWiki_0.1.7_x64_en-US.msi` | Windows MSI 安装包 |
 | macOS | `MyWiki_0.1.7_aarch64.dmg` | Apple Silicon Mac 推荐安装包 |
 | macOS | `MyWiki_macos_ARM64.app.zip` | Apple Silicon Mac app 压缩包 |
-| Windows 组件 | `MyWiki_ffmpeg_0.1.7_windows_x64.zip` | 可选 ffmpeg 音视频解析组件，应用内按需下载并校验 `.sha256` |
-| macOS 组件 | `MyWiki_ffmpeg_0.1.7_macos_ARM64.zip` | 可选 ffmpeg 音视频解析组件，应用内按需下载并校验 `.sha256` |
 
 > 说明：当前 macOS 包是 ARM64 / Apple Silicon 版本。iOS 分发不是普通桌面安装包链路，需要后续单独规划 TestFlight、App Store 或企业签名分发。
 
@@ -52,8 +52,8 @@ MyWiki 是一个本地优先的个人 AI 知识中枢。它把 PDF、Word、Exce
 
 - 本地工作区：按项目创建独立文件夹，集中保存 `raw/`、`wiki/`、索引和运行状态。
 - Raw Inbox：支持拖拽、粘贴文件、粘贴网页 URL，原始材料先安全入库，再进入编译流程。
-- 多格式导入：支持文本、Markdown、HTML、CSV、JSON、XML、ZIP、Word、PDF、Excel、PPT、图片，以及安装 ffmpeg 组件后的 MP3、MP4、M4A、WAV 音视频材料。
-- MarkItDown 增强：安装包内置 MarkItDown sidecar，用于复杂 Office/PDF/HTML/ZIP 和 URL 转 Markdown；音视频解析通过可选 ffmpeg 组件增强。
+- 多格式导入：支持文本、Markdown、HTML、CSV、JSON、XML、ZIP、Word、PDF、Excel、PPT 和图片。
+- MarkItDown 增强：安装包内置 MarkItDown sidecar，用于复杂 Office/PDF/HTML/ZIP 和 URL 转 Markdown。
 - 多模态处理：图片 OCR 与视觉 caption，PDF/PPTX/DOCX 内嵌图片抽取，caption/OCR 写入 Markdown。
 - Wiki 生成：批量生成/更新 Wiki 页面，输出结构化 Markdown、frontmatter、来源引用和相关页面。
 - 知识库切换：总览页可新建、切换或浏览选择本地 MyWiki 工作区，知识库、图谱、审核、巡检、查询页随当前工作区动态适配。
@@ -61,7 +61,6 @@ MyWiki 是一个本地优先的个人 AI 知识中枢。它把 PDF、Word、Exce
 - 图谱：展示实体关系、社区结构和类型/社区着色，支持平面/空间视角、缩放、平移、重排和全屏。
 - 巡检：检测 wiki 链接、内容质量和潜在冲突，支持保留巡检结果并查看问题页面。
 - 模型配置：按 Provider 配置文本、视觉、embedding、OCR 等角色模型，并检查职责可用性。
-- 本地组件：设置页可检测、安装、重新安装或移除 ffmpeg 音视频解析组件；组件包从 GitHub Release 固定资产下载并做 SHA256 校验。
 - 版本更新：客户端通过 GitHub Releases 检测新版本并提示下载。
 
 ## 仓库结构
@@ -114,8 +113,8 @@ pnpm desktop:build:macos
 1. 同步 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json`、`src-tauri/tauri.macos.conf.json` 的版本号。
 2. 合并并推送到 `main`。
 3. 创建并推送 tag，例如 `v0.1.7`。
-4. `Release Packages` workflow 构建 Windows/macOS 安装包，并额外打包 `MyWiki_ffmpeg_0.1.7_<platform>_<arch>.zip` 与 `.sha256` 可选组件资产。
-5. workflow 创建或更新 GitHub Release，客户端通过 `/releases/latest` 检查更新，ffmpeg 组件按当前版本 Release 资产下载。
+4. `Release Packages` workflow 构建 Windows/macOS 安装包并生成 SHA256 校验文件。
+5. workflow 创建或更新 GitHub Release，客户端通过 `/releases/latest` 检查更新。
 
 详见 [`docs/release.md`](./docs/release.md)。
 
@@ -130,3 +129,4 @@ MyWiki 当前设计是本地优先：用户项目、原始材料、生成的 Wik
 - macOS 当前发布 Apple Silicon / ARM64 包。
 - iOS 分发尚未接入，需要单独设计移动端构建和签名流程。
 - 图谱页当前以现有实体关系数据为主，后续会继续和文件工作区 Wiki page types 深度对齐。
+- 音视频材料解析和转写尚未接入稳定方案；本版本不把 MP3、MP4、M4A、WAV 作为支持导入格式。

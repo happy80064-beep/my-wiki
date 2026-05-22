@@ -2374,8 +2374,6 @@ function rawAssetKindLabel(kind: RawAsset['kind']) {
   if (kind === 'presentation') return 'PPT';
   if (kind === 'spreadsheet') return 'Excel';
   if (kind === 'image') return '图片';
-  if (kind === 'audio') return '音频';
-  if (kind === 'video') return '视频';
   return '文本';
 }
 

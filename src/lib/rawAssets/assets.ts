@@ -1494,6 +1494,4 @@ const rawKindLabels: Record<RawAssetKind, string> = {
   html: '网页 HTML',
   presentation: '演示文稿',
   archive: '压缩包',
-  audio: '音频',
-  video: '视频',
 };
