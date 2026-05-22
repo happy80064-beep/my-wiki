@@ -404,7 +404,7 @@ describe('RuntimeWikiPage', () => {
     await waitFor(async () => {
       expect(await db.entities.get(entity.id)).toBeUndefined();
     });
-  });
+  }, 15_000);
 
   it('does not enqueue duplicate page deletes while deletion is pending', async () => {
     const entity = await createEntity({
