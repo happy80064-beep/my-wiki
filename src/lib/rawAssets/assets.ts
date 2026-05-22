@@ -572,7 +572,7 @@ export async function processRawAsset(
     }
     await db.rawAssets.update(asset.id, {
       status: 'failed',
-      error: error instanceof Error ? error.message : '编译失败。',
+      error: formatErrorMessage(error),
       updatedAt: Date.now(),
     });
   }
@@ -1304,17 +1304,17 @@ function fnv1a(bytes: Uint8Array) {
 }
 
 function getUsableBlob(asset: RawAsset) {
-  if (asset.blob && typeof asset.blob.arrayBuffer === 'function') {
+  if (asset.blob && typeof asset.blob.arrayBuffer === 'function' && asset.blob.size > 0) {
     return asset.blob;
   }
 
-  if (!asset.dataBase64) {
-    return asset.blob;
+  if (asset.dataBase64) {
+    return new Blob([base64ToBytes(asset.dataBase64)], {
+      type: asset.mimeType,
+    });
   }
 
-  return new Blob([base64ToBytes(asset.dataBase64)], {
-    type: asset.mimeType,
-  });
+  return asset.blob;
 }
 
 function buildRawAssetFailureMessage(status?: string, error?: string, emptyKnowledge = false) {
@@ -1494,4 +1494,6 @@ const rawKindLabels: Record<RawAssetKind, string> = {
   html: '网页 HTML',
   presentation: '演示文稿',
   archive: '压缩包',
+  audio: '音频',
+  video: '视频',
 };

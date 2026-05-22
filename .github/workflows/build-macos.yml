@@ -38,6 +38,9 @@ jobs:
       - name: Build macOS package
         run: pnpm desktop:build:macos
 
+      - name: Package optional ffmpeg component
+        run: bash scripts/package-ffmpeg-component-macos.sh
+
       - name: Collect macOS artifacts
         shell: bash
         run: |
@@ -48,6 +51,7 @@ jobs:
             ditto -c -k --keepParent "$app_path" "release/macos/MyWiki_macos_${RUNNER_ARCH}.app.zip"
           fi
           find src-tauri/target/release/bundle/dmg -name '*.dmg' -type f -exec cp {} release/macos/ \;
+          cp release/components/MyWiki_ffmpeg_0.1.7_macos_*.zip* release/macos/
           shasum -a 256 release/macos/* > release/macos/SHA256SUMS.txt
 
       - name: Upload macOS artifacts

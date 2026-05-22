@@ -2,6 +2,7 @@ import { ArrowUpRight, Calendar, ChevronDown, ChevronRight, Download, Edit3, Fil
 import { useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLiveQuery } from '@/lib/db/liveQuery';
 import { db, deleteEntity, mergeExactDuplicateCompatibleEntities } from '@/lib/db';
+import { reloadWorkspaceRecordStateFromDisk } from '@/lib/db/schema';
 import {
   restoreMarkdownExportZip,
   restoreMarkdownImportRecords,
@@ -352,6 +353,11 @@ export function RuntimeWikiPage({ syncError = '' }: { syncError?: string } = {})
       subscribeRawAssetQueueStatus((snapshot) => {
         setQueueStatus(snapshot);
         if (!snapshot) return;
+        if (isTauriRuntime() || canUseWorkspaceStorage()) {
+          void reloadWorkspaceRecordStateFromDisk().catch((error) => {
+            setRuntimeOpenError(error instanceof Error ? error.message : '工作区记录刷新失败。');
+          });
+        }
         if (snapshot.stage === 'running') {
           setCompileStatus(`${snapshot.owner === 'frog' ? 'Frog' : '知识库页面'}正在原文件结构化入库：${snapshot.label}`);
         } else if (Date.now() - snapshot.updatedAt < 5000) {
@@ -2368,6 +2374,8 @@ function rawAssetKindLabel(kind: RawAsset['kind']) {
   if (kind === 'presentation') return 'PPT';
   if (kind === 'spreadsheet') return 'Excel';
   if (kind === 'image') return '图片';
+  if (kind === 'audio') return '音频';
+  if (kind === 'video') return '视频';
   return '文本';
 }
 

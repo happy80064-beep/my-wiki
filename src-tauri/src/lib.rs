@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 mod import_extract;
+mod ffmpeg_component;
 use base64::{engine::general_purpose, Engine as _};
 use futures_util::StreamExt;
 use tauri::{
@@ -49,6 +50,9 @@ pub fn run() {
             http_post_json,
             http_post_json_stream,
             open_external_url,
+            ffmpeg_component::ffmpeg_component_status,
+            ffmpeg_component::ffmpeg_component_install,
+            ffmpeg_component::ffmpeg_component_remove,
             import_extract::import_extract_text,
             import_extract::import_extract_url,
             workspace_default_root,

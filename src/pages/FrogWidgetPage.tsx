@@ -721,6 +721,8 @@ function mimeExtension(mimeType: string) {
   if (mimeType.includes('csv')) return 'csv';
   if (mimeType.includes('tab-separated-values')) return 'tsv';
   if (mimeType.includes('html')) return 'html';
+  if (mimeType.startsWith('audio/')) return mimeType.includes('mpeg') ? 'mp3' : 'wav';
+  if (mimeType.startsWith('video/')) return 'mp4';
   if (mimeType.startsWith('text/')) return 'txt';
   return 'bin';
 }

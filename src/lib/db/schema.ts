@@ -622,7 +622,8 @@ function cloneFromStorage<TName extends TableName>(tableName: TName, value: Reco
 
 function serializeRawAssetRecord(asset: RawAsset): RawAsset {
   const { blob: _blob, ...rest } = asset;
-  if (asset.blob) rawAssetBlobStore.set(asset.id, asset.blob);
+  if (asset.blob && asset.blob.size > 0) rawAssetBlobStore.set(asset.id, asset.blob);
+  else rawAssetBlobStore.delete(asset.id);
   return {
     ...structuredCloneSafe(rest),
     dataBase64: asset.dataBase64,
@@ -632,7 +633,11 @@ function serializeRawAssetRecord(asset: RawAsset): RawAsset {
 
 function deserializeRawAssetRecord(asset: RawAsset): RawAsset {
   const cloned = structuredCloneSafe(asset);
-  const blob = rawAssetBlobStore.get(asset.id) ?? base64ToBlob(asset.dataBase64 ?? '', asset.mimeType || 'application/octet-stream');
+  const runtimeBlob = rawAssetBlobStore.get(asset.id);
+  const blob =
+    runtimeBlob && runtimeBlob.size > 0
+      ? runtimeBlob
+      : base64ToBlob(asset.dataBase64 ?? '', asset.mimeType || 'application/octet-stream');
   return {
     ...cloned,
     blob,

@@ -15,6 +15,8 @@ use calamine::{open_workbook_auto, Reader};
 use tauri::Manager;
 use zip::ZipArchive;
 
+use crate::ffmpeg_component;
+
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -138,6 +140,19 @@ fn extract_bytes_to_markdown(
         return extract_pdf_text_with_pdf_extract(bytes);
     }
 
+    if is_audio_video_extension(&extension) || normalized_mime.starts_with("audio/") || normalized_mime.starts_with("video/") {
+        if !ffmpeg_component::has_usable_ffmpeg(app) {
+            return Err(
+                "音视频解析需要先安装 MyWiki 音视频解析组件 ffmpeg。请到设置页安装后重试。".to_string(),
+            );
+        }
+        let text = extract_with_markitdown(app, filename, &extension, bytes)?;
+        if text.trim().is_empty() {
+            return Err(format!("{filename} 没有提取到可用的音视频转写内容。"));
+        }
+        return Ok(text);
+    }
+
     if should_try_markitdown(&extension, &normalized_mime) {
         if let Ok(text) = extract_with_markitdown(app, filename, &extension, bytes) {
             if !text.trim().is_empty() {
@@ -190,7 +205,7 @@ fn extract_with_markitdown(
     let converter_path = find_markitdown_converter(app)
         .ok_or_else(|| "未找到随安装包分发的 MarkItDown 转换器。".to_string())?;
     let input_path = write_temp_import_file(filename, extension, bytes)?;
-    let result = run_markitdown_converter(&converter_path, &input_path);
+    let result = run_markitdown_converter(app, &converter_path, &input_path);
     let _ = fs::remove_file(&input_path);
     result
 }
@@ -221,9 +236,10 @@ fn find_markitdown_converter(app: &tauri::AppHandle) -> Option<PathBuf> {
     candidates.into_iter().find(|path| path.exists())
 }
 
-fn run_markitdown_converter(converter_path: &Path, input_path: &Path) -> Result<String, String> {
+fn run_markitdown_converter(app: &tauri::AppHandle, converter_path: &Path, input_path: &Path) -> Result<String, String> {
     let mut command = Command::new(converter_path);
     hide_child_console(&mut command);
+    ffmpeg_component::configure_ffmpeg_env(app, &mut command);
     let output = command
         .arg(input_path)
         .stdin(Stdio::null())
@@ -246,12 +262,13 @@ fn run_markitdown_converter(converter_path: &Path, input_path: &Path) -> Result<
 fn extract_url_with_markitdown(app: &tauri::AppHandle, url: &str) -> Result<String, String> {
     let converter_path = find_markitdown_converter(app)
         .ok_or_else(|| "Bundled MarkItDown converter was not found.".to_string())?;
-    run_markitdown_url_converter(&converter_path, url)
+    run_markitdown_url_converter(app, &converter_path, url)
 }
 
-fn run_markitdown_url_converter(converter_path: &Path, url: &str) -> Result<String, String> {
+fn run_markitdown_url_converter(app: &tauri::AppHandle, converter_path: &Path, url: &str) -> Result<String, String> {
     let mut command = Command::new(converter_path);
     hide_child_console(&mut command);
+    ffmpeg_component::configure_ffmpeg_env(app, &mut command);
     let output = command
         .arg("--url")
         .arg(url)
@@ -782,6 +799,10 @@ fn is_image_extension(extension: &str) -> bool {
     matches!(extension, "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif" | "tif" | "tiff")
 }
 
+fn is_audio_video_extension(extension: &str) -> bool {
+    matches!(extension, "wav" | "mp3" | "m4a" | "mp4")
+}
+
 fn is_readable_zip_member(extension: &str) -> bool {
     matches!(
         extension,
@@ -792,7 +813,7 @@ fn is_readable_zip_member(extension: &str) -> bool {
 fn should_try_markitdown(extension: &str, mime_type: &str) -> bool {
     matches!(
         extension,
-        "pdf" | "doc" | "docx" | "ppt" | "pptx" | "xls" | "xlsx" | "xlsm" | "xlsb" | "ods" | "html" | "htm" | "zip"
+        "pdf" | "doc" | "docx" | "ppt" | "pptx" | "xls" | "xlsx" | "xlsm" | "xlsb" | "ods" | "html" | "htm" | "zip" | "wav" | "mp3" | "m4a" | "mp4"
     ) || mime_type.contains("pdf")
         || mime_type.contains("word")
         || mime_type.contains("presentation")
@@ -801,6 +822,8 @@ fn should_try_markitdown(extension: &str, mime_type: &str) -> bool {
         || mime_type.contains("excel")
         || mime_type.contains("html")
         || mime_type.contains("zip")
+        || mime_type.starts_with("audio/")
+        || mime_type.starts_with("video/")
 }
 
 fn is_pptx_slide_file(name: &str) -> bool {

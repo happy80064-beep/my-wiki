@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from urllib.parse import urlparse
@@ -17,6 +18,8 @@ def write_stderr(text: str) -> None:
 
 
 def convert_with_markitdown(source: str, *, is_url: bool) -> str:
+    configure_ffmpeg()
+
     from markitdown import MarkItDown
 
     converter = MarkItDown(enable_plugins=False)
@@ -25,6 +28,30 @@ def convert_with_markitdown(source: str, *, is_url: bool) -> str:
     else:
         result = converter.convert(source)
     return getattr(result, "text_content", "") or ""
+
+
+def configure_ffmpeg() -> None:
+    ffmpeg_path = os.environ.get("MYWIKI_FFMPEG_PATH", "").strip()
+    if not ffmpeg_path:
+        return
+    path = Path(ffmpeg_path)
+    if not path.exists() or not path.is_file():
+        raise RuntimeError(f"Configured ffmpeg executable does not exist: {path}")
+
+    current_path = os.environ.get("PATH", "")
+    ffmpeg_dir = str(path.parent)
+    os.environ["PATH"] = ffmpeg_dir if not current_path else f"{ffmpeg_dir}{os.pathsep}{current_path}"
+
+    try:
+        from pydub import AudioSegment
+
+        AudioSegment.converter = str(path)
+        AudioSegment.ffmpeg = str(path)
+        probe = path.with_name("ffprobe.exe" if path.suffix.lower() == ".exe" else "ffprobe")
+        if probe.exists() and probe.is_file():
+            AudioSegment.ffprobe = str(probe)
+    except ImportError:
+        return
 
 
 def is_http_url(value: str) -> bool:

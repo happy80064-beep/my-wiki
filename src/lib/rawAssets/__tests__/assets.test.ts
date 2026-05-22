@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import JSZip from 'jszip';
+import * as XLSX from 'xlsx';
 import { createLocalCaptureDraft } from '@/lib/capture';
 import { createEntity, db, resetDatabase } from '@/lib/db';
 import {
@@ -165,6 +166,69 @@ describe('raw assets', () => {
     expect(compiled?.entryId).toBeTruthy();
     expect(await db.entries.count()).toBe(1);
     expect((await db.entries.get(compiled!.entryId!))?.processed).toBe(true);
+  });
+
+  it('restores persisted raw content from dataBase64 when the stored Blob is empty', async () => {
+    const marker = 'EMPTY_BLOB_MARKER_20260522';
+    const file = new File([`OpenMaic 是开源项目。\n${marker}`], 'persisted-empty-blob.md', { type: 'text/markdown' });
+    const { asset } = await createRawAssetFromFile(file);
+    await db.rawAssets.update(asset.id, {
+      blob: new Blob([], { type: 'text/markdown' }),
+      dataBase64: asset.dataBase64,
+      status: 'raw',
+    });
+
+    let capturedContent = '';
+    const compiled = await processRawAsset(asset.id, async (content) => {
+      capturedContent = content;
+      return { draft: createLocalCaptureDraft(content) };
+    });
+
+    expect(capturedContent).toContain(marker);
+    expect(compiled?.status).toBe('compiled');
+    expect(compiled?.extractedText).toContain(marker);
+  });
+
+  it('restores persisted xlsx spreadsheet content from dataBase64 when the stored Blob is empty', async () => {
+    const workbook = XLSX.utils.book_new();
+    const worksheet = XLSX.utils.aoa_to_sheet([
+      ['项目', '收入'],
+      ['福瑞三期', '4.22亿元'],
+    ]);
+    XLSX.utils.book_append_sheet(workbook, worksheet, '利润表');
+    const buffer = XLSX.write(workbook, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;
+    const file = new File([buffer], 'persisted-empty-blob.xlsx', {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+    const { asset } = await createRawAssetFromFile(file);
+    await db.rawAssets.update(asset.id, {
+      blob: new Blob([], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
+      dataBase64: asset.dataBase64,
+      status: 'raw',
+    });
+
+    let capturedContent = '';
+    const compiled = await processRawAsset(asset.id, async (content) => {
+      capturedContent = content;
+      return { draft: createLocalCaptureDraft(content) };
+    });
+
+    expect(capturedContent).toContain('福瑞三期');
+    expect(capturedContent).toContain('4.22亿元');
+    expect(compiled?.status).toBe('compiled');
+    expect(compiled?.extractedText).toContain('福瑞三期');
+  });
+
+  it('preserves non-Error raw processing failures instead of replacing them with a generic message', async () => {
+    const file = new File(['OpenMaic 是开源项目。'], 'string-error.md', { type: 'text/markdown' });
+    const { asset } = await createRawAssetFromFile(file);
+
+    const compiled = await processRawAsset(asset.id, async () => {
+      throw 'tauri sidecar returned empty text';
+    });
+
+    expect(compiled?.status).toBe('failed');
+    expect(compiled?.error).toBe('tauri sidecar returned empty text');
   });
 
   it('fails imported markdown when structured capture only creates a source page', async () => {

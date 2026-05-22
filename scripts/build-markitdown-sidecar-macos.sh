@@ -8,6 +8,7 @@ venv_root="$tool_root/.venv"
 dist_root="$repo_root/src-tauri/binaries"
 bridge="$repo_root/scripts/markitdown_bridge.py"
 output="$dist_root/mywiki-markitdown"
+local_ffmpeg="$repo_root/.release-tools/ffmpeg-component-macos/node_modules/ffmpeg-static/ffmpeg"
 
 mkdir -p "$tool_root" "$dist_root"
 
@@ -25,6 +26,11 @@ fi
 python="$venv_root/bin/python"
 "$python" -m pip install --upgrade pip
 "$python" -m pip install --upgrade 'markitdown[all]' pyinstaller
+
+if [[ -x "$local_ffmpeg" ]]; then
+  export MYWIKI_FFMPEG_PATH="$local_ffmpeg"
+  export PATH="$(dirname "$local_ffmpeg"):$PATH"
+fi
 
 "$python" -m PyInstaller \
   --clean \

@@ -285,7 +285,17 @@ export type GraphInsightDismissal = {
   dismissedAt: number;
 };
 
-export type RawAssetKind = 'text' | 'word' | 'pdf' | 'image' | 'spreadsheet' | 'html' | 'presentation' | 'archive';
+export type RawAssetKind =
+  | 'text'
+  | 'word'
+  | 'pdf'
+  | 'image'
+  | 'spreadsheet'
+  | 'html'
+  | 'presentation'
+  | 'archive'
+  | 'audio'
+  | 'video';
 
 export type RawAssetStatus =
   | 'raw'

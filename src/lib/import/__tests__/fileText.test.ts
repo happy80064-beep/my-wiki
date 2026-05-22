@@ -18,6 +18,8 @@ describe('import file kind detection', () => {
     expect(getImportFileKind('扫描.pdf')).toBe('pdf');
     expect(getImportFileKind('路演.pptx')).toBe('presentation');
     expect(getImportFileKind('截图.png')).toBe('image');
+    expect(getImportFileKind('访谈.mp3')).toBe('audio');
+    expect(getImportFileKind('会议.mp4')).toBe('video');
   });
 
   it('uses mime type as a fallback', () => {
@@ -31,6 +33,8 @@ describe('import file kind detection', () => {
     );
     expect(getImportFileKind('untitled', 'text/html')).toBe('html');
     expect(getImportFileKind('untitled', 'application/zip')).toBe('archive');
+    expect(getImportFileKind('untitled', 'audio/mpeg')).toBe('audio');
+    expect(getImportFileKind('untitled', 'video/mp4')).toBe('video');
     expect(isSupportedImportFile('archive.zip')).toBe(true);
   });
 

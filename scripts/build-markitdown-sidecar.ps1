@@ -6,6 +6,7 @@ $venvRoot = Join-Path $toolRoot ".venv"
 $distRoot = Join-Path $repoRoot "src-tauri\binaries"
 $bridge = Join-Path $repoRoot "scripts\markitdown_bridge.py"
 $exe = Join-Path $distRoot "mywiki-markitdown.exe"
+$localFfmpeg = Join-Path $repoRoot ".codex-tools\video-tools\node_modules\ffmpeg-static\ffmpeg.exe"
 
 New-Item -ItemType Directory -Force -Path $toolRoot, $distRoot | Out-Null
 
@@ -26,6 +27,11 @@ if (!(Test-Path $python)) {
 
 & $python -m pip install --upgrade pip
 & $python -m pip install --upgrade "markitdown[all]" pyinstaller
+
+if (Test-Path $localFfmpeg) {
+  $env:MYWIKI_FFMPEG_PATH = $localFfmpeg
+  $env:PATH = "$(Split-Path -Parent $localFfmpeg);$env:PATH"
+}
 
 $buildPath = Join-Path $toolRoot "build"
 $specPath = Join-Path $toolRoot "spec"

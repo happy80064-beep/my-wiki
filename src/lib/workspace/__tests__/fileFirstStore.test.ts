@@ -1,5 +1,6 @@
 import type { TauriWorkspaceStorage } from '@/lib/workspace/tauriStorage';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import * as XLSX from 'xlsx';
 
 const mocks = vi.hoisted(() => ({
   workspaceRoot: 'D:/FileFirstWiki',
@@ -21,6 +22,8 @@ vi.mock('@/lib/workspace/activeWorkspace', () => ({
 
 import { createEntity, createEntry, db, resetDatabase } from '@/lib/db';
 import { clearWorkspaceRecordRuntimeCache } from '@/lib/db/schema';
+import { createLocalCaptureDraft } from '@/lib/capture';
+import { createRawAssetFromFile, processRawAsset } from '@/lib/rawAssets';
 import { restoreWorkspaceRecordsFromWorkspace, syncWorkspaceRecordsToDefaultWorkspace } from '@/lib/workspace/workspaceRecordsSync';
 
 function memoryWorkspaceStorage(): TauriWorkspaceStorage {
@@ -97,5 +100,36 @@ describe('workspace file-first store', () => {
       id: entry.id,
       content: '真实用例：文件优先存储验证。',
     });
+  });
+
+  it('reloads raw asset bytes from records.json dataBase64 when only an empty Blob remains in runtime state', async () => {
+    const workbook = XLSX.utils.book_new();
+    const worksheet = XLSX.utils.aoa_to_sheet([
+      ['项目', '收入'],
+      ['福瑞三期', '4.22亿元'],
+    ]);
+    XLSX.utils.book_append_sheet(workbook, worksheet, '利润表');
+    const buffer = XLSX.write(workbook, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;
+    const { asset } = await createRawAssetFromFile(
+      new File([buffer], '真实项目测算.xlsx', {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      }),
+    );
+    await db.rawAssets.update(asset.id, {
+      blob: new Blob([], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
+      status: 'raw',
+    });
+
+    clearWorkspaceRecordRuntimeCache();
+    let capturedContent = '';
+    const compiled = await processRawAsset(asset.id, async (content) => {
+      capturedContent = content;
+      return { draft: createLocalCaptureDraft(content) };
+    });
+
+    expect(capturedContent).toContain('福瑞三期');
+    expect(capturedContent).toContain('4.22亿元');
+    expect(compiled?.status).toBe('compiled');
+    expect(compiled?.extractedText).toContain('福瑞三期');
   });
 });

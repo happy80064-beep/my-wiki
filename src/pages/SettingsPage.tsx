@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   KeyRound,
   Loader2,
+  PackageCheck,
   Settings2,
   SlidersHorizontal,
 } from 'lucide-react';
@@ -48,11 +49,21 @@ import {
   saveMultimodalSettings,
   type MultimodalSettings,
 } from '@/lib/multimodal/settings';
+import {
+  buildFfmpegComponentDownloadUrls,
+  getFfmpegComponentStatus,
+  installFfmpegComponent,
+  removeFfmpegComponent,
+  type FfmpegComponentStatus,
+} from '@/lib/runtime/ffmpegComponent';
 
 export function SettingsPage() {
   const [settings, setSettings] = useState<LlmProviderSettings>(() => createDefaultProviderSettings());
   const [researchSettings, setResearchSettings] = useState<ResearchSettings>(() => createDefaultResearchSettings());
   const [multimodalSettings, setMultimodalSettings] = useState<MultimodalSettings>(() => createDefaultMultimodalSettings());
+  const [ffmpegStatus, setFfmpegStatus] = useState<FfmpegComponentStatus | null>(null);
+  const [ffmpegBusy, setFfmpegBusy] = useState(false);
+  const [ffmpegError, setFfmpegError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<LlmProviderId>>(new Set(['minimax-cn']));
   const [savedAt, setSavedAt] = useState<number | null>(null);
 
@@ -60,6 +71,7 @@ export function SettingsPage() {
     setSettings(loadProviderSettings());
     setResearchSettings(loadResearchSettings());
     setMultimodalSettings(loadMultimodalSettings());
+    void refreshFfmpegStatus();
   }, []);
 
   const activeErrors = useMemo(() => validateActiveProvider(settings), [settings]);
@@ -90,6 +102,47 @@ export function SettingsPage() {
     setMultimodalSettings(next);
     saveMultimodalSettings(next);
     setSavedAt(Date.now());
+  }
+
+  async function refreshFfmpegStatus() {
+    setFfmpegError(null);
+    try {
+      setFfmpegStatus(await getFfmpegComponentStatus());
+    } catch (error) {
+      setFfmpegError(formatErrorMessage(error));
+    }
+  }
+
+  async function handleInstallFfmpeg() {
+    if (!ffmpegStatus) return;
+    const urls = buildFfmpegComponentDownloadUrls(ffmpegStatus);
+    if (!urls) {
+      setFfmpegError('当前发布版本没有可用的音视频解析组件下载地址。');
+      return;
+    }
+    setFfmpegBusy(true);
+    setFfmpegError(null);
+    try {
+      setFfmpegStatus(await installFfmpegComponent(urls));
+      setSavedAt(Date.now());
+    } catch (error) {
+      setFfmpegError(formatErrorMessage(error));
+    } finally {
+      setFfmpegBusy(false);
+    }
+  }
+
+  async function handleRemoveFfmpeg() {
+    setFfmpegBusy(true);
+    setFfmpegError(null);
+    try {
+      setFfmpegStatus(await removeFfmpegComponent());
+      setSavedAt(Date.now());
+    } catch (error) {
+      setFfmpegError(formatErrorMessage(error));
+    } finally {
+      setFfmpegBusy(false);
+    }
   }
 
   function toggleProvider(providerId: LlmProviderId) {
@@ -138,6 +191,10 @@ export function SettingsPage() {
             <a className="flex items-center gap-2 rounded-[8px] px-3 py-2 text-sm text-[#626965] hover:bg-[#f7f7f5]" href="#multimodal">
               <SlidersHorizontal size={16} />
               多模态
+            </a>
+            <a className="flex items-center gap-2 rounded-[8px] px-3 py-2 text-sm text-[#626965] hover:bg-[#f7f7f5]" href="#components">
+              <PackageCheck size={16} />
+              本地组件
             </a>
           </nav>
         </aside>
@@ -289,6 +346,24 @@ export function SettingsPage() {
                 onChange={(checked) => persistMultimodal({ includeOcrText: checked })}
               />
             </div>
+          </section>
+
+          <section id="components" className="overflow-hidden rounded-[12px] border border-[#e5e5e4] bg-white p-5">
+            <div className="flex items-center gap-2">
+              <PackageCheck size={18} className="text-[#155eef]" />
+              <h3 className="text-lg font-semibold text-[#1f2937]">本地解析组件</h3>
+            </div>
+            <p className="mt-2 text-sm leading-6 text-[#626965]">
+              音频和视频材料需要 ffmpeg 组件。MyWiki 主安装包不内置该组件，只有在处理 MP3、MP4、M4A、WAV 等材料时才需要安装。
+            </p>
+            <FfmpegComponentPanel
+              status={ffmpegStatus}
+              busy={ffmpegBusy}
+              error={ffmpegError}
+              onRefresh={refreshFfmpegStatus}
+              onInstall={handleInstallFfmpeg}
+              onRemove={handleRemoveFfmpeg}
+            />
           </section>
         </main>
       </div>
@@ -699,6 +774,95 @@ function ConfigField({ label, children }: { label: string; children: ReactNode }
       {children}
     </div>
   );
+}
+
+function FfmpegComponentPanel({
+  status,
+  busy,
+  error,
+  onRefresh,
+  onInstall,
+  onRemove,
+}: {
+  status: FfmpegComponentStatus | null;
+  busy: boolean;
+  error: string | null;
+  onRefresh: () => void | Promise<void>;
+  onInstall: () => void | Promise<void>;
+  onRemove: () => void | Promise<void>;
+}) {
+  const urls = status ? buildFfmpegComponentDownloadUrls(status) : null;
+  return (
+    <div className="mt-4 grid gap-3 rounded-[10px] border border-[#e5e5e4] bg-[#fbfbfa] p-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold text-[#1f2937]">ffmpeg 音视频解析组件</p>
+          <p className="mt-1 text-xs leading-5 text-[#626965]">{formatFfmpegStatus(status)}</p>
+        </div>
+        <span className={ffmpegStatusPillClass(status)}>
+          {status?.available ? '可用' : status?.installed ? '异常' : '未安装'}
+        </span>
+      </div>
+
+      {status?.version ? <p className="break-words text-xs leading-5 text-[#626965]">{status.version}</p> : null}
+      {status?.executablePath ? <p className="break-all text-xs leading-5 text-[#626965]">路径：{status.executablePath}</p> : null}
+      {status?.message ? <p className="text-xs leading-5 text-[#8a4b00]">{status.message}</p> : null}
+      {error ? <p className="rounded-[8px] border border-[#fed7aa] bg-[#fff7ed] px-3 py-2 text-xs leading-5 text-[#8a4b00]">{error}</p> : null}
+
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          className="rounded-full border border-[#d9d9d6] bg-white px-3 py-1.5 text-xs font-medium text-[#626965]"
+          disabled={busy}
+          onClick={() => void onRefresh()}
+        >
+          检测
+        </button>
+        <button
+          type="button"
+          className="rounded-full border border-[#155eef] bg-[#155eef] px-3 py-1.5 text-xs font-medium text-white disabled:border-[#9bbcff] disabled:bg-[#9bbcff]"
+          disabled={busy || !status?.supported || !urls}
+          onClick={() => void onInstall()}
+        >
+          {busy ? '处理中...' : status?.installed ? '重新安装' : '安装组件'}
+        </button>
+        <button
+          type="button"
+          className="rounded-full border border-[#d9d9d6] bg-white px-3 py-1.5 text-xs font-medium text-[#626965] disabled:text-[#a3a3a3]"
+          disabled={busy || !status?.installed}
+          onClick={() => void onRemove()}
+        >
+          移除组件
+        </button>
+      </div>
+
+      {urls ? (
+        <p className="break-all text-[11px] leading-5 text-[#8a8f8b]">
+          下载：{urls.downloadUrl}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function formatFfmpegStatus(status: FfmpegComponentStatus | null) {
+  if (!status) return '正在检测组件状态...';
+  if (status.source === 'component' && status.available) return '已安装 MyWiki 管理的 ffmpeg 组件。';
+  if (status.source === 'system' && status.available) return '检测到系统 ffmpeg，MyWiki 会优先使用系统可执行文件。';
+  if (status.source === 'broken') return '组件已安装但不可用，需要重新安装。';
+  if (!status.supported) return '当前平台暂不支持自动安装该组件。';
+  return '尚未安装，处理音视频材料前需要安装。';
+}
+
+function ffmpegStatusPillClass(status: FfmpegComponentStatus | null) {
+  const base = 'rounded-full px-2 py-0.5 text-[11px] font-medium';
+  if (status?.available) return `${base} bg-[#dcfce7] text-[#166534]`;
+  if (status?.installed) return `${base} bg-[#fff7ed] text-[#9a3412]`;
+  return `${base} bg-[#eeeeed] text-[#626965]`;
+}
+
+function formatErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error || 'unknown error');
 }
 
 function ToggleRow({

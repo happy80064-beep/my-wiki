@@ -129,7 +129,7 @@ export async function processIngestJob(
     if (isAbortError(error)) {
       await db.ingestJobs.update(job.id, {
         status: 'failed',
-        error: error instanceof Error ? error.message : 'Operation cancelled.',
+        error: formatErrorMessage(error),
         updatedAt: failedAt,
       });
       return db.ingestJobs.get(job.id);
@@ -138,7 +138,7 @@ export async function processIngestJob(
     await db.ingestJobs.update(job.id, {
       status: retryCount >= 3 ? 'failed' : 'pending',
       retryCount,
-      error: error instanceof Error ? error.message : '摄入失败',
+      error: formatErrorMessage(error),
       updatedAt: failedAt,
     });
   }
@@ -218,4 +218,8 @@ function isAbortError(error: unknown) {
     (error instanceof DOMException && error.name === 'AbortError') ||
     (error instanceof Error && error.name === 'AbortError')
   );
+}
+
+function formatErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error || 'unknown error');
 }
