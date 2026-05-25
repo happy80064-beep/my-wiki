@@ -3,6 +3,7 @@ import '@react-sigma/core/lib/style.css';
 import Graph from 'graphology';
 import forceAtlas2 from 'graphology-layout-forceatlas2';
 import React, { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { NodeCircleProgram } from 'sigma/rendering';
 
 export type SigmaKnowledgeNode = {
   id: string;
@@ -42,6 +43,54 @@ let lastLayoutKey = '';
 
 export function SigmaKnowledgeGraph(props: SigmaKnowledgeGraphProps) {
   const [webglReady, setWebglReady] = useState<boolean | null>(null);
+  const sigmaSettings = useMemo(
+    () => ({
+      allowInvalidContainer: true,
+      defaultEdgeColor: '#cbd5e1',
+      defaultNodeColor: '#94a3b8',
+      defaultNodeType: 'circle',
+      enableEdgeEvents: false,
+      labelColor: { color: '#1f2937' },
+      labelDensity: 0.34,
+      labelGridCellSize: 90,
+      labelRenderedSizeThreshold: 7,
+      labelSize: 12,
+      labelWeight: '700',
+      nodeProgramClasses: { circle: NodeCircleProgram },
+      renderEdgeLabels: false,
+      stagePadding: 42,
+      zIndex: true,
+      nodeReducer: (_node: string, attrs: Record<string, unknown>) => {
+        const result: Record<string, unknown> = { ...attrs };
+        const baseSize = Number(attrs.size ?? 8);
+        if (attrs.insightDimmed || attrs.hoverDimmed) {
+          result.color = mixColor(String(attrs.color ?? '#94a3b8'), '#eef2f7', 0.72);
+          result.label = '';
+          result.size = Math.max(3.5, baseSize * 0.58);
+        }
+        if (attrs.insightHighlight || attrs.hovering) {
+          result.size = baseSize * 1.42;
+          result.forceLabel = true;
+          result.zIndex = 10;
+        }
+        return result;
+      },
+      edgeReducer: (_edge: string, attrs: Record<string, unknown>) => {
+        const result: Record<string, unknown> = { ...attrs };
+        const baseSize = Number(attrs.size ?? 1);
+        if (attrs.insightDimmed || attrs.hoverDimmed) {
+          result.color = '#e7edf4';
+          result.size = 0.28;
+        }
+        if (attrs.insightHighlight || attrs.hoverHighlight) {
+          result.color = attrs.highlightColor ?? '#155eef';
+          result.size = Math.max(2.2, baseSize * 1.7);
+        }
+        return result;
+      },
+    }),
+    [],
+  );
 
   useEffect(() => {
     setWebglReady(hasWebGLSupport());
@@ -54,49 +103,7 @@ export function SigmaKnowledgeGraph(props: SigmaKnowledgeGraphProps) {
     <SigmaCanvasErrorBoundary>
       <SigmaContainer
         className="mywiki-sigma-graph h-full min-h-[360px] w-full"
-        settings={{
-          allowInvalidContainer: true,
-          defaultEdgeColor: '#cbd5e1',
-          defaultNodeColor: '#94a3b8',
-          enableEdgeEvents: false,
-          labelColor: { color: '#1f2937' },
-          labelDensity: 0.34,
-          labelGridCellSize: 90,
-          labelRenderedSizeThreshold: 7,
-          labelSize: 12,
-          labelWeight: '700',
-          renderEdgeLabels: false,
-          stagePadding: 42,
-          zIndex: true,
-          nodeReducer: (_node, attrs) => {
-            const result = { ...attrs };
-            const baseSize = Number(attrs.size ?? 8);
-            if (attrs.insightDimmed || attrs.hoverDimmed) {
-              result.color = mixColor(String(attrs.color ?? '#94a3b8'), '#eef2f7', 0.72);
-              result.label = '';
-              result.size = Math.max(3.5, baseSize * 0.58);
-            }
-            if (attrs.insightHighlight || attrs.hovering) {
-              result.size = baseSize * 1.42;
-              result.forceLabel = true;
-              result.zIndex = 10;
-            }
-            return result;
-          },
-          edgeReducer: (_edge, attrs) => {
-            const result = { ...attrs };
-            const baseSize = Number(attrs.size ?? 1);
-            if (attrs.insightDimmed || attrs.hoverDimmed) {
-              result.color = '#e7edf4';
-              result.size = 0.28;
-            }
-            if (attrs.insightHighlight || attrs.hoverHighlight) {
-              result.color = attrs.highlightColor ?? '#155eef';
-              result.size = Math.max(2.2, baseSize * 1.7);
-            }
-            return result;
-          },
-        }}
+        settings={sigmaSettings}
       >
         <SigmaGraphLoader nodes={props.nodes} links={props.links} layoutKey={props.layoutKey} />
         <SigmaGraphEvents onHoverNode={props.onHoverNode} onOpenNode={props.onOpenNode} />
@@ -240,9 +247,22 @@ function SigmaCameraBridge({
 }) {
   const sigma = useSigma();
   const applyingExternalZoom = useRef(false);
+  const externalZoomTimeoutRef = useRef<number | null>(null);
+  const cameraZoomFrameRef = useRef<number | null>(null);
+  const lastReportedZoomRef = useRef(zoom);
 
   useEffect(() => {
+    lastReportedZoomRef.current = zoom;
+  }, [zoom]);
+
+  useEffect(() => {
+    applyingExternalZoom.current = true;
     sigma.getCamera().animatedReset({ duration: 260 });
+    if (externalZoomTimeoutRef.current !== null) window.clearTimeout(externalZoomTimeoutRef.current);
+    externalZoomTimeoutRef.current = window.setTimeout(() => {
+      applyingExternalZoom.current = false;
+      externalZoomTimeoutRef.current = null;
+    }, 320);
   }, [layoutKey, sigma]);
 
   useEffect(() => {
@@ -253,8 +273,10 @@ function SigmaCameraBridge({
 
     applyingExternalZoom.current = true;
     camera.animate({ ratio: targetRatio }, { duration: 180 });
-    window.setTimeout(() => {
+    if (externalZoomTimeoutRef.current !== null) window.clearTimeout(externalZoomTimeoutRef.current);
+    externalZoomTimeoutRef.current = window.setTimeout(() => {
       applyingExternalZoom.current = false;
+      externalZoomTimeoutRef.current = null;
     }, 210);
   }, [sigma, zoom]);
 
@@ -262,11 +284,26 @@ function SigmaCameraBridge({
     const camera = sigma.getCamera();
     const handleCameraUpdate = () => {
       if (applyingExternalZoom.current) return;
-      onZoomChange(clamp(1 / camera.getState().ratio, 0.62, 1.95));
+      if (cameraZoomFrameRef.current !== null) return;
+      cameraZoomFrameRef.current = window.requestAnimationFrame(() => {
+        cameraZoomFrameRef.current = null;
+        const nextZoom = clamp(1 / camera.getState().ratio, 0.62, 1.95);
+        if (Math.abs(nextZoom - lastReportedZoomRef.current) < 0.035) return;
+        lastReportedZoomRef.current = nextZoom;
+        onZoomChange(nextZoom);
+      });
     };
     camera.on('updated', handleCameraUpdate);
     return () => {
       camera.off('updated', handleCameraUpdate);
+      if (cameraZoomFrameRef.current !== null) {
+        window.cancelAnimationFrame(cameraZoomFrameRef.current);
+        cameraZoomFrameRef.current = null;
+      }
+      if (externalZoomTimeoutRef.current !== null) {
+        window.clearTimeout(externalZoomTimeoutRef.current);
+        externalZoomTimeoutRef.current = null;
+      }
     };
   }, [onZoomChange, sigma]);
 

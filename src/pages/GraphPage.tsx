@@ -717,6 +717,7 @@ export function GraphPage() {
             ) : true ? (
               <Suspense fallback={<GraphCanvasLoading />}>
                 <SigmaKnowledgeGraph
+                  key={sigmaLayoutKey}
                   nodes={sigmaNodes}
                   links={sigmaLinks}
                   highlightedNodeIds={highlightedNodeIds}
