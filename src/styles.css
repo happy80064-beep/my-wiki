@@ -75,6 +75,21 @@ body {
   touch-action: none;
 }
 
+.mywiki-sigma-graph {
+  position: relative;
+  display: block;
+  background-color: #f4f7fb;
+  background-image:
+    linear-gradient(rgba(100, 116, 139, 0.1) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(100, 116, 139, 0.1) 1px, transparent 1px);
+  background-size: 42px 42px;
+  touch-action: none;
+}
+
+.mywiki-sigma-graph .sigma-container {
+  background: transparent;
+}
+
 .mywiki-graph-space-shell {
   background:
     radial-gradient(circle at 22% 18%, rgba(21, 94, 239, 0.08), transparent 34%),

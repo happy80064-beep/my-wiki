@@ -17,6 +17,8 @@ import {
 import {
   type PointerEvent as ReactPointerEvent,
   type WheelEvent as ReactWheelEvent,
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -36,6 +38,7 @@ import {
 import { db, getClientId } from '@/lib/db';
 import { ResearchPanel } from '@/components/research/ResearchPanel';
 import { useResearchStore } from '@/lib/research/store';
+import type { SigmaKnowledgeLink, SigmaKnowledgeNode } from '@/components/graph/SigmaKnowledgeGraph';
 import type { Entity, EntityType, Relationship } from '@/types';
 
 type SceneNode = {
@@ -219,6 +222,10 @@ const GRAPH_WIDTH = 1900;
 const GRAPH_HEIGHT = 1180;
 const flatRotation: Rotation = { x: 0, y: 0 };
 const spaceRotation: Rotation = { x: -0.38, y: 0.44 };
+const SigmaKnowledgeGraph = lazy(() =>
+  import('@/components/graph/SigmaKnowledgeGraph').then((module) => ({ default: module.SigmaKnowledgeGraph })),
+);
+const emptyProjectedScene: ProjectedScene = { nodes: [], links: [], communities: [], visibleLabelIds: new Set() };
 
 export function GraphPage() {
   const svgRef = useRef<SVGSVGElement | null>(null);
@@ -275,10 +282,7 @@ export function GraphPage() {
     () => buildGraphScene(filteredEntities, filteredRelationships, layoutSalt, nodeOverrides),
     [filteredEntities, filteredRelationships, layoutSalt, nodeOverrides],
   );
-  const projectedScene = useMemo(
-    () => projectGraphScene(scene, viewMode === 'space' ? rotation : flatRotation, floatTime, zoom, viewMode, graphOffset),
-    [scene, viewMode, rotation, floatTime, zoom, graphOffset],
-  );
+  const projectedScene = emptyProjectedScene;
   const communityLegendItems = useMemo<GraphLegendItem[]>(
     () =>
       scene.communities
@@ -316,11 +320,56 @@ export function GraphPage() {
     () => new Set(selectedInsight?.relationshipIds ?? []),
     [selectedInsight],
   );
+  const sigmaNodes = useMemo<SigmaKnowledgeNode[]>(
+    () =>
+      scene.nodes.map((node) => ({
+        id: node.entity.id,
+        label: node.entity.title,
+        typeLabel: entityTypeLabels[node.entity.type],
+        color: getNodeColor(node, colorMode),
+        degree: node.degree,
+        communityId: node.communityId,
+        isCommunityHub: node.isCommunityHub,
+        updatedAt: node.entity.updatedAt,
+      })),
+    [colorMode, scene.nodes],
+  );
+  const sigmaLinks = useMemo<SigmaKnowledgeLink[]>(
+    () =>
+      scene.links.map((link) => ({
+        id: link.relationship.id,
+        source: link.from.entity.id,
+        target: link.to.entity.id,
+        label: relationshipTypeLabel(link.relationship.type),
+        color: colorMode === 'community' && link.sameCommunity ? getCommunityColor(link.from.communityId) : '#64748b',
+        weight: link.weight,
+        sameCommunity: link.sameCommunity,
+      })),
+    [colorMode, scene.links],
+  );
+  const sigmaLayoutKey = useMemo(
+    () =>
+      `${layoutSalt}:${scene.nodes
+        .map((node) => node.entity.id)
+        .sort()
+        .join('|')}:${scene.links
+        .map((link) => link.relationship.id)
+        .sort()
+        .join('|')}`,
+    [layoutSalt, scene.links, scene.nodes],
+  );
   const openGraphNode = useCallback(
     (node: SceneNode) => {
       navigate(buildWikiEntityHref(node.entity));
     },
     [navigate],
+  );
+  const openGraphNodeById = useCallback(
+    (nodeId: string) => {
+      const node = scene.nodes.find((item) => item.entity.id === nodeId);
+      if (node) openGraphNode(node);
+    },
+    [openGraphNode, scene.nodes],
   );
 
   useEffect(() => {
@@ -665,6 +714,20 @@ export function GraphPage() {
                 onZoomChange={setZoom}
                 onOffsetChange={setGraphOffset}
               />
+            ) : true ? (
+              <Suspense fallback={<GraphCanvasLoading />}>
+                <SigmaKnowledgeGraph
+                  nodes={sigmaNodes}
+                  links={sigmaLinks}
+                  highlightedNodeIds={highlightedNodeIds}
+                  highlightedRelationshipIds={highlightedRelationshipIds}
+                  layoutKey={sigmaLayoutKey}
+                  zoom={zoom}
+                  onZoomChange={setZoom}
+                  onHoverNode={setHoveredNodeId}
+                  onOpenNode={openGraphNodeById}
+                />
+              </Suspense>
             ) : (
               <svg
                 ref={svgRef}
@@ -804,6 +867,7 @@ export function GraphPage() {
                 })}
               </svg>
             )}
+            <GraphAccessibleLinks nodes={scene.nodes} />
           </div>
         </section>
 
@@ -1545,6 +1609,26 @@ function GraphLegendCard({ title, items }: { title: string; items: GraphLegendIt
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function GraphCanvasLoading() {
+  return (
+    <div className="flex h-full min-h-[360px] items-center justify-center bg-[#f4f7fb] px-6 text-center text-sm text-[#626965]">
+      图谱画布加载中...
+    </div>
+  );
+}
+
+function GraphAccessibleLinks({ nodes }: { nodes: SceneNode[] }) {
+  return (
+    <div className="sr-only" aria-label="图谱节点导航">
+      {nodes.map((node) => (
+        <a key={node.entity.id} href={buildWikiEntityHref(node.entity)}>
+          {node.entity.title}
+        </a>
+      ))}
     </div>
   );
 }
