@@ -2,15 +2,21 @@
 
 MyWiki 是一个本地优先的个人 AI 知识中枢。它把 PDF、Word、Excel、PPT、图片、网页、压缩包和文本等原始材料放入统一工作区，经过结构化入库和 Wiki 编译后，生成可阅读、可检索、可追溯、可持续编辑的 Markdown Wiki。
 
-当前仓库版本：`v0.1.7`
+当前仓库版本：`v0.1.8`
 
 最新安装包：<https://github.com/happy80064-beep/my-wiki/releases/latest>
 
 ## 当前状态
 
-`v0.1.7` 是内测 MVP 的本地工作区、查询、图谱、Raw Inbox/Frog 编译链路修订版本，重点把运行记录从浏览器 IndexedDB 迁到工作区文件，并修复“原文件已入库但没有生成有效 Wiki 页”这类静默成功问题。
+`v0.1.8` 是内测 MVP 的 Query 工作台体验修订版本，基于 `v0.1.7` 的本地工作区、查询、图谱、Raw Inbox/Frog 编译链路，重点改善长对话回看和回答等待过程可见性。
 
-本版本相对 `v0.1.6` 的主要更新：
+本版本相对 `v0.1.7` 的主要更新：
+
+1. 查询页进入或切换会话后会自动定位到最近一轮对话，长对话不再需要用户手动一直向下翻。
+2. 查询回答卡片增加 `Thought for N lines` 折叠块：生成中展示处理过程，生成完成后默认折叠，正文回答仍保持原有输出内容和结构。
+3. Thought 展示使用 MyWiki 已有查询轨迹（检索、模式、工作区上下文、证据分层、回答阶段），不把模型原始 chain-of-thought 写入回答正文、复制内容或保存到 Wiki。
+
+`v0.1.7` 的本地工作区和编译链路修订继续保留：
 
 1. 运行记录切换为工作区文件优先：实体、关系、任务、审核项、Raw Inbox、查询缓存等记录写入当前知识库的 `.mywiki/records.json`，桌面安装版不再依赖浏览器 IndexedDB 作为主存储。
 2. 移除 Dexie 和 fake-indexeddb 依赖，保留一层兼容现有业务调用的文件记录表 API；工作区记录读写失败会在界面和队列中显式报错，不再静默忽略。
@@ -29,10 +35,11 @@ MyWiki 是一个本地优先的个人 AI 知识中枢。它把 PDF、Word、Exce
 15. 查询缓存一致性修复：当用户确认应用 Wiki 编译建议、审核项或其他知识记录写回后，非缓存表写入会立即清空旧查询缓存，避免在同一毫秒内复用旧答案导致“已确认的待审核建议”再次出现。
 16. DeepSeek 结构化入库链路改为流式 JSON 输出，并限制结构化结果规模；当模型只返回 thinking/reasoning、空正文或服务端错误时会显式失败并保留错误原因，不再把空结果当作编译成功。
 17. Wiki 知识树删除优化：删除单页或 type 分组会先弹出应用内二次确认；type 分组删除改为批量事务并锁定重复点击，降低“点了多次、等待很久才删除”的体验问题。
-18. 音视频材料支持本次暂缓：MarkItDown 官方音频转写链路依赖 Google Speech Recognition，中文和长音频结果不可控；`v0.1.7` 不发布 ffmpeg 组件，也不把 MP3、MP4、M4A、WAV 列为支持导入格式，等待后续形成稳定 ASR 方案后再接入。
+18. 音视频材料支持本次暂缓：MarkItDown 官方音频转写链路依赖 Google Speech Recognition，中文和长音频结果不可控；`v0.1.8` 不发布 ffmpeg 组件，也不把 MP3、MP4、M4A、WAV 列为支持导入格式，等待后续形成稳定 ASR 方案后再接入。
 
-本地打包版验收记录：
+本地与发布验收记录：
 
+- Query 工作台自动定位最近消息和 Thought 折叠展示已通过本地 Vite + headless Edge 截图验证；测试样例确认 Thought 只叠加在正文上方，不改变回答正文内容。
 - Query、图谱、Lint、工作区记录、Raw Inbox 队列和人工编辑保护相关单元测试已覆盖本次修改的主要行为。
 - 查询建议写回竞态已用固定 `Date.now()` 的真实同毫秒用例验证：先查询生成开源状态建议并写入缓存，再应用建议，随后再次查询必须重新读取实体属性，不允许命中旧缓存或重复返回待审核建议。
 - Raw Inbox/Frog 真实模型回归用例已使用 DeepSeek 配置处理真实 Markdown 原文件：原文件状态为 `compiled`，生成了实质实体/Wiki 页，未触发 fallback、兜底或降级。
@@ -45,9 +52,9 @@ MyWiki 是一个本地优先的个人 AI 知识中枢。它把 PDF、Word、Exce
 
 | 平台 | 文件 | 说明 |
 | --- | --- | --- |
-| Windows | `MyWiki_0.1.7_x64-setup.exe` | 推荐给普通 Windows 用户的安装包 |
-| Windows | `MyWiki_0.1.7_x64_en-US.msi` | Windows MSI 安装包 |
-| macOS | `MyWiki_0.1.7_aarch64.dmg` | Apple Silicon Mac 推荐安装包 |
+| Windows | `MyWiki_0.1.8_x64-setup.exe` | 推荐给普通 Windows 用户的安装包 |
+| Windows | `MyWiki_0.1.8_x64_en-US.msi` | Windows MSI 安装包 |
+| macOS | `MyWiki_0.1.8_aarch64.dmg` | Apple Silicon Mac 推荐安装包 |
 | macOS | `MyWiki_macos_ARM64.app.zip` | Apple Silicon Mac app 压缩包 |
 
 > 说明：当前 macOS 包是 ARM64 / Apple Silicon 版本。iOS 分发不是普通桌面安装包链路，需要后续单独规划 TestFlight、App Store 或企业签名分发。
@@ -116,7 +123,7 @@ pnpm desktop:build:macos
 
 1. 同步 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json`、`src-tauri/tauri.macos.conf.json` 的版本号。
 2. 合并并推送到 `main`。
-3. 创建并推送 tag，例如 `v0.1.7`。
+3. 创建并推送 tag，例如 `v0.1.8`。
 4. `Release Packages` workflow 构建 Windows/macOS 安装包并生成 SHA256 校验文件。
 5. workflow 创建或更新 GitHub Release，客户端通过 `/releases/latest` 检查更新。
 

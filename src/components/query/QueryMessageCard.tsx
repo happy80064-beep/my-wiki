@@ -1,6 +1,7 @@
 import {
   BookOpen,
   BookPlus,
+  Brain,
   Check,
   CheckCircle2,
   Copy,
@@ -27,6 +28,7 @@ import { QueryAnswerRenderer } from './QueryAnswerRenderer';
 type QueryMessageCardProps = {
   message: QueryChatMessage;
   isLastAssistant?: boolean;
+  isGenerating?: boolean;
   onRegenerate?: (message: QueryChatMessage) => Promise<void> | void;
   onDeepResearch?: (message: QueryChatMessage) => Promise<void> | void;
   onPrefillSuggestion?: (suggestion: string) => void;
@@ -38,6 +40,7 @@ type QueryMessageCardProps = {
 export function QueryMessageCard({
   message,
   isLastAssistant,
+  isGenerating,
   onRegenerate,
   onDeepResearch,
   onPrefillSuggestion,
@@ -118,6 +121,7 @@ export function QueryMessageCard({
     <div className="space-y-2">
       {isResearch ? <div className="text-xs font-semibold uppercase tracking-[0.04em] text-[#155eef]">研究结论</div> : null}
       <article className="rounded-[18px] border border-[#e5e5e4] bg-white p-5 shadow-[0_12px_36px_rgba(15,23,42,0.04)]">
+        {message.result?.trace?.length ? <QueryThoughtBlock trace={message.result.trace} isGenerating={Boolean(isGenerating)} /> : null}
         {isResearchPending ? (
           <div className="space-y-2 text-sm text-[#4b5563]">
             <div className="inline-flex items-center gap-2 font-medium text-[#155eef]">
@@ -316,6 +320,48 @@ export function QueryMessageCard({
       ) : null}
     </div>
   );
+}
+
+function QueryThoughtBlock({
+  trace,
+  isGenerating,
+}: {
+  trace: NonNullable<NonNullable<QueryChatMessage['result']>['trace']>;
+  isGenerating: boolean;
+}) {
+  const lines = trace
+    .flatMap((step) => splitTraceDetail(step.label, step.detail))
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return null;
+
+  return (
+    <details
+      className="mb-4 rounded-[12px] border border-dashed border-[#f1c27d] bg-[#fff8e8]"
+      open={isGenerating}
+    >
+      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs font-medium text-[#b45309]">
+        <Brain size={14} aria-hidden="true" />
+        <span>Thought for {lines.length} lines</span>
+        <span className="text-[#d97706]/70">{isGenerating ? '▼' : '▶'}</span>
+      </summary>
+      <div className="max-h-56 overflow-y-auto border-t border-[#f1c27d]/40 px-3 py-2 font-mono text-xs leading-6 text-[#92400e]">
+        {lines.map((line, index) => (
+          <div key={`${index}:${line}`} className="whitespace-pre-wrap">
+            {index + 1}. {line}
+          </div>
+        ))}
+      </div>
+    </details>
+  );
+}
+
+function splitTraceDetail(label: string, detail: string) {
+  return detail
+    .split(/[。；]\s*/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => `${label}：${part}`);
 }
 
 function ReferenceIcon({ reference }: { reference: QueryChatReference }) {

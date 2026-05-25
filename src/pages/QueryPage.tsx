@@ -1,5 +1,5 @@
 import { Loader2, MessageSquareText } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { QueryConversationList } from '@/components/query/QueryConversationList';
 import { QueryInput } from '@/components/query/QueryInput';
 import { QueryMessageCard } from '@/components/query/QueryMessageCard';
@@ -51,6 +51,7 @@ export function QueryPage() {
   const [selectedReference, setSelectedReference] = useState<QueryChatReference | null>(null);
   const [referencePanelOpen, setReferencePanelOpen] = useState(false);
   const [responseMode, setResponseMode] = useState<'wiki' | 'research-search' | 'research-synthesis' | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const currentWorkspaceRoot = activeWorkspaceRoot || 'browser-indexeddb';
 
   const activeMessages = useMemo(
@@ -79,6 +80,13 @@ export function QueryPage() {
     setSelectedReference(null);
     setReferencePanelOpen(false);
   }, [currentWorkspaceRoot, setWorkspaceRoot]);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      messagesEndRef.current?.scrollIntoView({ block: 'end' });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeConversationId, activeMessages, isResponding]);
 
   function handleReferenceSelect(reference: QueryChatReference) {
     setSelectedReference(reference);
@@ -468,6 +476,7 @@ export function QueryPage() {
                     key={message.id}
                     message={message}
                     isLastAssistant={message.id === lastAssistantId}
+                    isGenerating={isResponding && message.id === lastAssistantId}
                     onRegenerate={handleRegenerate}
                     onDeepResearch={handleDeepResearch}
                     onPrefillSuggestion={setDraftSeed}
@@ -488,6 +497,7 @@ export function QueryPage() {
                     </span>
                   </div>
                 ) : null}
+                <div ref={messagesEndRef} />
               </div>
             )}
           </div>

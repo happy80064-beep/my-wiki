@@ -174,4 +174,39 @@ describe('QueryMessageCard', () => {
     expect(screen.getByText('参考来源（1）')).toBeTruthy();
     expect(screen.getByText('这是普通回答。')).toBeTruthy();
   });
+
+  it('adds a collapsed thought block without replacing the answer body', () => {
+    const message: QueryChatMessage = {
+      id: 'assistant-thought',
+      role: 'assistant',
+      content: '## 完整回答\n\n一、医疗业务转化率假设存在不确定性。\n\n二、招商节奏和现金流节奏需要错峰管理。',
+      conversationId: 'conv-1',
+      timestamp: Date.now(),
+      question: '运营难点是什么？',
+      result: {
+        answer: '## 完整回答\n\n一、医疗业务转化率假设存在不确定性。\n\n二、招商节奏和现金流节奏需要错峰管理。',
+        sources: [],
+        suggestions: [],
+        trace: [
+          {
+            layer: 'directory',
+            label: 'Wiki 页面检索',
+            detail: '选入 3 个候选页面。耗时：316ms。',
+          },
+          {
+            layer: 'answer',
+            label: 'Query 回答',
+            detail: '基于 1 个 Wiki 页面生成回答。耗时：2.4s。',
+          },
+        ],
+      },
+    };
+
+    renderCard(message);
+
+    expect(screen.getByText(/Thought for 4 lines/)).toBeTruthy();
+    expect(screen.getByText('完整回答')).toBeTruthy();
+    expect(screen.getByText(/医疗业务转化率假设存在不确定性/)).toBeTruthy();
+    expect(screen.getByText(/招商节奏和现金流节奏需要错峰管理/)).toBeTruthy();
+  });
 });
