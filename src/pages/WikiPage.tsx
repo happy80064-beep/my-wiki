@@ -2499,7 +2499,7 @@ function buildRawAssetSourceSummary(asset: RawAsset, entry?: Entry, entityById: 
   if (asset.status === 'wiki_failed') {
     parts.push('结构化内容已保留，Wiki 生成可重试');
   }
-  if (asset.error) parts.push(asset.error);
+  if (asset.error && asset.status !== 'compiled' && asset.status !== 'skipped') parts.push(asset.error);
   return parts.join(' · ');
 }
 

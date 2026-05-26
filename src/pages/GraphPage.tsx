@@ -1690,7 +1690,10 @@ function buildGraphScene(
 
   const validEntityIds = new Set(entities.map((entity) => entity.id));
   const validRelationships = relationships.filter(
-    (relationship) => validEntityIds.has(relationship.from) && validEntityIds.has(relationship.to),
+    (relationship) =>
+      relationship.from !== relationship.to &&
+      validEntityIds.has(relationship.from) &&
+      validEntityIds.has(relationship.to),
   );
   const degreeById = new Map<string, number>();
   for (const entity of entities) {

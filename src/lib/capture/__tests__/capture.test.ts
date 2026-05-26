@@ -28,6 +28,29 @@ describe('capture flow', () => {
     expect(savedEntry?.derivedTasks).toHaveLength(result.tasks.length);
   });
 
+  it('does not persist self-referential relationships from capture drafts', async () => {
+    const draft = createLocalCaptureDraft('Self relationship test.');
+    draft.primaryEntity.type = 'topic';
+    draft.primaryEntity.title = 'Self Topic';
+    draft.relatedEntities = [];
+    draft.relationships = [
+      {
+        clientId: 'rel_self',
+        fromClientId: draft.primaryEntity.clientId,
+        toClientId: draft.primaryEntity.clientId,
+        type: 'mentions',
+      },
+    ];
+    draft.tasks = [];
+
+    const result = await persistCaptureDraft('Self relationship test.', draft);
+    const savedEntry = await db.entries.get(result.entry.id);
+
+    expect(result.relationships).toHaveLength(0);
+    expect(savedEntry?.derivedRelationships).toEqual([]);
+    await expect(db.relationships.count()).resolves.toBe(0);
+  });
+
   it('reuses existing entities and compiles capture impact into them', async () => {
     const person = await createEntity({ type: 'person', title: '虾总', tags: ['客户'], scenes: ['work'] });
     const project = await createEntity({ type: 'project', title: '股票监控', tags: ['旧项目'], scenes: ['work'] });

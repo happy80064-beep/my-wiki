@@ -39,6 +39,7 @@ MyWiki 是一个本地优先的个人 AI 知识中枢。它把 PDF、Word、Exce
 17. Wiki 知识树删除优化：删除单页或 type 分组会先弹出应用内二次确认；type 分组删除改为批量事务并锁定重复点击，降低“点了多次、等待很久才删除”的体验问题。
 18. 音视频材料支持本次暂缓：MarkItDown 官方音频转写链路依赖 Google Speech Recognition，中文和长音频结果不可控；`v0.1.8` 不发布 ffmpeg 组件，也不把 MP3、MP4、M4A、WAV 列为支持导入格式，等待后续形成稳定 ASR 方案后再接入。
 19. Raw Inbox/Frog 与主窗口共享工作区锁：`.mywiki/records.json`、`.mywiki/ingest-queue.json` 和入库运行队列改为跨窗口串行写入；旧/已有工作区里残留的中断任务、处理中任务或丢失 rawAsset 记录会显式恢复为可重试状态，或从 `raw/sources` 源文件重建后继续入库，避免切页、刷新或 Frog 独立窗口写入造成状态互相覆盖。
+20. Raw Inbox/Frog 与图谱状态一致性修复：Wiki 重试成功后会清理旧错误文案；队列进入 Wiki 生成阶段时会同步 `.mywiki/ingest-queue.json` 阶段；结构化入库和图谱渲染会忽略自环关系，避免模型抽取出的“实体指向自身”关系导致图谱画布不可用。
 
 本地与发布验收记录：
 
@@ -50,6 +51,7 @@ MyWiki 是一个本地优先的个人 AI 知识中枢。它把 PDF、Word、Exce
 - Raw Inbox/Frog 真实模型回归用例已使用 DeepSeek 配置处理真实 Markdown 原文件：原文件状态为 `compiled`，生成了实质实体/Wiki 页，未触发 fallback、兜底或降级。
 - DeepSeek 管理式医疗回归用例已验证结构化入库和 Wiki 生成能够产出实质项目页、概念页和相关实体，不再停留在来源文件入库状态。
 - Raw Inbox/Frog 队列稳定性已使用真实工作区副本 `D:\MyWiki-MVP\工作-wiki-2026` 验证：直接打开旧/已有项目文件夹后，失败的 `管理式医疗.md` 可恢复并完成结构化与 Wiki 生成；新建工作区导入 Markdown 和网页捕获 Markdown 均完成入库，失败数为 0。测试过程中出现的默认 5 秒测试超时已定位为验证脚本超时阈值不足，重跑使用 30 秒阈值后真实链路通过，未把超时或降级当作通过。
+- 2026-05-26 安装包实测回归中发现的 `管理式医疗.md` 成功后残留旧失败文案、网页捕获队列阶段显示滞后、图谱自环关系导致 Sigma 画布失败，已补充针对性单元测试和真实工作区数据检查；全量 `npm test` 通过 438 个测试。
 - 知识树删除回归用例已验证单页删除、type 分组删除、二次确认、重复点击锁定和关联关系/来源引用级联清理。
 - 本机环境为 Windows，macOS `.dmg` 无法在本机安装运行。macOS 包通过 GitHub Actions 的 `macos-latest` runner 执行 `pnpm test` 与 `pnpm desktop:build:macos` 后生成。
 - 音视频链路已按官方 MarkItDown 文档重新确认：ffmpeg 只能解决解码/抽轨，不能提供稳定中文 ASR；本版本已撤下音视频入口和组件发布，避免把不可控转写失败、超时或降级当作通过。

@@ -310,7 +310,7 @@ function SigmaCameraBridge({
   return null;
 }
 
-function buildSigmaGraph(nodes: SigmaKnowledgeNode[], links: SigmaKnowledgeLink[], layoutKey: string) {
+export function buildSigmaGraph(nodes: SigmaKnowledgeNode[], links: SigmaKnowledgeLink[], layoutKey: string) {
   const graph = new Graph({ type: 'undirected', multi: false, allowSelfLoops: false });
   const dataKey = `${layoutKey}:${nodes.map((node) => node.id).sort().join('|')}:${links
     .map((link) => `${link.source}>${link.target}`)
@@ -340,6 +340,7 @@ function buildSigmaGraph(nodes: SigmaKnowledgeNode[], links: SigmaKnowledgeLink[
   const seenPairs = new Set<string>();
   const maxWeight = Math.max(...links.map((link) => link.weight), 1);
   for (const link of links) {
+    if (link.source === link.target) continue;
     if (!graph.hasNode(link.source) || !graph.hasNode(link.target)) continue;
     const pair = link.source < link.target ? `${link.source}:::${link.target}` : `${link.target}:::${link.source}`;
     if (seenPairs.has(pair)) continue;

@@ -88,6 +88,7 @@ export async function persistCaptureDraft(
     const from = entityIdByClientId.get(draftRelationship.fromClientId);
     const to = entityIdByClientId.get(draftRelationship.toClientId);
     if (!from || !to) continue;
+    if (from === to) continue;
 
     const result = await createOrUpdateRelationship({
       from,

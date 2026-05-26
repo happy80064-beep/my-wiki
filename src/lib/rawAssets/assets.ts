@@ -659,6 +659,7 @@ export async function compileRawAssetWikiPages(
     error: undefined,
     updatedAt: Date.now(),
   });
+  await syncWorkspaceQueueTaskWikiStage(asset.id);
 
   try {
     const failures: string[] = [];
@@ -722,6 +723,7 @@ export async function compileRawAssetWikiPages(
     }
     await db.rawAssets.update(asset.id, {
       status: 'compiled',
+      error: undefined,
       compiledAt: Date.now(),
       updatedAt: Date.now(),
     });
@@ -1388,6 +1390,17 @@ async function markWorkspaceQueueTaskProcessing(rawAssetId: string, stage: RawAs
     completedAt: undefined,
     error: undefined,
   }));
+}
+
+async function syncWorkspaceQueueTaskWikiStage(rawAssetId: string) {
+  await updateRawAssetWorkspaceQueueTask(rawAssetId, (task) => {
+    if (task.status !== 'processing' || !task.compileWiki) return task;
+    return {
+      ...task,
+      stage: 'wiki',
+      error: undefined,
+    };
+  });
 }
 
 async function markWorkspaceQueueTaskCompleted(asset: RawAsset) {

@@ -992,7 +992,9 @@ describe('raw assets', () => {
       });
     });
     expect(firstAttemptCalls).toEqual([first.id, second.id]);
-    expect((await db.rawAssets.get(asset.id))?.status).toBe('wiki_failed');
+    const failedAsset = await db.rawAssets.get(asset.id);
+    expect(failedAsset?.status).toBe('wiki_failed');
+    expect(failedAsset?.error).toContain('wiki model unavailable');
 
     const retryCalls: string[] = [];
     await compileRawAssetWikiPages(asset.id, async (entityId) => {
@@ -1005,7 +1007,9 @@ describe('raw assets', () => {
     });
 
     expect(retryCalls).toEqual([second.id]);
-    expect((await db.rawAssets.get(asset.id))?.status).toBe('compiled');
+    const retriedAsset = await db.rawAssets.get(asset.id);
+    expect(retriedAsset?.status).toBe('compiled');
+    expect(retriedAsset?.error).toBeUndefined();
   });
 
   it('includes already structured raw assets when wiki pages are still missing', async () => {
