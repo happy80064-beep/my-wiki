@@ -157,10 +157,9 @@ export function RuntimeWikiPage({ syncError = '' }: { syncError?: string } = {})
   const [activeWorkspaceSchema, setActiveWorkspaceSchema] = useState('');
   const activeWorkspaceRoot = useWorkspaceRuntimeStore((state) => state.activeRoot);
   const activeWorkspaceSnapshotRoot = useWorkspaceRuntimeStore((state) => state.snapshot?.layout.root);
-  const searchParams = useMemo(
-    () => new URLSearchParams(typeof window === 'undefined' ? '' : window.location.search),
-    [],
-  );
+  const [routeSearch, setRouteSearch] = useState(() => (typeof window === 'undefined' ? '' : window.location.search));
+  const routeSelectionAppliedRef = useRef('');
+  const searchParams = useMemo(() => new URLSearchParams(routeSearch), [routeSearch]);
   const [expandedTypes, setExpandedTypes] = useState<Set<string>>(
     new Set(['overview', 'project', 'entity', 'concept', 'source', 'query', 'synthesis', 'comparison']),
   );
@@ -288,6 +287,7 @@ export function RuntimeWikiPage({ syncError = '' }: { syncError?: string } = {})
           `已恢复：${records.entities.length} 个实体，${records.relationships.length} 条关系，${records.tasks.length} 条任务，${records.entries.length} 条原文。`,
         );
         window.history.replaceState(null, '', '/wiki');
+        setRouteSearch('');
       } catch (error) {
         if (!cancelled) setRestoreStatus(error instanceof Error ? error.message : '恢复失败。');
       }
@@ -315,11 +315,14 @@ export function RuntimeWikiPage({ syncError = '' }: { syncError?: string } = {})
   }, []);
 
   useEffect(() => {
+    const routeSelectionKey = searchParams.toString();
+    if (routeSelectionAppliedRef.current === routeSelectionKey) return;
     const sourceReference = searchParams.get('source');
     const wikiReference = searchParams.get('ref');
     if (sourceReference) {
       const target = findBrowserEntryByReference(sourceReference, entries);
       if (!target) return;
+      routeSelectionAppliedRef.current = routeSelectionKey;
       setSelected({ kind: 'entry', id: target.id });
       setEditing(false);
       setSaveStatus('');
@@ -330,6 +333,7 @@ export function RuntimeWikiPage({ syncError = '' }: { syncError?: string } = {})
     if (wikiReference) {
       const target = findBrowserEntityByReference(wikiReference, sortedEntities);
       if (!target) return;
+      routeSelectionAppliedRef.current = routeSelectionKey;
       setSelected({ kind: 'entity', id: target.id });
       setEditing(false);
       setSaveStatus('');
@@ -902,6 +906,7 @@ export function RuntimeWikiPage({ syncError = '' }: { syncError?: string } = {})
   function openEntityByReference(reference: string) {
     const target = findBrowserEntityByReference(reference, sortedEntities);
     if (!target) return;
+    replaceWikiRouteSearch(`?ref=${encodeURIComponent(resolveBrowserEntityWikiTarget(target, activeWorkspaceSchema).path)}`);
     setSelected({ kind: 'entity', id: target.id });
     setEditing(false);
     setSaveStatus('');
@@ -911,10 +916,17 @@ export function RuntimeWikiPage({ syncError = '' }: { syncError?: string } = {})
   function openEntryByReference(reference: string) {
     const target = findBrowserEntryByReference(reference, entries);
     if (!target) return;
+    replaceWikiRouteSearch(`?source=${encodeURIComponent(target.id)}`);
     setSelected({ kind: 'entry', id: target.id });
     setEditing(false);
     setSaveStatus('');
     setCompileStatus('');
+  }
+
+  function replaceWikiRouteSearch(nextSearch: string) {
+    if (typeof window === 'undefined') return;
+    window.history.replaceState(null, '', `${window.location.pathname || '/wiki'}${nextSearch}${window.location.hash || ''}`);
+    setRouteSearch(nextSearch);
   }
 
   const queueButtonLabel = queueRunning ? `入库并生成 Wiki 中 ${queueStatus?.percent ?? 0}%` : '原文件入库并生成 Wiki';

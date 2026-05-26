@@ -688,6 +688,81 @@ describe('RuntimeWikiPage', () => {
     });
   });
 
+  it('keeps a related page selected after the URL ref page refreshes', async () => {
+    const related = await createEntity({
+      type: 'topic',
+      title: '数字生命研发专项计划',
+      summary: '目标页面摘要',
+      tags: ['concept'],
+    });
+
+    await db.entities.update(related.id, {
+      wikiMarkdown: [
+        '---',
+        'type: concept',
+        'title: "数字生命研发专项计划"',
+        'tags: [concept]',
+        'sources: []',
+        'related: []',
+        '---',
+        '',
+        '# 数字生命研发专项计划',
+        '',
+        'Target body stays selected.',
+      ].join('\n'),
+    });
+
+    const primary = await createEntity({
+      type: 'topic',
+      title: '内蒙古福瑞医疗科技股份有限公司',
+      summary: '主页面摘要',
+      tags: ['公司'],
+    });
+
+    await db.entities.update(primary.id, {
+      wikiMarkdown: [
+        '---',
+        'type: entity',
+        'title: "内蒙古福瑞医疗科技股份有限公司"',
+        'tags: [公司]',
+        'sources: []',
+        'related: ["concepts/数字生命研发专项计划"]',
+        '---',
+        '',
+        '# 内蒙古福瑞医疗科技股份有限公司',
+        '',
+        'Primary body should not return.',
+      ].join('\n'),
+    });
+
+    try {
+      window.history.pushState(null, '', `/wiki?ref=${encodeURIComponent('内蒙古福瑞医疗科技股份有限公司')}`);
+
+      render(<RuntimeWikiPage />);
+
+      const rightPanel = document.querySelectorAll('aside')[1];
+      expect(rightPanel).toBeTruthy();
+      await waitFor(() => {
+        expect(within(rightPanel as HTMLElement).getAllByText(/Primary body should not return/i).length).toBeGreaterThan(0);
+      });
+
+      fireEvent.click(within(rightPanel as HTMLElement).getByRole('button', { name: /concepts\/数字生命研发专项计划/i }));
+      await waitFor(() => {
+        expect(within(rightPanel as HTMLElement).getAllByText(/Target body stays selected/i).length).toBeGreaterThan(0);
+      });
+
+      await db.entities.update(primary.id, { summary: '主页面摘要已刷新', updatedAt: Date.now() });
+
+      await waitFor(() => {
+        expect(within(rightPanel as HTMLElement).getAllByText(/Target body stays selected/i).length).toBeGreaterThan(0);
+        expect(within(rightPanel as HTMLElement).queryAllByText(/Primary body should not return/i)).toHaveLength(0);
+      });
+      expect(window.location.search).toContain(encodeURIComponent('wiki/concepts/数字生命研发专项计划.md'));
+    } finally {
+      window.history.pushState(null, '', '/');
+    }
+  });
+
   it('searches wiki pages by full text content from the knowledge column', async () => {
     await createEntity({
       type: 'topic',
