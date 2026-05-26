@@ -29,6 +29,8 @@ import {
   initializeWorkspace,
   joinWorkspacePath,
   syncWorkspaceRecordsToDefaultWorkspace,
+  withWorkspaceLock,
+  type WorkspaceFileStorageAdapter,
 } from '@/lib/workspace';
 import type { Entity, RawAsset, RawAssetKind } from '@/types';
 import {
@@ -45,6 +47,7 @@ import {
   prepareRawAssetWorkspaceQueue,
   updateRawAssetWorkspaceQueueTask,
   updateRawAssetWorkspaceQueueTaskById,
+  type RawAssetWorkspaceQueueTask,
   type RawAssetWorkspaceQueueTaskStage,
 } from './workspaceQueue';
 
@@ -222,6 +225,36 @@ export async function processRawAssetQueue(input: {
   wikiCompiler?: RawAssetWikiCompiler;
   onStatus?: (snapshot: RawAssetQueueSnapshot) => void;
 } = {}): Promise<RawAssetQueueResult> {
+  return withRawAssetQueueRunLock(input.owner ?? 'queue', () => processRawAssetQueueUnlocked(input));
+}
+
+async function withRawAssetQueueRunLock<T>(owner: string, fn: () => Promise<T>): Promise<T> {
+  if (!canUseWorkspaceStorage()) return fn();
+  const storage = createWorkspaceStorage();
+  const root = getPersistedWorkspaceRoot() ?? (await getWorkspaceDefaultRoot());
+  const initialized = await initializeWorkspace(storage, root, { outputLanguage: 'zh-CN' });
+
+  try {
+    return await withWorkspaceLock(initialized.layout.root, 'raw-asset-run', fn, {
+      timeoutMs: 900,
+      retryMs: 60,
+      ttlMs: 120_000,
+    });
+  } catch (error) {
+    if (formatErrorMessage(error).includes('Workspace lock "raw-asset-run" is busy')) {
+      throw new Error(`${owner === 'frog' ? '桌面 Frog' : '知识库页面'}已有入库任务正在运行，请等待当前任务结束后再开始新的入库。`);
+    }
+    throw error;
+  }
+}
+
+async function processRawAssetQueueUnlocked(input: {
+  owner?: string;
+  extractor?: IngestExtractor;
+  compileWiki?: boolean;
+  wikiCompiler?: RawAssetWikiCompiler;
+  onStatus?: (snapshot: RawAssetQueueSnapshot) => void;
+} = {}): Promise<RawAssetQueueResult> {
   const owner = input.owner ?? 'queue';
   const activeSnapshot = loadRawAssetQueueStatus();
   if (isRawAssetQueueRunning(activeSnapshot)) {
@@ -243,6 +276,7 @@ export async function processRawAssetQueue(input: {
   };
 
   const recoveredInterrupted = await reconcileInterruptedRawAssetQueueRun();
+  const recoveredMissingRecords = await recoverMissingRawAssetsFromWorkspaceQueue();
   const recovered = await resetStaleRawAssets();
   const recoveredInvalidVision = await resetInvalidCompiledVisionAssets();
   const recoveredSourceOnly = await resetSourceOnlyCompiledRawAssets();
@@ -258,7 +292,7 @@ export async function processRawAssetQueue(input: {
       stage: 'done',
       percent: 100,
       label: '没有待编译材料',
-      detail: buildRecoveredDetail(recovered, recoveredInvalidVision, recoveredInterrupted, recoveredSourceOnly),
+      detail: buildRecoveredDetail(recovered, recoveredInvalidVision, recoveredInterrupted, recoveredSourceOnly, recoveredMissingRecords),
       total: 0,
       processed: 0,
       failed: 0,
@@ -271,7 +305,10 @@ export async function processRawAssetQueue(input: {
     stage: 'running',
     percent: 1,
     label: '开始编译 Raw Inbox',
-    detail: joinQueueDetails(`共 ${total} 个材料`, buildRecoveredDetail(recovered, recoveredInvalidVision, recoveredInterrupted, recoveredSourceOnly)),
+    detail: joinQueueDetails(
+      `共 ${total} 个材料`,
+      buildRecoveredDetail(recovered, recoveredInvalidVision, recoveredInterrupted, recoveredSourceOnly, recoveredMissingRecords),
+    ),
     total,
     processed: 0,
     failed: 0,
@@ -461,6 +498,24 @@ export async function processRawAsset(
   throwIfAborted(options.signal);
   const asset = await db.rawAssets.get(id);
   if (!asset || !['raw', 'failed'].includes(asset.status)) return asset;
+  if (asset.ingestJobId) {
+    const existingJob = await db.ingestJobs.get(asset.ingestJobId);
+    if (existingJob?.status === 'processing') {
+      const recoveredAt = Date.now();
+      const failureMessage = buildRawAssetFailureMessage('processing');
+      await db.ingestJobs.update(existingJob.id, {
+        status: 'failed',
+        error: failureMessage,
+        updatedAt: recoveredAt,
+      });
+      await db.rawAssets.update(asset.id, {
+        status: 'failed',
+        error: failureMessage,
+        updatedAt: recoveredAt,
+      });
+      return db.rawAssets.get(asset.id);
+    }
+  }
 
   const now = Date.now();
   await db.rawAssets.update(asset.id, {
@@ -528,13 +583,18 @@ export async function processRawAsset(
         ? 'skipped'
         : processed?.status === 'done' && compiledHasKnowledge
           ? 'compiled'
-          : processed?.status === 'processing'
-            ? 'compiling'
-            : 'failed';
+          : 'failed';
     const failureMessage =
       finalStatus === 'failed'
         ? buildRawAssetFailureMessage(processed?.status, processed?.error, missingSubstantiveKnowledge)
         : undefined;
+    if (processed?.status === 'processing') {
+      await db.ingestJobs.update(job.id, {
+        status: 'failed',
+        error: failureMessage,
+        updatedAt: completedAt,
+      });
+    }
     if (missingSubstantiveKnowledge) {
       await db.ingestCache.delete(job.contentHash);
       await db.ingestJobs.update(job.id, {
@@ -1099,6 +1159,162 @@ export async function reconcileInterruptedRawAssetQueueRun(now = Date.now()) {
   return recovered;
 }
 
+async function recoverMissingRawAssetsFromWorkspaceQueue(now = Date.now()) {
+  if (!canUseWorkspaceStorage()) return 0;
+  const queue = await loadRawAssetWorkspaceQueue();
+  if (!queue) return 0;
+
+  const storage = createWorkspaceStorage();
+  let recovered = 0;
+  for (const task of queue.tasks) {
+    if (task.status === 'done' || task.status === 'cancelled') continue;
+    if (await db.rawAssets.get(task.rawAssetId)) continue;
+
+    const restored = await rebuildRawAssetFromWorkspaceQueueTask(storage, queue.root, task, now);
+    if (restored) recovered += 1;
+  }
+  return recovered;
+}
+
+async function rebuildRawAssetFromWorkspaceQueueTask(
+  storage: WorkspaceFileStorageAdapter,
+  root: string,
+  task: RawAssetWorkspaceQueueTask,
+  now: number,
+) {
+  try {
+    const source = await readRawAssetQueueSourceFile(storage, root, task);
+    if (!source) {
+      await updateRawAssetWorkspaceQueueTask(task.rawAssetId, (draft) => ({
+        ...draft,
+        status: 'failed',
+        error: 'Raw asset record is missing and the workspace source file was not found.',
+        completedAt: now,
+      }));
+      return false;
+    }
+
+    const filename = sanitizeRawSourceRelativePath(task.filename);
+    const mimeType = inferMimeTypeFromFilename(filename);
+    const kind = getImportFileKind(filename, mimeType) ?? 'text';
+    const contentHash = task.contentHash || (await hashBytes(source.bytes));
+    const rawEntry = await createEntry({
+      content: buildRawEntryContent({
+        filename,
+        kind,
+        size: source.size,
+        contentHash,
+        status: '已从工作区源文件恢复，等待重新结构化入库。',
+      }),
+      source: kind === 'image' ? 'image' : 'file',
+      processed: false,
+      capturedAt: now,
+      fileMetadata: {
+        filename,
+        mimeType,
+        url: `raw://${task.rawAssetId}`,
+      },
+    });
+    const asset: RawAsset = {
+      id: task.rawAssetId,
+      clientId: getClientId(),
+      filename,
+      mimeType,
+      kind,
+      size: source.size,
+      contentHash,
+      blob: new Blob([bytesToArrayBuffer(source.bytes)], { type: mimeType }),
+      dataBase64: bytesToBase64(source.bytes),
+      status: 'failed',
+      error: 'Raw asset record was rebuilt from the workspace source file and is ready to retry.',
+      entryId: rawEntry.id,
+      createdAt: task.addedAt || now,
+      updatedAt: now,
+    };
+
+    await db.rawAssets.put(asset);
+    await updateRawAssetWorkspaceQueueTask(task.rawAssetId, (draft) => ({
+      ...draft,
+      filename,
+      sourcePath: joinWorkspacePath('raw/sources', filename),
+      contentHash,
+      status: 'pending',
+      stage: 'queued',
+      completedAt: undefined,
+      error: undefined,
+    }));
+    return true;
+  } catch (error) {
+    await updateRawAssetWorkspaceQueueTask(task.rawAssetId, (draft) => ({
+      ...draft,
+      status: 'failed',
+      error: `Failed to rebuild missing raw asset record: ${formatErrorMessage(error)}`,
+      completedAt: now,
+    }));
+    return false;
+  }
+}
+
+async function readRawAssetQueueSourceFile(
+  storage: WorkspaceFileStorageAdapter,
+  root: string,
+  task: RawAssetWorkspaceQueueTask,
+): Promise<{ bytes: Uint8Array; size: number } | null> {
+  for (const path of rawAssetQueueSourceCandidates(root, task)) {
+    if (!(await storage.exists(path).catch(() => false))) continue;
+    if (storage.readBinaryFileBase64) {
+      const file = await storage.readBinaryFileBase64(path);
+      const bytes = base64ToBytes(file.dataBase64);
+      return { bytes, size: Number.isFinite(file.size) ? file.size : bytes.byteLength };
+    }
+    const text = await storage.readTextFile(path);
+    const bytes = new TextEncoder().encode(text);
+    return { bytes, size: bytes.byteLength };
+  }
+  return null;
+}
+
+function rawAssetQueueSourceCandidates(root: string, task: RawAssetWorkspaceQueueTask) {
+  return Array.from(
+    new Set(
+      [task.sourcePath, joinWorkspacePath('raw/sources', task.filename)]
+        .filter(Boolean)
+        .map((path) => (isAbsoluteWorkspacePathLike(path) ? path : joinWorkspacePath(root, path))),
+    ),
+  );
+}
+
+function isAbsoluteWorkspacePathLike(path: string) {
+  return /^[A-Za-z]:\//.test(path.replace(/\\/g, '/')) || path.startsWith('/');
+}
+
+function inferMimeTypeFromFilename(filename: string) {
+  const extension = filename.split('.').pop()?.toLowerCase() ?? '';
+  return (
+    {
+      md: 'text/markdown',
+      markdown: 'text/markdown',
+      txt: 'text/plain',
+      csv: 'text/csv',
+      tsv: 'text/tab-separated-values',
+      html: 'text/html',
+      htm: 'text/html',
+      pdf: 'application/pdf',
+      doc: 'application/msword',
+      docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      xls: 'application/vnd.ms-excel',
+      xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      ppt: 'application/vnd.ms-powerpoint',
+      pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      png: 'image/png',
+      jpg: 'image/jpeg',
+      jpeg: 'image/jpeg',
+      webp: 'image/webp',
+      gif: 'image/gif',
+    } satisfies Record<string, string>
+  )[extension] ?? '';
+}
+
 export async function listRecentRawAssets(limit = 12) {
   return db.rawAssets.orderBy('createdAt').reverse().limit(limit).toArray();
 }
@@ -1175,15 +1391,16 @@ async function markWorkspaceQueueTaskProcessing(rawAssetId: string, stage: RawAs
 }
 
 async function markWorkspaceQueueTaskCompleted(asset: RawAsset) {
-  const failed = asset.status === 'failed' || asset.status === 'wiki_failed';
+  const done = asset.status === 'compiled' || asset.status === 'skipped';
   const cancelled = asset.status === 'cancelled';
+  const failed = !done && !cancelled;
   await updateRawAssetWorkspaceQueueTask(asset.id, (task) => ({
     ...task,
-    status: cancelled ? 'cancelled' : failed ? 'failed' : 'done',
+    status: cancelled ? 'cancelled' : done ? 'done' : 'failed',
     stage: asset.status === 'wiki_failed' || asset.status === 'wiki_compiling' ? 'wiki' : task.stage,
     retryCount: failed ? task.retryCount + 1 : task.retryCount,
     completedAt: Date.now(),
-    error: failed || cancelled ? asset.error || 'Raw asset processing failed.' : undefined,
+    error: failed || cancelled ? asset.error || 'Raw asset processing did not complete.' : undefined,
   }));
 }
 
@@ -1229,12 +1446,19 @@ function joinQueueDetails(...parts: Array<string | undefined>) {
   return parts.filter(Boolean).join('，');
 }
 
-function buildRecoveredDetail(staleCount: number, invalidVisionCount: number, interruptedCount = 0, sourceOnlyCount = 0) {
+function buildRecoveredDetail(
+  staleCount: number,
+  invalidVisionCount: number,
+  interruptedCount = 0,
+  sourceOnlyCount = 0,
+  missingRecordCount = 0,
+) {
   return [
     staleCount > 0 ? `已恢复 ${staleCount} 个旧任务` : '',
     invalidVisionCount > 0 ? `已恢复 ${invalidVisionCount} 个无效图片编译结果` : '',
     interruptedCount > 0 ? `已恢复 ${interruptedCount} 个中断任务` : '',
     sourceOnlyCount > 0 ? `已恢复 ${sourceOnlyCount} 个仅生成来源页的编译结果` : '',
+    missingRecordCount > 0 ? `已从工作区源文件恢复 ${missingRecordCount} 个丢失的入库记录` : '',
   ]
     .filter(Boolean)
     .join('，') || undefined;
@@ -1325,6 +1549,9 @@ function buildRawAssetFailureMessage(status?: string, error?: string, emptyKnowl
   if (status === 'pending') {
     return '摄入任务暂未完成，已恢复为可重试状态。';
   }
+  if (status === 'processing') {
+    return '检测到同一内容的旧结构化任务仍停留在处理中，已恢复为可重试失败状态。请重新入库或点击重试。';
+  }
   if (!status) {
     return '未找到对应的摄入任务，请重新编译。';
   }
@@ -1337,6 +1564,12 @@ function bytesToBase64(bytes: Uint8Array) {
     binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
   }
   return btoa(binary);
+}
+
+function bytesToArrayBuffer(bytes: Uint8Array) {
+  const buffer = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(buffer).set(bytes);
+  return buffer;
 }
 
 function base64ToBytes(value: string) {

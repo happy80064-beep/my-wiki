@@ -10,4 +10,5 @@ export * from './schemaContext';
 export * from './storage';
 export * from './store';
 export * from './tauriStorage';
+export * from './lock';
 export * from './workspace';

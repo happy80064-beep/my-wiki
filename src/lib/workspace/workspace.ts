@@ -15,6 +15,7 @@ export type WorkspaceStorageAdapter = {
 
 export type WorkspaceFileStorageAdapter = WorkspaceStorageAdapter & {
   readTextFile: (path: string) => Promise<string>;
+  readBinaryFileBase64?: (path: string) => Promise<{ dataBase64: string; size: number }>;
   listFiles: (root: string) => Promise<string[]>;
   deletePath?: (root: string, path: string) => Promise<void>;
 };

@@ -7,6 +7,7 @@ import {
   joinWorkspacePath,
   type WorkspaceFileStorageAdapter,
 } from '@/lib/workspace';
+import { withWorkspaceLock } from '@/lib/workspace/lock';
 import type { RawAsset } from '@/types';
 
 export type RawAssetWorkspaceQueueTaskStatus = 'pending' | 'processing' | 'done' | 'failed' | 'cancelled';
@@ -59,36 +60,38 @@ export async function prepareRawAssetWorkspaceQueue(
   const target = await resolveQueueTarget();
   if (!target) return new Map();
 
-  const queue = await readQueueFile(target.storage, target.path);
-  const now = Date.now();
-  const taskByRawAssetId = new Map(queue.tasks.map((task) => [task.rawAssetId, task]));
+  return withWorkspaceLock(target.root, 'ingest-queue', async () => {
+    const queue = await readQueueFile(target.storage, target.path);
+    const now = Date.now();
+    const taskByRawAssetId = new Map(queue.tasks.map((task) => [task.rawAssetId, task]));
 
-  for (const asset of assets) {
-    const existing = taskByRawAssetId.get(asset.id);
-    const task: RawAssetWorkspaceQueueTask = {
-      id: existing?.id ?? createQueueTaskId(asset.id),
-      rawAssetId: asset.id,
-      owner: input.owner,
-      sourcePath: joinWorkspacePath('raw/sources', asset.filename),
-      filename: asset.filename,
-      contentHash: asset.contentHash,
-      status: 'pending',
-      stage: 'queued',
-      compileWiki: input.compileWiki,
-      retryCount: existing?.retryCount ?? 0,
-      addedAt: existing?.addedAt ?? now,
-      updatedAt: now,
-      startedAt: existing?.startedAt,
-      completedAt: undefined,
-      error: undefined,
-    };
-    taskByRawAssetId.set(asset.id, task);
-  }
+    for (const asset of assets) {
+      const existing = taskByRawAssetId.get(asset.id);
+      const task: RawAssetWorkspaceQueueTask = {
+        id: existing?.id ?? createQueueTaskId(asset.id),
+        rawAssetId: asset.id,
+        owner: input.owner,
+        sourcePath: joinWorkspacePath('raw/sources', asset.filename),
+        filename: asset.filename,
+        contentHash: asset.contentHash,
+        status: 'pending',
+        stage: 'queued',
+        compileWiki: input.compileWiki,
+        retryCount: existing?.retryCount ?? 0,
+        addedAt: existing?.addedAt ?? now,
+        updatedAt: now,
+        startedAt: existing?.startedAt,
+        completedAt: undefined,
+        error: undefined,
+      };
+      taskByRawAssetId.set(asset.id, task);
+    }
 
-  queue.tasks = pruneQueueTasks(Array.from(taskByRawAssetId.values()));
-  queue.updatedAt = now;
-  await writeQueueFile(target.storage, target.path, queue);
-  return new Map(queue.tasks.map((task) => [task.rawAssetId, task]));
+    queue.tasks = pruneQueueTasks(Array.from(taskByRawAssetId.values()));
+    queue.updatedAt = now;
+    await writeQueueFile(target.storage, target.path, queue);
+    return new Map(queue.tasks.map((task) => [task.rawAssetId, task]));
+  });
 }
 
 export async function updateRawAssetWorkspaceQueueTask(
@@ -98,19 +101,21 @@ export async function updateRawAssetWorkspaceQueueTask(
   const target = await resolveQueueTarget();
   if (!target) return null;
 
-  const queue = await readQueueFile(target.storage, target.path);
-  const taskIndex = queue.tasks.findIndex((task) => task.rawAssetId === rawAssetId);
-  if (taskIndex < 0) return null;
+  return withWorkspaceLock(target.root, 'ingest-queue', async () => {
+    const queue = await readQueueFile(target.storage, target.path);
+    const taskIndex = queue.tasks.findIndex((task) => task.rawAssetId === rawAssetId);
+    if (taskIndex < 0) return null;
 
-  const updated = updater(queue.tasks[taskIndex]);
-  queue.tasks[taskIndex] = {
-    ...updated,
-    updatedAt: Date.now(),
-  };
-  queue.tasks = pruneQueueTasks(queue.tasks);
-  queue.updatedAt = Date.now();
-  await writeQueueFile(target.storage, target.path, queue);
-  return queue.tasks.find((task) => task.rawAssetId === rawAssetId) ?? null;
+    const updated = updater(queue.tasks[taskIndex]);
+    queue.tasks[taskIndex] = {
+      ...updated,
+      updatedAt: Date.now(),
+    };
+    queue.tasks = pruneQueueTasks(queue.tasks);
+    queue.updatedAt = Date.now();
+    await writeQueueFile(target.storage, target.path, queue);
+    return queue.tasks.find((task) => task.rawAssetId === rawAssetId) ?? null;
+  });
 }
 
 export async function updateRawAssetWorkspaceQueueTaskById(
@@ -120,19 +125,21 @@ export async function updateRawAssetWorkspaceQueueTaskById(
   const target = await resolveQueueTarget();
   if (!target) return null;
 
-  const queue = await readQueueFile(target.storage, target.path);
-  const taskIndex = queue.tasks.findIndex((task) => task.id === taskId);
-  if (taskIndex < 0) return null;
+  return withWorkspaceLock(target.root, 'ingest-queue', async () => {
+    const queue = await readQueueFile(target.storage, target.path);
+    const taskIndex = queue.tasks.findIndex((task) => task.id === taskId);
+    if (taskIndex < 0) return null;
 
-  const updated = updater(queue.tasks[taskIndex]);
-  queue.tasks[taskIndex] = {
-    ...updated,
-    updatedAt: Date.now(),
-  };
-  queue.tasks = pruneQueueTasks(queue.tasks);
-  queue.updatedAt = Date.now();
-  await writeQueueFile(target.storage, target.path, queue);
-  return queue.tasks.find((task) => task.id === taskId) ?? null;
+    const updated = updater(queue.tasks[taskIndex]);
+    queue.tasks[taskIndex] = {
+      ...updated,
+      updatedAt: Date.now(),
+    };
+    queue.tasks = pruneQueueTasks(queue.tasks);
+    queue.updatedAt = Date.now();
+    await writeQueueFile(target.storage, target.path, queue);
+    return queue.tasks.find((task) => task.id === taskId) ?? null;
+  });
 }
 
 export async function getRawAssetWorkspaceQueueTask(taskId: string): Promise<RawAssetWorkspaceQueueTask | null> {
@@ -144,41 +151,45 @@ export async function clearRawAssetWorkspaceQueueTasks(statuses: RawAssetWorkspa
   const target = await resolveQueueTarget();
   if (!target) return 0;
 
-  const queue = await readQueueFile(target.storage, target.path);
-  const removable = new Set(statuses);
-  const before = queue.tasks.length;
-  queue.tasks = queue.tasks.filter((task) => !removable.has(task.status));
-  const removed = before - queue.tasks.length;
-  if (removed > 0) {
-    queue.updatedAt = Date.now();
-    await writeQueueFile(target.storage, target.path, queue);
-  }
-  return removed;
+  return withWorkspaceLock(target.root, 'ingest-queue', async () => {
+    const queue = await readQueueFile(target.storage, target.path);
+    const removable = new Set(statuses);
+    const before = queue.tasks.length;
+    queue.tasks = queue.tasks.filter((task) => !removable.has(task.status));
+    const removed = before - queue.tasks.length;
+    if (removed > 0) {
+      queue.updatedAt = Date.now();
+      await writeQueueFile(target.storage, target.path, queue);
+    }
+    return removed;
+  });
 }
 
 export async function resetInterruptedRawAssetWorkspaceQueueTasks(): Promise<number> {
   const target = await resolveQueueTarget();
   if (!target) return 0;
 
-  const queue = await readQueueFile(target.storage, target.path);
-  let recovered = 0;
-  const now = Date.now();
-  queue.tasks = queue.tasks.map((task) => {
-    if (task.status !== 'processing') return task;
-    recovered += 1;
-    return {
-      ...task,
-      status: 'pending',
-      stage: 'queued',
-      error: 'Previous run was interrupted before completion.',
-      updatedAt: now,
-    };
+  return withWorkspaceLock(target.root, 'ingest-queue', async () => {
+    const queue = await readQueueFile(target.storage, target.path);
+    let recovered = 0;
+    const now = Date.now();
+    queue.tasks = queue.tasks.map((task) => {
+      if (task.status !== 'processing') return task;
+      recovered += 1;
+      return {
+        ...task,
+        status: 'pending',
+        stage: 'queued',
+        error: 'Previous run was interrupted before completion.',
+        updatedAt: now,
+      };
+    });
+    if (recovered > 0) {
+      queue.updatedAt = now;
+      await writeQueueFile(target.storage, target.path, queue);
+    }
+    return recovered;
   });
-  if (recovered > 0) {
-    queue.updatedAt = now;
-    await writeQueueFile(target.storage, target.path, queue);
-  }
-  return recovered;
 }
 
 export function summarizeRawAssetWorkspaceQueue(tasks: RawAssetWorkspaceQueueTask[]) {

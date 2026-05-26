@@ -9,6 +9,7 @@ import {
   getWorkspaceDefaultRoot,
 } from '@/lib/workspace/storage';
 import { initializeWorkspace } from '@/lib/workspace/workspace';
+import { withWorkspaceLock, workspaceRootFromStatePath } from '@/lib/workspace/lock';
 import type {
   CompileSuggestionRecord,
   Entity,
@@ -461,12 +462,27 @@ async function enqueueWrite<T>(operation: (state: WorkspaceRecordState) => Promi
   }
 
   const run = operationQueue.then(async () => {
-    const state = await loadState();
-    const result = await operation(state);
-    state.updatedAt = Date.now();
-    await persistState(state);
-    notifyWorkspaceDbChanged();
-    return result;
+    if (useInMemoryStore) {
+      const state = await loadState();
+      const result = await operation(state);
+      state.updatedAt = Date.now();
+      await persistState(state);
+      notifyWorkspaceDbChanged();
+      return result;
+    }
+
+    const recordsPath = await resolveRecordsPath();
+    const root = workspaceRootFromStatePath(recordsPath);
+    return withWorkspaceLock(root, 'records', async () => {
+      activeRecordsPath = null;
+      activeState = null;
+      const state = await loadState();
+      const result = await operation(state);
+      state.updatedAt = Date.now();
+      await persistState(state);
+      notifyWorkspaceDbChanged();
+      return result;
+    });
   });
   operationQueue = run.catch(() => undefined);
   return run;

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createLocalCaptureDraft } from '@/lib/capture';
+import { buildImportedContent, extractImportBlobText } from '@/lib/import/fileText';
 import type { db as dbType, resetDatabase as resetDatabaseType } from '@/lib/db';
 import type { RawAsset } from '@/types';
 
@@ -14,8 +15,10 @@ type DbModule = {
 
 let db: DbModule['db'];
 let resetDatabase: DbModule['resetDatabase'];
+let createIngestJob: typeof import('@/lib/ingest').createIngestJob;
 let cancelRawAssetQueueTask: typeof import('@/lib/rawAssets/assets').cancelRawAssetQueueTask;
 let createRawAssetFromFile: typeof import('@/lib/rawAssets/assets').createRawAssetFromFile;
+let processRawAsset: typeof import('@/lib/rawAssets/assets').processRawAsset;
 let processRawAssetQueue: typeof import('@/lib/rawAssets/assets').processRawAssetQueue;
 let retryRawAssetQueueTask: typeof import('@/lib/rawAssets/assets').retryRawAssetQueueTask;
 let reconcileInterruptedRawAssetQueueRun: typeof import('@/lib/rawAssets/assets').reconcileInterruptedRawAssetQueueRun;
@@ -48,6 +51,11 @@ describe('raw asset queue reconciliation', () => {
             if (workspaceBinaryWriteError) throw workspaceBinaryWriteError;
             workspaceFiles.set(path, content);
           },
+          readBinaryFileBase64: async (path: string) => {
+            const content = workspaceFiles.get(path);
+            if (content === undefined) throw new Error(`Missing binary file: ${path}`);
+            return { dataBase64: content, size: base64ByteLength(content) };
+          },
           listFiles: async () => [],
           listMarkdownFiles: async () => [],
           deletePath: async () => undefined,
@@ -62,7 +70,8 @@ describe('raw asset queue reconciliation', () => {
     });
 
     ({ db, resetDatabase } = await import('@/lib/db'));
-    ({ cancelRawAssetQueueTask, createRawAssetFromFile, processRawAssetQueue, retryRawAssetQueueTask, reconcileInterruptedRawAssetQueueRun } =
+    ({ createIngestJob } = await import('@/lib/ingest'));
+    ({ cancelRawAssetQueueTask, createRawAssetFromFile, processRawAsset, processRawAssetQueue, retryRawAssetQueueTask, reconcileInterruptedRawAssetQueueRun } =
       await import('@/lib/rawAssets/assets'));
     ({ loadRawAssetWorkspaceQueue, prepareRawAssetWorkspaceQueue, updateRawAssetWorkspaceQueueTask } = await import('@/lib/rawAssets/workspaceQueue'));
     await resetDatabase();
@@ -119,6 +128,91 @@ describe('raw asset queue reconciliation', () => {
       status: 'pending',
       stage: 'queued',
     });
+  });
+
+  it('recovers a missing raw asset record from the workspace source file before processing', async () => {
+    const sourceText = [
+      '# Recovered MD Project',
+      '',
+      'Recovered MD Project is a real markdown import case with project goals, risks, owners, and next actions.',
+      'The queue task remains in the existing workspace, but records.json no longer has the raw asset row.',
+    ].join('\n');
+    const asset = {
+      ...createAsset('raw_recovered_md', 'recovered-md-project.md'),
+      mimeType: 'text/markdown',
+      kind: 'text' as const,
+      contentHash: '',
+    };
+    workspaceFiles.set('D:/MyWikiProject/raw/sources/recovered-md-project.md', utf8ToBase64(sourceText));
+    await prepareRawAssetWorkspaceQueue([asset], { owner: 'wiki', compileWiki: true });
+
+    expect(await db.rawAssets.get(asset.id)).toBeUndefined();
+
+    const result = await processRawAssetQueue({
+      compileWiki: true,
+      extractor: async (content) => ({ draft: createLocalCaptureDraft(content) }),
+      wikiCompiler: async (entityId) => {
+        const entity = await db.entities.get(entityId);
+        await db.entities.update(entityId, {
+          wikiMarkdown: buildUsefulWikiMarkdown(entity?.title ?? 'Recovered MD Project'),
+          wikiCompiledAt: Date.now(),
+          updatedAt: Date.now(),
+        });
+      },
+    });
+
+    const recovered = await db.rawAssets.get(asset.id);
+    const queue = await loadRawAssetWorkspaceQueue();
+
+    expect(result).toEqual({ total: 1, processed: 1, failed: 0 });
+    expect(recovered).toMatchObject({
+      id: asset.id,
+      filename: 'recovered-md-project.md',
+      status: 'compiled',
+      mimeType: 'text/markdown',
+    });
+    expect(recovered?.extractedText).toContain('Recovered MD Project');
+    expect(queue?.tasks.find((task) => task.rawAssetId === asset.id)).toBeUndefined();
+  });
+
+  it('fails a raw asset visibly when a duplicate ingest job is still processing', async () => {
+    const sourceText = 'Active duplicate project content with enough context to build a source page.';
+    const { asset } = await createRawAssetFromFile(new File([sourceText], 'active-duplicate.md', { type: 'text/markdown' }));
+    const extractedText = await extractImportBlobText({
+      blob: asset.blob,
+      filename: asset.filename,
+      mimeType: asset.mimeType,
+      kind: asset.kind,
+    });
+    const importedContent = buildImportedContent({
+      filename: asset.filename,
+      kind: asset.kind,
+      source: 'file',
+      text: extractedText,
+    });
+    const job = await createIngestJob({
+      content: importedContent,
+      source: 'file',
+      filename: asset.filename,
+      targetEntryId: asset.entryId,
+    });
+    await db.ingestJobs.update(job.id, {
+      status: 'processing',
+      updatedAt: Date.now(),
+    });
+    await db.rawAssets.update(asset.id, {
+      ingestJobId: job.id,
+    });
+
+    const processed = await processRawAsset(asset.id, async () => {
+      throw new Error('extractor should not run while duplicate job is processing');
+    });
+    const updatedJob = await db.ingestJobs.get(job.id);
+
+    expect(processed?.status).toBe('failed');
+    expect(processed?.error).toContain('旧结构化任务');
+    expect(updatedJob?.status).toBe('failed');
+    expect(updatedJob?.error).toContain('旧结构化任务');
   });
 
   it('aborts the running raw asset extractor when a processing queue task is cancelled', async () => {
@@ -193,4 +287,45 @@ function createAsset(id: string, filename: string): RawAsset {
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
+}
+
+function utf8ToBase64(value: string) {
+  const bytes = new TextEncoder().encode(value);
+  let binary = '';
+  for (let index = 0; index < bytes.length; index += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+  }
+  return btoa(binary);
+}
+
+function base64ByteLength(value: string) {
+  return atob(value).length;
+}
+
+function buildUsefulWikiMarkdown(title: string) {
+  const body = [
+    'This recovered wiki page is intentionally long enough to verify that the wiki compiler finished successfully.',
+    'It includes project context, source evidence, operational risks, and concrete follow-up actions for the imported material.',
+    'The assertions rely on compiled knowledge being present rather than merely checking that a function returned.',
+  ].join(' ');
+  return [
+    '---',
+    `title: ${title}`,
+    'type: project',
+    '---',
+    '',
+    `# ${title}`,
+    '',
+    '## Summary',
+    body,
+    body,
+    '',
+    '## Evidence',
+    body,
+    body,
+    '',
+    '## Actions',
+    body,
+    body,
+  ].join('\n');
 }

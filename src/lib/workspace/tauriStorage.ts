@@ -20,6 +20,9 @@ export function createTauriWorkspaceStorage(invoke: TauriInvoke = tauriInvoke): 
     writeBinaryFile(path, dataBase64) {
       return invoke<void>('workspace_write_binary_file', { path, dataBase64 });
     },
+    readBinaryFileBase64(path) {
+      return invoke<{ dataBase64: string; size: number }>('workspace_read_binary_file', { path });
+    },
     listMarkdownFiles(wikiRoot) {
       return invoke<string[]>('workspace_list_markdown_files', { root: wikiRoot });
     },

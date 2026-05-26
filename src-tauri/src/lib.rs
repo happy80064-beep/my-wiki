@@ -1,9 +1,10 @@
 use std::{
     collections::HashMap,
-    fs,
+    fs::{self, OpenOptions},
+    io::Write,
     path::{Path, PathBuf},
     process::Command,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 mod import_extract;
 use base64::{engine::general_purpose, Engine as _};
@@ -56,10 +57,13 @@ pub fn run() {
             workspace_exists,
             workspace_write_text_file,
             workspace_write_binary_file,
+            workspace_read_binary_file,
             workspace_read_text_file,
             workspace_list_markdown_files,
             workspace_list_files,
             workspace_delete_path,
+            workspace_acquire_lock,
+            workspace_release_lock,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -269,18 +273,12 @@ fn workspace_exists(path: String) -> bool {
 #[tauri::command]
 fn workspace_write_text_file(path: String, content: String) -> Result<(), String> {
     let path_buf = PathBuf::from(&path);
-    if let Some(parent) = path_buf.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    fs::write(path_buf, content).map_err(|error| error.to_string())
+    write_workspace_file_atomic(&path_buf, content.as_bytes())
 }
 
 #[tauri::command]
 fn workspace_write_binary_file(path: String, data_base64: String) -> Result<(), String> {
     let path_buf = PathBuf::from(&path);
-    if let Some(parent) = path_buf.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
     let data = data_base64
         .split_once(',')
         .map(|(_, value)| value)
@@ -288,7 +286,23 @@ fn workspace_write_binary_file(path: String, data_base64: String) -> Result<(), 
     let bytes = general_purpose::STANDARD
         .decode(data)
         .map_err(|error| format!("Failed to decode base64 file data: {error}"))?;
-    fs::write(path_buf, bytes).map_err(|error| error.to_string())
+    write_workspace_file_atomic(&path_buf, &bytes)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceBinaryFile {
+    data_base64: String,
+    size: usize,
+}
+
+#[tauri::command]
+fn workspace_read_binary_file(path: String) -> Result<WorkspaceBinaryFile, String> {
+    let bytes = fs::read(path).map_err(|error| error.to_string())?;
+    Ok(WorkspaceBinaryFile {
+        data_base64: general_purpose::STANDARD.encode(&bytes),
+        size: bytes.len(),
+    })
 }
 
 #[tauri::command]
@@ -334,6 +348,157 @@ fn workspace_delete_path(root: String, path: String) -> Result<(), String> {
     } else {
         fs::remove_file(canonical_target).map_err(|error| error.to_string())
     }
+}
+
+#[tauri::command]
+fn workspace_acquire_lock(root: String, name: String, owner: String, ttl_ms: u64) -> Result<bool, String> {
+    let lock_path = workspace_lock_path(&root, &name)?;
+    let owner = normalize_lock_owner(&owner);
+    if owner.is_empty() {
+        return Err("Lock owner cannot be empty.".to_string());
+    }
+    let ttl_ms = ttl_ms.clamp(1_000, 30 * 60 * 1_000);
+    let expires_at = now_millis().saturating_add(ttl_ms);
+    let content = format!("owner={owner}\nexpires_at={expires_at}\n");
+
+    match create_lock_file(&lock_path, content.as_bytes()) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let info = read_workspace_lock_info(&lock_path);
+            if info
+                .as_ref()
+                .map(|lock| lock.owner == owner)
+                .unwrap_or(false)
+            {
+                write_workspace_file_atomic(&lock_path, content.as_bytes())?;
+                return Ok(true);
+            }
+            if info
+                .as_ref()
+                .map(|lock| lock.expires_at <= now_millis())
+                .unwrap_or(true)
+            {
+                let _ = fs::remove_file(&lock_path);
+                return match create_lock_file(&lock_path, content.as_bytes()) {
+                    Ok(()) => Ok(true),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+                    Err(error) => Err(error.to_string()),
+                };
+            }
+            Ok(false)
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[tauri::command]
+fn workspace_release_lock(root: String, name: String, owner: String) -> Result<bool, String> {
+    let lock_path = workspace_lock_path(&root, &name)?;
+    if !lock_path.exists() {
+        return Ok(false);
+    }
+    let owner = normalize_lock_owner(&owner);
+    let Some(info) = read_workspace_lock_info(&lock_path) else {
+        return Ok(false);
+    };
+    if info.owner != owner {
+        return Ok(false);
+    }
+    fs::remove_file(lock_path).map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
+fn write_workspace_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let tmp_path = workspace_temp_path(path);
+    fs::write(&tmp_path, bytes).map_err(|error| error.to_string())?;
+    match fs::rename(&tmp_path, path) {
+        Ok(()) => Ok(()),
+        Err(rename_error) => {
+            if path.exists() {
+                fs::remove_file(path).map_err(|error| error.to_string())?;
+                fs::rename(&tmp_path, path).map_err(|error| {
+                    let _ = fs::remove_file(&tmp_path);
+                    error.to_string()
+                })
+            } else {
+                let _ = fs::remove_file(&tmp_path);
+                Err(rename_error.to_string())
+            }
+        }
+    }
+}
+
+fn workspace_temp_path(path: &Path) -> PathBuf {
+    let filename = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("mywiki-file");
+    path.with_file_name(format!(
+        ".{filename}.{}.{}.tmp",
+        std::process::id(),
+        now_millis()
+    ))
+}
+
+fn create_lock_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    file.write_all(bytes)
+}
+
+struct WorkspaceLockInfo {
+    owner: String,
+    expires_at: u64,
+}
+
+fn read_workspace_lock_info(path: &Path) -> Option<WorkspaceLockInfo> {
+    let raw = fs::read_to_string(path).ok()?;
+    let mut owner = String::new();
+    let mut expires_at = 0;
+    for line in raw.lines() {
+        if let Some(value) = line.strip_prefix("owner=") {
+            owner = value.trim().to_string();
+        } else if let Some(value) = line.strip_prefix("expires_at=") {
+            expires_at = value.trim().parse::<u64>().unwrap_or(0);
+        }
+    }
+    if owner.is_empty() {
+        return None;
+    }
+    Some(WorkspaceLockInfo { owner, expires_at })
+}
+
+fn workspace_lock_path(root: &str, name: &str) -> Result<PathBuf, String> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|value| value.is_ascii_alphanumeric() || value == '-' || value == '_' || value == '.')
+    {
+        return Err("Invalid workspace lock name.".to_string());
+    }
+    Ok(PathBuf::from(root).join(".mywiki").join("locks").join(format!("{name}.lock")))
+}
+
+fn normalize_lock_owner(owner: &str) -> String {
+    owner
+        .replace('\r', " ")
+        .replace('\n', " ")
+        .trim()
+        .chars()
+        .take(160)
+        .collect::<String>()
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn collect_markdown_files(path: &Path, files: &mut Vec<String>) -> Result<(), String> {
