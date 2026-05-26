@@ -203,19 +203,19 @@ const communityPalette = [
 ];
 
 const insightTypeLabels = {
-  'bridge-node': '桥接',
-  'knowledge-gap': '空白',
-  'surprising-link': '连接',
-  'sparse-community': '低凝聚',
-  'dense-hub': '高密',
+  'bridge-node': '桥接节点',
+  'knowledge-gap': '资料缺口',
+  'surprising-link': '待核对关系',
+  'sparse-community': '松散社区',
+  'dense-hub': '核心枢纽',
 } as const;
 
 const insightReasonLabels: Record<GraphInsight['type'], string> = {
-  'bridge-node': '连接多个社群，适合作为追问入口',
-  'knowledge-gap': '来源或关系偏少，需要补证据',
-  'surprising-link': '跨类型或跨社群，适合核对上下文',
-  'sparse-community': '同一社群内部连接弱，建议补交叉引用',
-  'dense-hub': '连接密集，可作为主题索引',
+  'bridge-node': '连接多个知识社区，适合作为追问或研究入口。',
+  'knowledge-gap': '来源或关系偏少，适合补充资料和证据。',
+  'surprising-link': '跨类型或跨社区连接，适合核对上下文。',
+  'sparse-community': '同一社区内部连接较弱，适合补交叉引用。',
+  'dense-hub': '关系密集，适合作为主题索引入口。',
 };
 
 const GRAPH_WIDTH = 1900;
@@ -242,6 +242,8 @@ export function GraphPage() {
   const [zoom, setZoom] = useState(1);
   const [isGraphFullscreen, setIsGraphFullscreen] = useState(false);
   const [researchPanelOpen, setResearchPanelOpen] = useState(false);
+  const [researchNotice, setResearchNotice] = useState<string | null>(null);
+  const researchPanelRef = useRef<HTMLDivElement | null>(null);
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   const [selectedInsightId, setSelectedInsightId] = useState<string | null>(null);
   const [researchDraft, setResearchDraft] = useState<{
@@ -571,7 +573,13 @@ export function GraphPage() {
     queueResearch(topic, { searchQueries: queries.length ? queries : [topic] });
     setResearchDraft(null);
     setResearchPanelOpen(true);
+    setResearchNotice(`已开始研究：${topic}`);
   }
+
+  useEffect(() => {
+    if (!researchPanelOpen) return;
+    researchPanelRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }, [researchPanelOpen, researchNotice]);
 
   const graphPanelClass = [
     'flex flex-col overflow-hidden rounded-[12px] border border-[#d9d9d6] bg-white',
@@ -886,6 +894,25 @@ export function GraphPage() {
             </div>
           </section>
 
+          {researchPanelOpen ? (
+            <div ref={researchPanelRef} className="space-y-3">
+              {researchNotice ? (
+                <div className="flex items-start justify-between gap-3 rounded-[10px] border border-[#bfd2ff] bg-[#f4f8ff] px-3 py-2 text-xs leading-5 text-[#315078]">
+                  <span>{researchNotice}</span>
+                  <button
+                    type="button"
+                    onClick={() => setResearchNotice(null)}
+                    className="inline-flex size-5 shrink-0 items-center justify-center rounded-full text-[#626965] hover:bg-white"
+                    title="关闭提示"
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              ) : null}
+              <ResearchPanel compact />
+            </div>
+          ) : null}
+
           <section className="rounded-[12px] border border-[#e5e5e4] bg-white p-5">
             <div className="flex items-center justify-between gap-3">
               <div className="flex items-center gap-2">
@@ -898,10 +925,16 @@ export function GraphPage() {
               <button
                 type="button"
                 onClick={() => setResearchPanelOpen((value) => !value)}
-                className="inline-flex items-center gap-1 rounded-full border border-[#d9d9d6] bg-white px-2.5 py-1 text-xs text-[#155eef] hover:bg-[#f4f8ff]"
+                className={[
+                  'inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition',
+                  researchPanelOpen
+                    ? 'border-[#155eef] bg-[#155eef] text-white'
+                    : 'border-[#d9d9d6] bg-white text-[#155eef] hover:bg-[#f4f8ff]',
+                ].join(' ')}
+                title={researchPanelOpen ? '收起研究面板' : '打开研究面板'}
               >
                 <Search size={13} />
-                研究
+                {researchPanelOpen ? '收起研究' : '研究面板'}
               </button>
             </div>
             {visibleInsights.length === 0 ? (
@@ -921,13 +954,14 @@ export function GraphPage() {
                         : 'border-[#e5e5e4] bg-[#fbfbfa] hover:border-[#b8cdf7]',
                     ].join(' ')}
                     onClick={() => setSelectedInsightId((current) => (current === insight.id ? null : insight.id))}
+                    title="点击高亮相关节点"
                   >
                     <div className="flex items-start gap-2">
                       <InsightIcon type={insight.type} />
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="rounded-full border border-[#d9d9d6] bg-white px-2 py-0.5 text-[11px] text-[#155eef]">
-                            {insightTypeLabels[insight.type]}
+                            类型：{insightTypeLabels[insight.type]}
                           </span>
                           <h4 className="text-sm font-semibold text-[#1f2937]">{insight.title}</h4>
                         </div>
@@ -957,9 +991,10 @@ export function GraphPage() {
                               openResearchDraftFromInsight(insight);
                             }}
                             className="mt-3 inline-flex items-center gap-1 rounded-full border border-[#155eef] bg-white px-3 py-1.5 text-xs font-medium text-[#155eef] hover:bg-[#eef4ff]"
+                            title="根据这条洞察发起网页搜索和研究总结"
                           >
                             <Search size={13} />
-                            发起深度研究
+                            用这条洞察发起研究
                           </button>
                         ) : null}
                       </div>
@@ -970,7 +1005,7 @@ export function GraphPage() {
                           void dismissInsight(insight);
                         }}
                         className="inline-flex size-7 shrink-0 items-center justify-center rounded-full border border-[#d9d9d6] bg-white text-[#626965] transition hover:border-[#155eef] hover:text-[#155eef]"
-                        title="隐藏这条洞察"
+                        title="不再显示这条洞察"
                       >
                         <X size={13} />
                       </button>
@@ -985,7 +1020,6 @@ export function GraphPage() {
               </div>
             )}
           </section>
-          {researchPanelOpen ? <ResearchPanel compact /> : null}
         </aside>
       </div>
       {researchDraft ? (
@@ -994,7 +1028,10 @@ export function GraphPage() {
             <div className="flex items-start justify-between gap-3">
               <div>
                 <p className="text-xs font-medium text-[#155eef]">Deep Research</p>
-                <h3 className="mt-1 text-lg font-semibold text-[#1f2937]">确认研究主题</h3>
+                <h3 className="mt-1 text-lg font-semibold text-[#1f2937]">确认并开始研究</h3>
+                <p className="mt-2 text-sm leading-6 text-[#626965]">
+                  已根据当前洞察自动填好主题和搜索词。开始后会在右侧 Deep Research 面板执行，并显示搜索、总结和入库进度。
+                </p>
               </div>
               <button
                 type="button"
@@ -1006,7 +1043,7 @@ export function GraphPage() {
               </button>
             </div>
             <label className="mt-4 grid gap-2 text-sm font-medium text-[#1f2937]">
-              主题
+              研究主题
               <input
                 value={researchDraft.topic}
                 onChange={(event) => setResearchDraft({ ...researchDraft, topic: event.target.value })}
@@ -1014,14 +1051,17 @@ export function GraphPage() {
               />
             </label>
             <label className="mt-3 grid gap-2 text-sm font-medium text-[#1f2937]">
-              搜索 query（每行一个）
+              搜索关键词（每行一个，可直接使用默认值）
               <textarea
                 value={researchDraft.queries}
                 onChange={(event) => setResearchDraft({ ...researchDraft, queries: event.target.value })}
                 className="min-h-28 resize-y rounded-[10px] border border-[#d9d9d6] px-3 py-2 text-sm leading-6 outline-none focus:border-[#155eef]"
               />
             </label>
-            <p className="mt-3 text-xs leading-5 text-[#626965]">{researchDraft.insight.detail}</p>
+            <div className="mt-3 rounded-[10px] border border-[#e5e5e4] bg-[#fbfbfa] px-3 py-2 text-xs leading-5 text-[#626965]">
+              <span className="font-medium text-[#1f2937]">研究原因：</span>
+              {researchDraft.insight.detail}
+            </div>
             <div className="mt-5 flex justify-end gap-2">
               <button
                 type="button"
@@ -1036,7 +1076,7 @@ export function GraphPage() {
                 className="inline-flex items-center gap-2 rounded-full bg-[#155eef] px-4 py-2 text-sm font-medium text-white hover:bg-[#0f4bcc]"
               >
                 <Search size={15} />
-                开始研究
+                开始并打开研究面板
               </button>
             </div>
           </div>

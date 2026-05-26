@@ -24,12 +24,17 @@ export function ResearchPanel({ compact = false }: ResearchPanelProps) {
   return (
     <section className="flex min-h-0 flex-col rounded-[12px] border border-[#e5e5e4] bg-white">
       <header className="shrink-0 border-b border-[#ececea] px-4 py-3">
-        <div className="flex items-center gap-2">
-          <Search size={16} className="text-[#155eef]" />
-          <h3 className="text-sm font-semibold text-[#1f2937]">Deep Research</h3>
-          {tasks.some((task) => isRunning(task.status)) ? (
-            <span className="rounded-full bg-[#eef4ff] px-2 py-0.5 text-[11px] text-[#155eef]">running</span>
-          ) : null}
+        <div className="flex items-start gap-2">
+          <Search size={16} className="mt-0.5 text-[#155eef]" />
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="text-sm font-semibold text-[#1f2937]">Deep Research</h3>
+              {tasks.some((task) => isRunning(task.status)) ? (
+                <span className="rounded-full bg-[#eef4ff] px-2 py-0.5 text-[11px] text-[#155eef]">执行中</span>
+              ) : null}
+            </div>
+            <p className="mt-1 text-xs leading-5 text-[#626965]">网页搜索、总结并保存为可入库的研究条目。</p>
+          </div>
         </div>
       </header>
 
@@ -59,7 +64,7 @@ export function ResearchPanel({ compact = false }: ResearchPanelProps) {
       <div className={['min-h-0 flex-1 overflow-auto p-3', compact ? 'max-h-[420px]' : ''].join(' ')}>
         {tasks.length === 0 ? (
           <div className="rounded-[10px] border border-dashed border-[#d9d9d6] bg-[#fbfbfa] p-4 text-sm leading-6 text-[#626965]">
-            从图谱知识空白或这里手动发起研究。完成后会保存为原始研究条目，并尝试自动摄入 Wiki。
+            研究任务会显示在这里。完成后会保存为原始研究条目，并尝试自动摄入 Wiki。
           </div>
         ) : (
           <div className="grid gap-3">

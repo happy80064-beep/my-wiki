@@ -44,6 +44,7 @@ export function buildGraphOverview(entities: Entity[], relationships: Relationsh
     ...findDenseHubInsights(entities, adjacency, degreeByEntity),
   ]
     .sort((a, b) => b.priority - a.priority || a.title.localeCompare(b.title, 'zh-Hans-CN'))
+    .filter(uniqueInsightById())
     .slice(0, 12);
 
   return {
@@ -53,6 +54,15 @@ export function buildGraphOverview(entities: Entity[], relationships: Relationsh
     orphanCount: [...degreeByEntity.values()].filter((degree) => degree === 0).length,
     hubCount: insights.filter((insight) => insight.type === 'dense-hub').length,
     insights,
+  };
+}
+
+function uniqueInsightById() {
+  const seen = new Set<string>();
+  return (insight: GraphInsight) => {
+    if (seen.has(insight.id)) return false;
+    seen.add(insight.id);
+    return true;
   };
 }
 

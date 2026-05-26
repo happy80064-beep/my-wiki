@@ -25,6 +25,13 @@ describe('graph insights', () => {
       expect.arrayContaining(['bridge-node', 'knowledge-gap', 'surprising-link', 'dense-hub']),
     );
   });
+
+  it('deduplicates repeated insight ids before rendering graph diagnostics', () => {
+    const orphan = entity('topic_1', 'topic', '待补主题', []);
+    const overview = buildGraphOverview([orphan, orphan], []);
+
+    expect(overview.insights.filter((insight) => insight.id === 'knowledge-gap:topic_1')).toHaveLength(1);
+  });
 });
 
 function entity(id: string, type: Entity['type'], title: string, sourceEntries: string[]): Entity {
