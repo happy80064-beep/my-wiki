@@ -80,11 +80,14 @@ describe('workspace file-first store', () => {
     await syncWorkspaceRecordsToDefaultWorkspace(mocks.workspaceRoot);
 
     const recordsPath = `${mocks.workspaceRoot}/.mywiki/records.json`;
+    const snapshotPath = `${mocks.workspaceRoot}/.mywiki/snapshots/records.latest.json`;
     const migrationPath = `${mocks.workspaceRoot}/.mywiki/migration-state.json`;
     const wikiPath = `${mocks.workspaceRoot}/wiki/concepts/文件优先存储.md`;
     expect(mocks.files.has(recordsPath)).toBe(true);
+    expect(mocks.files.has(snapshotPath)).toBe(true);
     expect(mocks.files.has(migrationPath)).toBe(true);
     expect(mocks.files.get(recordsPath)).toContain(entity.id);
+    expect(mocks.files.get(snapshotPath)).toContain(entity.id);
     expect(mocks.files.get(migrationPath)).toContain('"status": "migrated"');
     expect(mocks.files.has(wikiPath)).toBe(true);
 
@@ -100,6 +103,141 @@ describe('workspace file-first store', () => {
       id: entry.id,
       content: '真实用例：文件优先存储验证。',
     });
+  });
+
+  it('repairs a damaged records.json from the latest valid snapshot without markdown fallback', async () => {
+    const entry = await createEntry({
+      content: 'lossless workspace switch source',
+      source: 'text',
+      processed: true,
+    });
+    const entity = await createEntity({
+      type: 'project',
+      title: 'Lossless Workspace Switch',
+      summary: 'Validates records snapshot recovery.',
+      sourceEntries: [entry.id],
+    });
+
+    await syncWorkspaceRecordsToDefaultWorkspace(mocks.workspaceRoot);
+
+    const recordsPath = `${mocks.workspaceRoot}/.mywiki/records.json`;
+    const originalRecords = mocks.files.get(recordsPath) ?? '';
+    mocks.files.set(recordsPath, '\0'.repeat(originalRecords.length || 32));
+    clearWorkspaceRecordRuntimeCache();
+
+    const restored = await restoreWorkspaceRecordsFromWorkspace(mocks.workspaceRoot);
+
+    expect(restored?.mode).toBe('records');
+    expect(mocks.files.get(recordsPath)).toContain(entity.id);
+    expect(await db.entities.get(entity.id)).toMatchObject({
+      id: entity.id,
+      title: 'Lossless Workspace Switch',
+    });
+  });
+
+  it('does not silently downgrade to markdown after a records migration failure', async () => {
+    const recordsPath = `${mocks.workspaceRoot}/.mywiki/records.json`;
+    const migrationPath = `${mocks.workspaceRoot}/.mywiki/migration-state.json`;
+    mocks.files.delete(recordsPath);
+    mocks.files.set(
+      migrationPath,
+      JSON.stringify({
+        version: 1,
+        status: 'failed',
+        source: 'workspace-records',
+        failedAt: Date.now(),
+        error: 'Unexpected token \\0',
+      }),
+    );
+    mocks.files.set(`${mocks.workspaceRoot}/wiki/concepts/fallback.md`, '# Fallback');
+    clearWorkspaceRecordRuntimeCache();
+
+    await expect(restoreWorkspaceRecordsFromWorkspace(mocks.workspaceRoot)).rejects.toThrow(/Lossless workspace switch stopped/);
+  });
+
+  it('repairs old degraded markdown-restore records when workspace markdown is richer', async () => {
+    const recordsPath = `${mocks.workspaceRoot}/.mywiki/records.json`;
+    mocks.files.set(
+      recordsPath,
+      JSON.stringify({
+        version: 1,
+        createdAt: 1,
+        updatedAt: 1,
+        records: {
+          entries: [],
+          entities: [
+            {
+              id: 'project_furui',
+              clientId: 'test-client',
+              type: 'project',
+              title: '福瑞三期',
+              summary: '',
+              tags: [],
+              scenes: [],
+              properties: { status: 'active' },
+              sourceEntries: [],
+              createdAt: 1,
+              updatedAt: 1,
+            },
+          ],
+          relationships: [],
+          tasks: [],
+          compileSuggestions: [],
+          ingestJobs: [],
+          ingestCache: [],
+          graphInsightDismissals: [],
+          rawAssets: [],
+          queryCache: [],
+          wikiBatchJobs: [],
+          wikiReviewItems: [],
+        },
+      }),
+    );
+    mocks.files.set(
+      `${mocks.workspaceRoot}/raw/entries/entry_report.md`,
+      [
+        '---',
+        'id: "entry_report"',
+        'type: "raw-entry"',
+        'source: "file"',
+        'capturedAt: 1779859967907',
+        'processed: true',
+        '---',
+        '',
+        '# 捕获原文 entry_report',
+        '',
+        '## 原文',
+        '',
+        '# 导入文件：report.pdf',
+        '',
+        '福瑞三期项目原文。',
+      ].join('\n'),
+    );
+    mocks.files.set(
+      `${mocks.workspaceRoot}/wiki/projects/福瑞三期.md`,
+      [
+        '---',
+        'id: "project_furui"',
+        'type: project',
+        'title: "福瑞三期"',
+        'tags: ["project"]',
+        'sources: ["report.pdf"]',
+        '---',
+        '',
+        '# 福瑞三期',
+        '',
+        '## 摘要',
+        '这是磁盘上的完整 Wiki 正文。',
+      ].join('\n'),
+    );
+    clearWorkspaceRecordRuntimeCache();
+
+    await restoreWorkspaceRecordsFromWorkspace(mocks.workspaceRoot);
+
+    const restored = await db.entities.get('project_furui');
+    expect(restored?.wikiMarkdown).toContain('这是磁盘上的完整 Wiki 正文。');
+    expect(restored?.sourceEntries).toEqual(['entry_report']);
+    expect(mocks.files.get(recordsPath)).toContain('这是磁盘上的完整 Wiki 正文。');
   });
 
   it('reloads raw asset bytes from records.json dataBase64 when only an empty Blob remains in runtime state', async () => {

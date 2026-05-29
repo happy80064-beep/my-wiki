@@ -2,15 +2,25 @@
 
 MyWiki 是一个本地优先的个人 AI 知识中枢。它把 PDF、Word、Excel、PPT、图片、网页、压缩包和文本等原始材料放入统一工作区，经过结构化入库和 Wiki 编译后，生成可阅读、可检索、可追溯、可持续编辑的 Markdown Wiki。
 
-当前仓库版本：`v0.1.8`
+当前仓库版本：`v0.1.9`
 
 最新安装包：<https://github.com/happy80064-beep/my-wiki/releases/latest>
 
 ## 当前状态
 
-`v0.1.8` 是内测 MVP 的 Query 工作台和图谱体验修订版本，基于 `v0.1.7` 的本地工作区、查询、图谱、Raw Inbox/Frog 编译链路，重点改善长对话回看、回答等待过程可见性、大图谱可视化稳定性，以及图谱洞察与 Deep Research 的可理解性。
+`v0.1.9` 是内测 MVP 的工作区数据安全热修复版本，基于 `v0.1.8` 的 Query、图谱和 Raw Inbox/Frog 编译链路，重点修复旧/已有项目文件夹切库时 `records.json` 损坏、缺失或迁移失败后被静默降级为“未生成 Wiki”空壳词条的问题。
 
-本版本相对 `v0.1.7` 的主要更新：
+本版本相对 `v0.1.8` 的主要更新：
+
+1. `.mywiki/records.json` 写入前会生成可恢复快照：`.mywiki/snapshots/records.latest.json` 和 `.mywiki/snapshots/records.previous.json`，主记录文件损坏时优先从快照恢复。
+2. 切换旧/已有工作区时，如果检测到前一次 records 迁移失败且没有有效记录或快照，会显式停止切库并报错，不再自动降级到 Markdown 预览重建，避免把完整库覆盖成空壳词条。
+3. Markdown 工作区恢复增强：从 `wiki/` 和 `raw/entries/` 重建记录时会保留 Wiki 正文、`sources` 来源绑定和 `related` 关系，批量生成/更新可以继续找到可用来源原文。
+4. 对已经被旧版本降级过的 records，应用会在磁盘 Markdown 更完整时自动修复为更丰富的记录状态，不再长期停留在“全部未生成、无来源”的错误状态。
+5. 增加工作区恢复回归测试，覆盖损坏 records 快照恢复、迁移失败禁止静默降级、Markdown 恢复保留正文/来源/关系，以及旧降级记录自动修复。
+
+`v0.1.8` 的 Query、图谱和工作区体验修订继续保留：
+
+`v0.1.8` 相对 `v0.1.7` 的主要更新：
 
 1. 查询页进入或切换会话后会自动定位到最近一轮对话，长对话不再需要用户手动一直向下翻。
 2. 查询回答卡片增加 `Thought for N lines` 折叠块：生成中展示处理过程，生成完成后默认折叠，正文回答仍保持原有输出内容和结构。
@@ -60,6 +70,7 @@ MyWiki 是一个本地优先的个人 AI 知识中枢。它把 PDF、Word、Exce
 - 图谱洞察和 Deep Research 交互修订已通过本地 Vite 浏览器验证：洞察卡片显示明确类型标签和研究入口，确认弹窗会说明默认主题/关键词，研究面板不会被洞察卡片挤到列表下方；修复后未再出现图谱诊断 duplicate key 控制台错误。对应单元测试覆盖从桥接洞察发起研究后必须显示研究面板和队列状态；全量 `npm test` 通过 440 个测试。
 - 知识树删除回归用例已验证单页删除、type 分组删除、二次确认、重复点击锁定和关联关系/来源引用级联清理。
 - Wiki 页 Related 标签跳转已使用真实知识库 `D:\MyWiki-MVP\工作-wiki-2026` 回归：从“内蒙古福瑞医疗科技股份有限公司”通过 `concepts/数字生命研发专项计划` 跳到目标 Wiki 后等待刷新仍停留在目标页；新增单元测试覆盖从 `?ref=` 打开 A、点击 related 到 B、再触发数据刷新时不得回跳 A；本机 Windows 桌面包 `.msi` / `.exe` 生成通过。
+- 工作区切库数据安全修复已使用真实旧库 `D:\MyWiki-MVP\工作-wiki-2026` 只读核验：确认旧 `records.json` 曾被写成全 0 后会导致静默降级；新增恢复链路后，损坏 records 会优先从快照恢复，无法无损恢复时会停止切库并显式提示，而不是覆盖成“未生成 Wiki”空壳记录。相关 `db/workspace/export/wiki` 回归测试通过 120 个测试，本机 Windows `v0.1.9` `.msi` / `.exe` 生成通过。
 - 本机环境为 Windows，macOS `.dmg` 无法在本机安装运行。macOS 包通过 GitHub Actions 的 `macos-latest` runner 执行 `pnpm test` 与 `pnpm desktop:build:macos` 后生成。
 - 音视频链路已按官方 MarkItDown 文档重新确认：ffmpeg 只能解决解码/抽轨，不能提供稳定中文 ASR；本版本已撤下音视频入口和组件发布，避免把不可控转写失败、超时或降级当作通过。
 
@@ -67,9 +78,9 @@ MyWiki 是一个本地优先的个人 AI 知识中枢。它把 PDF、Word、Exce
 
 | 平台 | 文件 | 说明 |
 | --- | --- | --- |
-| Windows | `MyWiki_0.1.8_x64-setup.exe` | 推荐给普通 Windows 用户的安装包 |
-| Windows | `MyWiki_0.1.8_x64_en-US.msi` | Windows MSI 安装包 |
-| macOS | `MyWiki_0.1.8_aarch64.dmg` | Apple Silicon Mac 推荐安装包 |
+| Windows | `MyWiki_0.1.9_x64-setup.exe` | 推荐给普通 Windows 用户的安装包 |
+| Windows | `MyWiki_0.1.9_x64_en-US.msi` | Windows MSI 安装包 |
+| macOS | `MyWiki_0.1.9_aarch64.dmg` | Apple Silicon Mac 推荐安装包 |
 | macOS | `MyWiki_macos_ARM64.app.zip` | Apple Silicon Mac app 压缩包 |
 
 > 说明：当前 macOS 包是 ARM64 / Apple Silicon 版本。iOS 分发不是普通桌面安装包链路，需要后续单独规划 TestFlight、App Store 或企业签名分发。
@@ -138,7 +149,7 @@ pnpm desktop:build:macos
 
 1. 同步 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json`、`src-tauri/tauri.macos.conf.json` 的版本号。
 2. 合并并推送到 `main`。
-3. 创建并推送 tag，例如 `v0.1.8`。
+3. 创建并推送 tag，例如 `v0.1.9`。
 4. `Release Packages` workflow 构建 Windows/macOS 安装包并生成 SHA256 校验文件。
 5. workflow 创建或更新 GitHub Release，客户端通过 `/releases/latest` 检查更新。
 

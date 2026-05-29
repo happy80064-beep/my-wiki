@@ -4,6 +4,7 @@ import {
   createWorkspaceRecordState,
   clearWorkspaceRecordRuntimeCache,
   db,
+  readWorkspaceRecordStateWithRecovery,
   replaceWorkspaceRecordState,
   type WorkspaceRecordState,
 } from '@/lib/db/schema';
@@ -116,7 +117,11 @@ async function loadWorkspaceRecordsAsRuntime(storage: TauriWorkspaceStorage, roo
 
   try {
     if (await storage.exists(layout.recordsState)) {
-      const state = parseWorkspaceRecordState(await storage.readTextFile(layout.recordsState));
+      const state = await repairDegradedRecordStateFromMarkdownIfRicher(
+        storage,
+        layout.root,
+        await readWorkspaceRecordStateWithRecovery(storage, layout.recordsState),
+      );
       clearWorkspaceRecordRuntimeCache();
       await replaceWorkspaceRecordState(state);
       const counts = countWorkspaceRecords(state);
@@ -128,6 +133,10 @@ async function loadWorkspaceRecordsAsRuntime(storage: TauriWorkspaceStorage, roo
         counts,
       });
       return { root: layout.root, mode: 'records', counts };
+    }
+
+    if (await hasFailedRecordsMigration(storage, layout.migrationState)) {
+      throw new Error('Lossless workspace switch stopped: records.json is missing after a previous records migration failure. A valid records.json or .mywiki/snapshots backup is required before using Markdown recovery.');
     }
 
     const records = parseMarkdownExportFileRecords(await readWorkspaceMarkdownFileRecords(storage, layout.root));
@@ -160,9 +169,46 @@ async function loadWorkspaceRecordsAsRuntime(storage: TauriWorkspaceStorage, roo
   }
 }
 
-function parseWorkspaceRecordState(json: string): WorkspaceRecordState {
-  const value = JSON.parse(json) as WorkspaceRecordState;
-  return createWorkspaceRecordState(value.records);
+async function repairDegradedRecordStateFromMarkdownIfRicher(
+  storage: TauriWorkspaceStorage,
+  root: string,
+  current: WorkspaceRecordState,
+) {
+  if (!looksLikeDegradedMarkdownRestore(current)) return current;
+  const records = parseMarkdownExportFileRecords(await readWorkspaceMarkdownFileRecords(storage, root));
+  const repaired = createWorkspaceRecordState(records);
+  if (recordRichnessScore(repaired) <= recordRichnessScore(current)) return current;
+
+  const layout = buildWorkspaceLayout(root);
+  await storage.writeTextFile(layout.recordsState, `${JSON.stringify(repaired, null, 2)}\n`);
+  return repaired;
+}
+
+function looksLikeDegradedMarkdownRestore(state: WorkspaceRecordState) {
+  const entityCount = state.records.entities.length;
+  if (entityCount === 0) return false;
+  const wikiReady = state.records.entities.filter((entity) => entity.wikiMarkdown?.trim()).length;
+  const sourceBacked = state.records.entities.filter((entity) => entity.sourceEntries.length > 0).length;
+  return wikiReady <= Math.max(1, Math.floor(entityCount * 0.1)) && sourceBacked <= Math.max(1, Math.floor(entityCount * 0.1)) && state.records.relationships.length === 0;
+}
+
+function recordRichnessScore(state: WorkspaceRecordState) {
+  return (
+    state.records.entities.filter((entity) => entity.wikiMarkdown?.trim()).length * 10
+    + state.records.entities.filter((entity) => entity.sourceEntries.length > 0).length * 5
+    + state.records.relationships.length
+  );
+}
+
+async function hasFailedRecordsMigration(storage: TauriWorkspaceStorage, migrationStatePath: string) {
+  if (!(await storage.exists(migrationStatePath))) return false;
+  try {
+    const raw = await storage.readTextFile(migrationStatePath);
+    const state = JSON.parse(raw) as Partial<MigrationState>;
+    return state.status === 'failed' && state.source === 'workspace-records';
+  } catch {
+    return false;
+  }
 }
 
 async function readWorkspaceMarkdownFileRecords(storage: TauriWorkspaceStorage, root: string) {

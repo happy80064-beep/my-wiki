@@ -5,7 +5,7 @@ import {
   isSafeExportPath,
   serializeMarkdownExportBundle,
 } from '@/lib/export/markdown';
-import { parseMarkdownExportZip } from '@/lib/export/importMarkdown';
+import { parseMarkdownExportFileRecords, parseMarkdownExportZip } from '@/lib/export/importMarkdown';
 import type { Entity, Entry, Relationship, Task } from '@/types';
 
 describe('markdown export', () => {
@@ -253,5 +253,77 @@ describe('markdown export', () => {
     expect(records.entities).toHaveLength(1);
     expect(records.entities[0]).toEqual(expect.objectContaining({ id: project.id, title: project.title }));
     expect(records.entries[0]?.derivedEntities).toContain(project.id);
+  });
+
+  it('preserves wiki markdown and source links when restoring from a workspace folder', () => {
+    const records = parseMarkdownExportFileRecords([
+      {
+        path: 'raw/entries/entry_report.md',
+        content: [
+          '---',
+          'id: "entry_report"',
+          'type: "raw-entry"',
+          'source: "file"',
+          'capturedAt: 1779859967907',
+          'processed: true',
+          '---',
+          '',
+          '# 捕获原文 entry_report',
+          '',
+          '## 原文',
+          '',
+          '# 导入文件：report.pdf',
+          '',
+          '来源格式：PDF',
+          '',
+          '福瑞三期项目原文。',
+        ].join('\n'),
+      },
+      {
+        path: 'wiki/projects/福瑞三期.md',
+        content: [
+          '---',
+          'id: "project_furui"',
+          'type: project',
+          'title: "福瑞三期"',
+          'created: 2026-05-27',
+          'updated: 2026-05-28',
+          'tags: ["project"]',
+          'sources: ["report.pdf"]',
+          'related: ["concepts/价值医疗"]',
+          '---',
+          '',
+          '# 福瑞三期',
+          '',
+          '## 摘要',
+          '这是已经生成的 Wiki 正文。',
+        ].join('\n'),
+      },
+      {
+        path: 'wiki/concepts/价值医疗.md',
+        content: [
+          '---',
+          'id: "concept_value"',
+          'type: concept',
+          'title: "价值医疗"',
+          'tags: ["concept"]',
+          '---',
+          '',
+          '# 价值医疗',
+          '',
+          '## 摘要',
+          '价值医疗正文。',
+        ].join('\n'),
+      },
+    ]);
+
+    const project = records.entities.find((entity) => entity.id === 'project_furui');
+    expect(project?.wikiMarkdown).toContain('这是已经生成的 Wiki 正文。');
+    expect(project?.sourceEntries).toEqual(['entry_report']);
+    expect(records.relationships).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ from: 'project_furui', to: 'concept_value', type: 'related-to' }),
+      ]),
+    );
   });
 });

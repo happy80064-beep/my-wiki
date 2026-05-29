@@ -95,27 +95,36 @@ export function parseMarkdownExportFileRecords(files: MarkdownFileRecord[]): Mar
   const rawFiles = files.filter((item) => /^raw\/entries\/[^/]+\.md$/.test(normalizePath(item.path)));
   const clientId = getClientId();
   const pathToEntityId = new Map<string, string>();
+  const rawEntryKeys = new Map<string, string>();
 
   for (const item of entityFiles) {
     const { data } = parseFrontmatter(item.content);
-    if (typeof data.id === 'string') {
-      pathToEntityId.set(stripMd(normalizePath(item.path)), data.id);
-    }
+    const type = inferEntityTypeFromWikiFile(item.path, data);
+    const id = typeof data.id === 'string' ? data.id : `${type}_import_${hash(normalizePath(item.path))}`;
+    const wikiPath = stripMd(normalizePath(item.path));
+    pathToEntityId.set(wikiPath, id);
+    if (wikiPath.startsWith('wiki/')) pathToEntityId.set(wikiPath.slice('wiki/'.length), id);
   }
 
   const entries: Entry[] = rawFiles.map((item): Entry => {
     const { data, body } = parseFrontmatter(item.content);
     const id = typeof data.id === 'string' ? data.id : stripMd(normalizePath(item.path)).split('/').pop()!;
+    const content = section(body, '原文') || section(body, '鍘熸枃') || body.trim();
+    const filename = extractImportedFilename(content);
+    for (const key of buildRawEntryMatchKeys(id, filename, content)) {
+      rawEntryKeys.set(key, id);
+    }
     const derivedEntities = parseWikiLinks(section(body, '关联实体'))
       .map((link) => pathToEntityId.get(link.path))
       .filter((id): id is string => Boolean(id));
     return {
       id,
       clientId,
-      content: section(body, '原文') || body.trim(),
+      content,
       source: data.source === 'image' || data.source === 'voice' || data.source === 'file' || data.source === 'paste'
         ? data.source
         : 'text',
+      fileMetadata: filename ? { filename, mimeType: '', url: '' } : undefined,
       capturedAt: numeric(data.capturedAt) ?? Date.now(),
       processed: data.processed !== false,
       derivedEntities: unique(derivedEntities),
@@ -128,22 +137,37 @@ export function parseMarkdownExportFileRecords(files: MarkdownFileRecord[]): Mar
   const entities = entityFiles.map((item) => {
     const { data, body } = parseFrontmatter(item.content);
     const type = inferEntityTypeFromWikiFile(item.path, data);
-    const createdAt = numeric(data.createdAt) ?? Date.now();
-    const sourceEntries = parseWikiLinks(section(body, '来源'))
-      .map((link) => link.path.match(/^raw\/entries\/([^/]+)$/)?.[1])
-      .filter((id): id is string => Boolean(id && entryById.has(id)));
+    const createdAt = numeric(data.createdAt) ?? dateMillis(data.created) ?? Date.now();
+    const updatedAt = numeric(data.updatedAt) ?? dateMillis(data.updated) ?? createdAt;
+    const sourceEntries = unique([
+      ...parseWikiLinks(section(body, '来源') || section(body, '鏉ユ簮'))
+        .map((link) => link.path.match(/^raw\/entries\/([^/]+)$/)?.[1])
+        .filter((id): id is string => Boolean(id && entryById.has(id))),
+      ...sourceValues(data)
+        .map((source) => matchSourceToRawEntry(source, rawEntryKeys))
+        .filter((id): id is string => Boolean(id)),
+    ]);
+    const wikiMarkdown = item.content.trim();
+    const isStructuredOnly = data.mywiki_status === 'structured_only' || /未生成完整\s*Wiki|structured_only/i.test(wikiMarkdown);
     return {
       id: typeof data.id === 'string' ? data.id : `${type}_import_${hash(normalizePath(item.path))}`,
       clientId,
       type,
-      title: title(body) || stripMd(normalizePath(item.path)).split('/').pop() || 'Untitled',
+      title: stringDataValue(data.title) || title(body) || stripMd(normalizePath(item.path)).split('/').pop() || 'Untitled',
       summary: summary(body),
       tags: Array.isArray(data.tags) ? data.tags.map(String) : [],
       scenes: normalizeScenes(data.scenes),
       properties: parseProperties(type, createdAt, section(body, '属性')),
       sourceEntries: unique(sourceEntries),
       createdAt,
-      updatedAt: numeric(data.updatedAt) ?? createdAt,
+      updatedAt,
+      ...(wikiMarkdown && !isStructuredOnly
+        ? {
+            wikiMarkdown,
+            wikiCompiledAt: updatedAt,
+            wikiCompileModel: 'workspace-markdown',
+          }
+        : {}),
     } as Entity;
   });
   const entityById = new Map(entities.map((entity) => [entity.id, entity]));
@@ -155,7 +179,12 @@ export function parseMarkdownExportFileRecords(files: MarkdownFileRecord[]): Mar
     const currentId = typeof data.id === 'string' ? data.id : undefined;
     if (!currentId || !entityById.has(currentId)) continue;
 
-    for (const line of section(body, '关系').split(/\r?\n/)) {
+    for (const relatedPath of sourceValues({ related: data.related })) {
+      const targetId = pathToEntityId.get(normalizePath(relatedPath));
+      if (targetId) pushRelationship(currentId, targetId, 'related-to');
+    }
+
+    for (const line of (section(body, '关系') || section(body, '鍏崇郴')).split(/\r?\n/)) {
       const match = line.match(/^-\s*([→←])\s*([^:：]+)[:：]\s*(.+)$/);
       if (!match) continue;
       const type = relationshipTypes.has(match[2].trim() as RelationshipType)
@@ -166,22 +195,7 @@ export function parseMarkdownExportFileRecords(files: MarkdownFileRecord[]): Mar
       if (!targetId || !entityById.has(targetId)) continue;
       const from = match[1] === '→' ? currentId : targetId;
       const to = match[1] === '→' ? targetId : currentId;
-      const key = `${from}|${to}|${type}`;
-      if (relationshipSeen.has(key)) continue;
-      relationshipSeen.add(key);
-
-      const fromEntity = entityById.get(from);
-      const toEntity = entityById.get(to);
-      const evidence = unique([...(fromEntity?.sourceEntries ?? []), ...(toEntity?.sourceEntries ?? [])]).slice(0, 3);
-      relationships.push({
-        id: `rel_import_${hash(key)}`,
-        clientId,
-        from,
-        to,
-        type,
-        evidence,
-        createdAt: Math.max(fromEntity?.updatedAt ?? Date.now(), toEntity?.updatedAt ?? Date.now()),
-      });
+      pushRelationship(from, to, type);
     }
   }
 
@@ -198,6 +212,77 @@ export function parseMarkdownExportFileRecords(files: MarkdownFileRecord[]): Mar
   }
 
   return { entries, entities, relationships, tasks };
+
+  function pushRelationship(from: string, to: string, type: RelationshipType) {
+    if (from === to || !entityById.has(from) || !entityById.has(to)) return;
+    const key = `${from}|${to}|${type}`;
+    if (relationshipSeen.has(key)) return;
+    relationshipSeen.add(key);
+
+    const fromEntity = entityById.get(from);
+    const toEntity = entityById.get(to);
+    const evidence = unique([...(fromEntity?.sourceEntries ?? []), ...(toEntity?.sourceEntries ?? [])]).slice(0, 3);
+    relationships.push({
+      id: `rel_import_${hash(key)}`,
+      clientId,
+      from,
+      to,
+      type,
+      evidence,
+      createdAt: Math.max(fromEntity?.updatedAt ?? Date.now(), toEntity?.updatedAt ?? Date.now()),
+    });
+  }
+}
+
+function extractImportedFilename(content: string) {
+  return content.match(/^#\s*导入文件[：:]\s*(.+)$/m)?.[1]?.trim();
+}
+
+function buildRawEntryMatchKeys(id: string, filename: string | undefined, content: string) {
+  const keys = new Set<string>([normalizeMatchKey(id)]);
+  if (filename) {
+    keys.add(normalizeMatchKey(filename));
+    keys.add(normalizeMatchKey(stripExtension(filename)));
+  }
+  const importedTitle = content.match(/^#\s*导入网页[：:]\s*(.+)$/m)?.[1]?.trim();
+  if (importedTitle) keys.add(normalizeMatchKey(importedTitle));
+  return [...keys].filter(Boolean);
+}
+
+function matchSourceToRawEntry(source: string, rawEntryKeys: Map<string, string>) {
+  const normalized = normalizeMatchKey(source);
+  if (!normalized) return undefined;
+  return rawEntryKeys.get(normalized) ?? rawEntryKeys.get(normalizeMatchKey(stripExtension(source)));
+}
+
+function sourceValues(data: Record<string, unknown>) {
+  const value = data.sources ?? data.related;
+  if (Array.isArray(value)) return value.map(String).filter(Boolean);
+  if (typeof value === 'string' && value.trim()) return [value.trim()];
+  return [];
+}
+
+function stringDataValue(value: unknown) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function dateMillis(value: unknown) {
+  if (typeof value !== 'string') return undefined;
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? time : undefined;
+}
+
+function normalizeMatchKey(value: string | undefined) {
+  return (value ?? '')
+    .replace(/\\/g, '/')
+    .split('/')
+    .pop()!
+    .trim()
+    .toLowerCase();
+}
+
+function stripExtension(value: string) {
+  return value.replace(/\.[^.]+$/, '');
 }
 
 function parseStoredZipArchive(bytes: Uint8Array): MarkdownFileRecord[] {

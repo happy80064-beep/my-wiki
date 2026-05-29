@@ -10,6 +10,7 @@ import {
 } from '@/lib/workspace/storage';
 import { initializeWorkspace } from '@/lib/workspace/workspace';
 import { withWorkspaceLock, workspaceRootFromStatePath } from '@/lib/workspace/lock';
+import type { TauriWorkspaceStorage } from '@/lib/workspace/tauriStorage';
 import type {
   CompileSuggestionRecord,
   Entity,
@@ -68,6 +69,9 @@ const tableNames = [
 
 const rawAssetBlobStore = new Map<string, Blob>();
 const inMemoryWorkspaceRoot = 'memory://mywiki-test-workspace';
+const recordsSnapshotDir = 'snapshots';
+const latestRecordsSnapshot = 'records.latest.json';
+const previousRecordsSnapshot = 'records.previous.json';
 
 let activeRecordsPath: string | null = null;
 let activeState: WorkspaceRecordState | null = null;
@@ -454,6 +458,20 @@ export function clearWorkspaceRecordRuntimeCache() {
   activeState = null;
 }
 
+export async function readWorkspaceRecordStateWithRecovery(storage: TauriWorkspaceStorage, recordsPath: string) {
+  const raw = await storage.readTextFile(recordsPath);
+  try {
+    return parseState(raw);
+  } catch (error) {
+    const recovered = await readRecoverableSnapshotState(storage, recordsPath);
+    if (recovered) {
+      await storage.writeTextFile(recordsPath, recovered.serialized);
+      return recovered.state;
+    }
+    throw buildCorruptRecordsError(error);
+  }
+}
+
 async function enqueueWrite<T>(operation: (state: WorkspaceRecordState) => Promise<T> | T): Promise<T> {
   if (transactionState) {
     const result = await operation(transactionState);
@@ -502,13 +520,22 @@ async function loadState(): Promise<WorkspaceRecordState> {
   if (!(await storage.exists(recordsPath))) {
     activeRecordsPath = recordsPath;
     activeState = emptyWorkspaceRecordState();
-    await storage.writeTextFile(recordsPath, `${JSON.stringify(serializeState(activeState), null, 2)}\n`);
+    const serialized = `${JSON.stringify(serializeState(activeState), null, 2)}\n`;
+    await writeRecoverableSnapshot(storage, recordsPath, serialized);
+    await storage.writeTextFile(recordsPath, serialized);
     return activeState;
   }
 
   const raw = await storage.readTextFile(recordsPath);
   activeRecordsPath = recordsPath;
-  activeState = parseState(raw);
+  try {
+    activeState = parseState(raw);
+  } catch (error) {
+    const recovered = await readRecoverableSnapshotState(storage, recordsPath);
+    if (!recovered) throw buildCorruptRecordsError(error);
+    await storage.writeTextFile(recordsPath, recovered.serialized);
+    activeState = recovered.state;
+  }
   return activeState;
 }
 
@@ -519,9 +546,56 @@ async function persistState(state: WorkspaceRecordState) {
   }
   const recordsPath = await resolveRecordsPath();
   const storage = createWorkspaceStorage();
-  await storage.writeTextFile(recordsPath, `${JSON.stringify(serializeState(state), null, 2)}\n`);
+  const serialized = `${JSON.stringify(serializeState(state), null, 2)}\n`;
+  await writeRecoverableSnapshot(storage, recordsPath, serialized);
+  await storage.writeTextFile(recordsPath, serialized);
   activeRecordsPath = recordsPath;
   activeState = state;
+}
+
+async function writeRecoverableSnapshot(storage: TauriWorkspaceStorage, recordsPath: string, serialized: string) {
+  parseState(serialized);
+  const { latest, previous } = recordsSnapshotPaths(recordsPath);
+  if (await storage.exists(latest)) {
+    const currentLatest = await storage.readTextFile(latest);
+    try {
+      parseState(currentLatest);
+      await storage.writeTextFile(previous, currentLatest);
+    } catch {
+      // Ignore an already-corrupt snapshot; the new latest snapshot below is the recoverable copy.
+    }
+  }
+  await storage.writeTextFile(latest, serialized);
+}
+
+async function readRecoverableSnapshotState(storage: TauriWorkspaceStorage, recordsPath: string) {
+  const paths = recordsSnapshotPaths(recordsPath);
+  for (const snapshotPath of [paths.latest, paths.previous]) {
+    if (!(await storage.exists(snapshotPath))) continue;
+    const serialized = await storage.readTextFile(snapshotPath);
+    try {
+      const state = parseState(serialized);
+      return { state, serialized: serialized.endsWith('\n') ? serialized : `${serialized}\n` };
+    } catch {
+      // Try the next snapshot. If none are valid, the caller surfaces the original records.json error.
+    }
+  }
+  return undefined;
+}
+
+function recordsSnapshotPaths(recordsPath: string) {
+  const root = workspaceRootFromStatePath(recordsPath);
+  const layout = buildWorkspaceLayout(root);
+  const snapshotRoot = joinWorkspacePath(layout.state, recordsSnapshotDir);
+  return {
+    latest: joinWorkspacePath(snapshotRoot, latestRecordsSnapshot),
+    previous: joinWorkspacePath(snapshotRoot, previousRecordsSnapshot),
+  };
+}
+
+function buildCorruptRecordsError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return new Error(`Workspace records file is damaged and no valid recovery snapshot was found. Lossless workspace switch stopped: ${message}`);
 }
 
 async function resolveRecordsPath() {
